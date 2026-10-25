@@ -1,0 +1,170 @@
+{% extends "base.html" %}{% block body %}
+<div class="banner dashboard-banner"><div><span class="eyebrow">OUTSCRAPER · GOOGLE MAPS DIRECTIONS</span><h1>Directions requests</h1><p>Configure routes, preview the exact submission, then make a separate approval decision.</p></div><a class="btn alt" href="{{ url_for('admin') }}">Admin dashboard</a></div>
+<div class="outscraper-notice {{ 'ok' if api_configured else 'tip' }}" role="status">
+  {% if api_configured %}API key is configured on the server. Its value is never shown in this page.{% else %}API key not configured. Copy <code>.env.example</code> to <code>.env</code>, set <code>OUTSCRAPER_API_KEY</code>, then restart the app.{% endif %}
+  <p>Pricing is not verified for this endpoint: each preview says <b>Cost unknown</b>; provider billable units and actual per-request cost are unavailable. Execution remains blocked unless you explicitly approve despite that uncertainty.</p>
+</div>
+
+<section class="card">
+  <div class="section-heading"><div><h2>Configure routes</h2><p>Required: at least one origin and destination. Other request options are optional.</p></div></div>
+  {% if source_request %}<div class="tip source-request-tip"><b>Prepared from TrafficLens request REQ-{{source_request.id}} · {{SERVICES[source_request.service]}}</b><br>Study date: {{source_request.date}}{% if source_request.service=='travel' %} · Exact time range: {{source_request.start_time or '—'}}–{{source_request.end_time or '—'}} · Hourly periods: {{source_request.hours_label}}<br>One route is prepared from A to B. Departure and finish use the exact selected times in Kuwait local time. The interval is set to 1.{% else %}{% set holiday=prefill_config.trafficlens_context %}<br>Route country: {{holiday.country_name}} ({{holiday.country_code}}) · Local time zone: {{holiday.timezone}}<br>{% if holiday.reference_type=='weekly_weekend' %}Latest weekly weekend date before today: <b>{{holiday.weekend_day}} · {{holiday.weekend_date}}</b>{% else %}Nearest public holiday to the study date: <b>{{holiday.holiday_name}} · {{holiday.holiday_date}}</b>{% endif %} · Directions departure: <b>07:00</b> local time. This exact date and departure are bound to the approval and shown with the result.{% endif %} Edit any applicable route options below. Default mode is car; you can change it.<br>No request is sent until you review it and explicitly approve.</div>{% elif copied_job_id %}<div class="tip source-request-tip"><b>Copied configuration from Directions API request {{copied_job_id}}</b><br>Routes and options below are editable. This is a new request and requires a new approval.</div>{% endif %}
+  <div class="outscraper-route-toolbar"><h3>Routes</h3><button class="btn alt" id="addRoute" type="button">Add route</button></div>
+  <div class="tw"><table class="outscraper-routes"><thead><tr><th>#</th><th>Origin <span class="required-label">Required</span></th><th>Destination <span class="required-label">Required</span></th><th>Departure override <span class="optional-label">Optional</span></th><th></th></tr></thead><tbody id="routeRows"></tbody></table></div>
+  <p class="sub api-request-note">A route departure override uses the selected route's local time zone when prepared from a holiday-based free flow request; otherwise it uses Kuwait local time. It takes precedence over the common departure time.</p>
+  <div class="outscraper-csv">
+    <label for="routeCsv">Import routes from CSV (columns: origin,destination)</label>
+    <input id="routeCsv" type="file" accept=".csv,text/csv">
+    <span class="sub">CSV is validated and previewed locally before it is added to the request configuration. Maximum 50 routes and 1 MB.</span>
+    <div id="csvPreview" class="sub" aria-live="polite"></div>
+  </div>
+  <div class="grid2 outscraper-options">
+    <div><label for="departureTime">Departure time <span class="optional-label">Optional</span></label><input id="departureTime" type="datetime-local"><small>Sent as an integer timestamp; if omitted, the provider uses the current time.</small></div>
+    <div><label for="finishTime">Finish time <span class="optional-label">Optional</span></label><input id="finishTime" type="datetime-local"><small>Requires departure time and interval.</small></div>
+    <div><label for="interval">Interval <span class="optional-label">Optional</span></label><input id="interval" type="number" min="1" step="1"><small>Positive integer accepted by the API; the published docs do not specify its unit.</small></div>
+    <div><label for="travelMode">Travel mode <span class="optional-label">Optional</span></label><select id="travelMode"><option value="best">best (provider default)</option><option value="car">car</option><option value="transit">transit</option><option value="walk">walk</option><option value="bike">bike</option><option value="flight">flight</option></select></div>
+    <div><label for="language">Language <span class="optional-label">Optional</span></label><select id="language">{% for language in languages %}<option value="{{language}}" {{ 'selected' if language=='en' }}>{{language}}</option>{% endfor %}</select></div>
+    <div><label for="region">Region <span class="optional-label">Optional</span></label><select id="region"><option value="">Provider default</option>{% for region in regions %}<option value="{{region}}" {{ 'selected' if region=='KW' }}>{{region}}</option>{% endfor %}</select></div>
+  </div>
+  <div class="outscraper-actions"><button class="btn" id="previewRequest" type="button">Review request and cost</button><span id="configureMessage" class="msg" aria-live="polite"></span></div>
+</section>
+
+<section id="approvalPanel" class="card approval-panel" hidden aria-live="polite">
+  <span class="eyebrow">MANDATORY APPROVAL · NO PROVIDER CALL HAS BEEN MADE</span>
+  <h2>Review before execution</h2>
+  <div id="approvalSummary" class="approval-summary"></div>
+  <div class="cost-warning"><b>Cost unknown · Estimate unavailable</b><p>Provider pricing rules for this endpoint and time-sweep volume have not been verified. HTTP request counts are not billing units. No actual cost is available in the local history.</p></div>
+  <label class="cf approval-ack"><input type="checkbox" id="ackUnknownCost"> I understand the cost and billable units cannot be estimated reliably, and I explicitly authorize this exact configuration anyway.</label>
+  <div class="outscraper-actions"><button class="btn" id="approveUnknown" type="button" disabled>Approve despite unknown cost</button><button class="btn alt" id="rejectRequest" type="button">Reject — do not submit</button></div>
+  <span id="approvalMessage" class="msg" aria-live="polite"></span>
+</section>
+
+<section class="card history-card">
+  <div class="section-heading"><div><h2>Request history</h2><p>Provider API submissions are shown separately from provider billable units.</p></div></div>
+  <form class="request-toolbar" method="get">
+    <div class="bar"><input type="search" name="q" placeholder="Filter by origin or destination" value="{{filters.q}}"><input type="date" name="from" aria-label="From date" value="{{filters.from}}"><input type="date" name="to" aria-label="To date" value="{{filters.to}}">
+      <select name="status"><option value="">All statuses</option>{% for value in ('pending','approved','rejected','invalidated','awaiting_approval','submitting','running','completed','failed','unknown') %}<option value="{{value}}" {{ 'selected' if filters.status==value }}>{{value|replace('_',' ')|title}}</option>{% endfor %}</select><button class="btn" type="submit">Filter</button><a class="btn alt" href="{{url_for('admin_outscraper')}}">Clear</a></div>
+  </form>
+  <div class="tw"><table><thead><tr><th>Internal ID</th><th>Created</th><th>Routes</th><th>Approval</th><th>Execution</th><th>Provider ID(s)</th><th>Results</th><th>Estimated cost / currency</th><th>Actual cost / currency</th><th></th></tr></thead><tbody>
+  {% for job in jobs %}<tr>
+    <td><code>{{job.id[:8]}}</code></td><td>{{job.created_at}}</td>
+    <td>{% for route in job.routes %}<div class="history-route">{{route.origin}} <span aria-hidden="true">→</span> {{route.destination}}</div>{% endfor %}</td>
+    <td><span class="b {{job.approval_status}}">{{job.approval_status|replace('_',' ')|title}}</span></td>
+    <td><span class="b {{job.execution_status}}">{{job.execution_status|replace('_',' ')|title}}</span></td>
+    <td>{% for provider_id in job.provider_ids %}<code>{{provider_id}}</code>{% else %}—{% endfor %}</td>
+    <td>{{job.result_count}} · {% if job.result_count %}Available{% elif job.execution_status=='completed' %}Empty{% else %}Not ready{% endif %}</td>
+    <td>Cost unknown · currency unknown</td><td>Unavailable · currency unknown</td>
+    <td><a class="btn" href="{{url_for('outscraper_job_detail',job_id=job.id)}}">Open</a></td>
+  </tr>{% else %}<tr><td colspan="10">No Outscraper requests match these filters.</td></tr>{% endfor %}
+  </tbody></table></div>
+  {% if jobs|length==250 %}<p class="sub">Showing the latest 250 matching requests.</p>{% endif %}
+</section>
+{% endblock %}
+{% block js %}
+<script>
+const routeRows=document.getElementById('routeRows'),approvalPanel=document.getElementById('approvalPanel'),ackUnknownCost=document.getElementById('ackUnknownCost'),approveUnknown=document.getElementById('approveUnknown');
+const prefillConfiguration={{prefill_config|tojson if prefill_config else 'null'}},SV={{SERVICES|tojson}};
+let activePreview=null,invalidationPromise=Promise.resolve(true);
+const holidayContext=prefillConfiguration?.trafficlens_context||null,departureTimezone=holidayContext?.timezone||'Asia/Kuwait';
+function localInputTime(timestamp,timeZone='Asia/Kuwait'){if(!timestamp)return '';const parts=new Intl.DateTimeFormat('sv-SE',{timeZone,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(new Date(timestamp*1000));return parts.replace(' ','T')}
+function localTimestamp(input,timeZone='Asia/Kuwait'){
+ const match=/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(input);if(!match)return null;
+ const [,year,month,day,hour,minute]=match.map(Number),wall=Date.UTC(year,month-1,day,hour,minute);let candidate=wall;
+ const formatter=new Intl.DateTimeFormat('en-CA',{timeZone,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'});
+ for(let attempt=0;attempt<4;attempt++){const parts=Object.fromEntries(formatter.formatToParts(new Date(candidate)).filter(part=>part.type!=='literal').map(part=>[part.type,Number(part.value)]));const displayed=Date.UTC(parts.year,parts.month-1,parts.day,parts.hour,parts.minute);const next=wall-(displayed-candidate);if(next===candidate)break;candidate=next}
+ return Math.floor(candidate/1000);
+}
+function addRoute(route={}){
+ const row=document.createElement('tr');row.className='route-input-row';
+ row.innerHTML='<td class="route-number"></td><td><input class="route-origin" maxlength="500" required placeholder="Origin"></td><td><input class="route-destination" maxlength="500" required placeholder="Destination"></td><td><input class="route-departure" type="datetime-local" aria-label="Route departure time in Kuwait local time"></td><td><button class="btn alt remove-route" type="button" aria-label="Remove route">Remove</button></td>';
+ row.querySelector('.route-origin').value=route.origin||'';row.querySelector('.route-destination').value=route.destination||'';
+ row.querySelector('.route-departure').value=typeof route.departure_time==='number'?localInputTime(route.departure_time,departureTimezone):(route.departure_time||'');
+ routeRows.appendChild(row);
+ row.querySelectorAll('input').forEach(input=>input.addEventListener('input',configurationChanged));
+ row.querySelector('.remove-route').onclick=()=>{if(routeRows.children.length>1){row.remove();renumberRoutes();configurationChanged()}};
+ renumberRoutes();
+}
+function renumberRoutes(){routeRows.querySelectorAll('tr').forEach((row,index)=>row.querySelector('.route-number').textContent=String(index+1))}
+function configurationChanged(){
+ if(!activePreview)return;
+ const old=activePreview;activePreview=null;approvalPanel.hidden=true;ackUnknownCost.checked=false;approveUnknown.disabled=true;
+ invalidationPromise=fetch(`/api/outscraper/${encodeURIComponent(old.id)}/invalidate`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({approval_token:old.token})}).then(response=>response.ok||response.status===409).catch(()=>false);
+}
+function showRoutes(routes){routeRows.replaceChildren();routes.forEach(route=>addRoute(route));document.getElementById('csvPreview').textContent=`CSV preview: ${routes.length} route(s) validated. Review the rows above before creating a request.`}
+if(prefillConfiguration){
+ prefillConfiguration.routes.forEach(addRoute);
+ document.getElementById('departureTime').value=prefillConfiguration.departure_time?localInputTime(prefillConfiguration.departure_time):'';
+ document.getElementById('finishTime').value=prefillConfiguration.finish_time?localInputTime(prefillConfiguration.finish_time):'';
+ document.getElementById('interval').value=prefillConfiguration.interval??'';
+ document.getElementById('travelMode').value=prefillConfiguration.travel_mode||'best';
+ document.getElementById('language').value=prefillConfiguration.language||'en';
+ document.getElementById('region').value=prefillConfiguration.region||'';
+}else addRoute();
+if(holidayContext){
+ document.getElementById('addRoute').disabled=true;
+ document.getElementById('routeCsv').disabled=true;
+ document.getElementById('region').disabled=true;
+ ['departureTime','finishTime','interval'].forEach(id=>document.getElementById(id).disabled=true);
+ routeRows.querySelectorAll('.route-origin,.route-destination,.route-departure').forEach(input=>input.readOnly=true);
+}
+document.getElementById('addRoute').onclick=()=>{if(routeRows.children.length>=50){document.getElementById('configureMessage').textContent='Maximum 50 routes per request.';return}addRoute();configurationChanged()};
+document.getElementById('routeCsv').onchange=async event=>{
+ const file=event.target.files[0];if(!file)return;
+ const message=document.getElementById('csvPreview');message.textContent='Validating CSV...';
+ try{
+  const text=await file.text(),response=await fetch('/api/outscraper/csv-preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({csv:text})}),data=await response.json();
+  if(!response.ok){message.textContent=data.error||'Could not read CSV';return}
+  showRoutes(data.routes);configurationChanged();
+ }catch(error){message.textContent='Could not read CSV. Check that the file is valid UTF-8 CSV.'}
+};
+['departureTime','finishTime','interval','travelMode','language','region'].forEach(id=>document.getElementById(id).addEventListener('input',configurationChanged));
+function currentConfiguration(){
+ const number=(id)=>{const value=document.getElementById(id).value;return value===''?null:Number(value)};
+ const time=(id)=>{const value=document.getElementById(id).value;return value?localTimestamp(value):null};
+ const config={routes:[...routeRows.querySelectorAll('tr')].map(row=>({origin:row.querySelector('.route-origin').value,destination:row.querySelector('.route-destination').value,departure_time:localTimestamp(row.querySelector('.route-departure').value,departureTimezone)})),
+  departure_time:time('departureTime'),finish_time:time('finishTime'),interval:number('interval'),
+  travel_mode:document.getElementById('travelMode').value,language:document.getElementById('language').value,region:document.getElementById('region').value};
+ if(holidayContext)config.trafficlens_context=holidayContext;
+ return config;
+}
+function displayTime(timestamp,timeZone='Asia/Kuwait'){return timestamp?`${localInputTime(timestamp,timeZone).replace('T',' ')} (${timeZone})`:'Provider current time (default)'}
+document.getElementById('previewRequest').onclick=async()=>{
+ const message=document.getElementById('configureMessage');message.textContent='Validating and saving preview...';
+ try{
+  if(activePreview){
+   const old=activePreview;activePreview=null;
+   const invalidated=await fetch(`/api/outscraper/${encodeURIComponent(old.id)}/invalidate`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({approval_token:old.token})});
+   if(!invalidated.ok&&invalidated.status!==409){message.textContent='Could not invalidate the previous preview. No new preview was created.';return}
+  }
+  if(!await invalidationPromise){message.textContent='Could not verify that the previous preview was invalidated. Refresh and try again.';return}
+  const response=await fetch('/api/outscraper/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(currentConfiguration())}),data=await response.json();
+  if(!response.ok){message.textContent=data.error||'Invalid request configuration';return}
+  activePreview={id:data.id,token:data.approval_token,configuration:data.configuration};ackUnknownCost.checked=false;approveUnknown.disabled=true;
+  invalidationPromise=Promise.resolve(true);
+  const c=data.configuration,routeList=c.routes.map((route,index)=>`<li><b>${index+1}.</b> ${escapeHtml(route.origin)} <span aria-hidden="true">→</span> ${escapeHtml(route.destination)} · <b>Departure:</b> ${displayTime(route.departure_time??c.departure_time,c.trafficlens_context?.timezone||'Asia/Kuwait')}</li>`).join('');
+  const holiday=c.trafficlens_context,weekly=holiday?.reference_type==='weekly_weekend',referenceDate=holiday?(weekly?holiday.weekend_date:holiday.holiday_date):'',referenceLabel=holiday?(weekly?holiday.weekend_day:holiday.holiday_name):'',referenceKind=weekly?'latest weekly weekend date before today':'nearest public holiday',holidaySummary=holiday?`<p><b>${escapeHtml(SV[holiday.service])} reference:</b> Study date ${escapeHtml(holiday.study_date)} · ${escapeHtml(holiday.country_name)} (${escapeHtml(holiday.country_code)}) · ${referenceKind} <b>${escapeHtml(referenceLabel)} · ${escapeHtml(referenceDate)}</b> · Departure at 07:00 local time (${escapeHtml(holiday.timezone)}).</p>`:'',commonDeparture=holiday?`07:00 local time on ${escapeHtml(referenceDate)} (${escapeHtml(holiday.timezone)})`:'';
+  document.getElementById('approvalSummary').innerHTML=`<p><b>Internal request:</b> ${escapeHtml(data.id)} · <b>Routes:</b> ${data.route_count}</p>${holidaySummary}<ul>${routeList}</ul><p><b>Common departure:</b> ${holiday?commonDeparture:displayTime(c.departure_time)} · <b>Finish:</b> ${c.finish_time?displayTime(c.finish_time):'Not set'} · <b>Interval:</b> ${c.interval??'Not set'} (API integer; unit unspecified)</p><p><b>Travel mode:</b> ${escapeHtml(c.travel_mode)} · <b>Language:</b> ${escapeHtml(c.language)} · <b>Region:</b> ${escapeHtml(c.region||'Provider default')}</p><p><b>Planned HTTP submissions:</b> ${data.planned_http_submissions} (one per route; <b>not</b> provider billable units).</p><p><b>Currency:</b> Unknown · <b>Estimated cost:</b> Cost unknown · <b>Confidence:</b> unavailable</p>`;
+  approvalPanel.hidden=false;message.textContent='Preview saved. No provider API request has been sent.';approvalPanel.scrollIntoView({behavior:'smooth',block:'start'});
+ }catch(error){message.textContent='Preview request failed. Check your connection and try again.'}
+};
+function escapeHtml(value){return String(value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]))}
+ackUnknownCost.onchange=()=>{approveUnknown.disabled=!ackUnknownCost.checked};
+approveUnknown.onclick=async()=>{
+ if(!activePreview||!ackUnknownCost.checked)return;
+ approveUnknown.disabled=true;const message=document.getElementById('approvalMessage');message.textContent='Saving approval and starting asynchronous submission...';
+ try{
+  const response=await fetch(`/api/outscraper/${encodeURIComponent(activePreview.id)}/approve`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({approval_token:activePreview.token,configuration:activePreview.configuration,acknowledge_unknown_cost:true})}),data=await response.json();
+  if(!response.ok){message.textContent=data.error||'Approval failed';approveUnknown.disabled=false;return}
+  activePreview=null;message.textContent='Approved. Provider submissions are starting; this page will not resubmit them.';setTimeout(()=>location.reload(),1200);
+ }catch(error){message.textContent='Could not confirm submission status. Refresh request history before taking further action.'}
+};
+document.getElementById('rejectRequest').onclick=async()=>{
+ if(!activePreview)return;
+ const message=document.getElementById('approvalMessage');message.textContent='Recording rejection...';
+ try{
+  const response=await fetch(`/api/outscraper/${encodeURIComponent(activePreview.id)}/reject`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({approval_token:activePreview.token})}),data=await response.json();
+  if(!response.ok){message.textContent=data.error||'Could not reject request';return}
+  activePreview=null;message.textContent='Rejected and recorded locally. No provider request was sent.';setTimeout(()=>location.reload(),900);
+ }catch(error){message.textContent='Could not record rejection. Refresh the page and check request history.'}
+};
+</script>
+{% endblock %}

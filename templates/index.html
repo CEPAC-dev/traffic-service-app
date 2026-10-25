@@ -1,0 +1,12 @@
+{% extends "base.html" %}{% block body %}
+<div class="hero"><h1>Traffic data for any road link you choose.</h1>
+<p>Select the start and the end of a link on the map, choose the services, the day and the hours you need. We collect the data and publish it to your {{ APP_NAME }} account.</p>
+<a class="btn" href="{{ url_for('study') }}">Start study</a></div>
+<h2 class="t center" style="margin-top:28px">How it works</h2>
+<div class="steps"><div class="card center"><h3>1. Select a link</h3><p>Click its start (A) and its end (B). A link has no intersections, entrances or exits.</p></div>
+<div class="card center"><h3>2. Choose services</h3><p>Select from the services currently offered by the administrator.</p></div>
+<div class="card center"><h3>3. Pick the day and hours</h3><p>One day, and the exact hours you need.</p></div>
+<div class="card center"><h3>4. View results</h3><p>A section for every service with values, charts and notes.</p></div></div>
+<h2 class="t center" style="margin-top:28px">What each service does</h2>
+<div class="steps">{% for k,v in ACTIVE_SERVICES.items() %}<div class="card sv-card"><div class="big">{{ SVINFO[k].icon }}</div><h3>{{ v }}</h3><p>{{ SVINFO[k].desc }}</p></div>{% endfor %}</div>
+{% endblock %}

@@ -1,0 +1,62 @@
+{% extends "base.html" %}{% block body %}<a href="{{ url_for('my_requests') }}" style="color:var(--blue)">My requests</a>
+<h2 class="t">REQ-{{r.id}} · {{r.area}}</h2>
+<p style="color:var(--mut);margin-top:-8px">{{r.client}} · Study date: <b>{{r.d1}}</b> · Time: <b>{{r.time_range_label}}</b> · Hourly periods: <b>{{r.hours_label}}</b><br>{% for s in r.services %}<span class="pill">{{SERVICES[s]}}</span>{% endfor %}</p>
+{% if session.get('role') == 'admin' and ('travel' in r.services or 'freeflow_time' in r.services or 'freeflow_speed' in r.services) %}<div class="row-actions directions-actions">
+{% for service in ('travel','freeflow_time','freeflow_speed') %}{% if service in r.services %}<a class="btn alt" href="{{url_for('admin_request',rid=r.id) if service=='travel' else url_for('admin_outscraper',source_request_id=r.id,service=service)}}">API Directions · {{SERVICES[service]}}</a>{% endif %}{% endfor %}
+</div>{% endif %}
+{% if r.reply %}<div class="card" style="margin-bottom:14px"><h3>Message from admin{% if r.reply_at %} <small style="color:var(--mut);font-weight:400">({{r.reply_at}})</small>{% endif %}</h3><div class="note-box" style="margin-top:6px">{{ r.reply }}</div></div>{% endif %}
+{% if r.status=='Processing' %}<div class="tip" style="text-align:left">⏳ <b>Partial results.</b> Services marked "In preparation" are still being prepared. This page updates when they are ready.</div>{% endif %}
+<div id="rmap"></div>
+{% set directions_result=((r.data.get('travel') or r.data.get('speed') or {}).get('directions_result')) %}
+<section class="result-summary">
+  <div class="section-heading"><div><span class="eyebrow">AT A GLANCE</span><h2>Technical summary</h2><p>Key values and analysis for this request.</p></div></div>
+  {% if directions_result %}<div class="card directions-client-summary"><h3>Directions result · Route A → B</h3><div class="tw"><table><tbody>
+    <tr><th>Distance</th><td>{{'%.1f'|format(directions_result.distance_meters)}} meters</td></tr>
+    <tr><th>Time</th><td>{{'%.2f'|format(directions_result.time_seconds)}} seconds</td></tr>
+    {% if 'speed' in r.services %}<tr><th>Speed</th><td>{{'%.2f'|format(directions_result.speed_kmh)}} km/h</td></tr>{% endif %}
+  </tbody></table></div></div>{% endif %}
+  <div class="kpis" id="kp"></div><div id="ins"></div>
+</section>
+<section class="result-details">
+  <div class="section-heading"><div><span class="eyebrow">FULL REPORT</span><h2>Service details</h2><p>Hourly values, source information and notes for each requested service.</p></div></div>
+  <div id="secs"></div>
+</section>
+<div class="result-export"><a class="btn" href="{{url_for('export_result_excel',rid=r.id)}}">Download Excel report</a></div>
+{% endblock %}
+{% block js %}<script>
+const R={{ r|tojson }},FORMS={{ forms|tojson }},SV={{ SERVICES|tojson }},SVI={{ SVINFO|tojson }},D=R.data||{};
+const esc=s=>String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'),pad=n=>String(n).padStart(2,'0');
+const map=L.map('rmap');tiles(map);const pg=L.polyline(R.path,{color:'#f97316',weight:5}).addTo(map);
+R.coords.forEach((p,i)=>L.marker(p).addTo(map).bindTooltip(i?'B':'A',{permanent:true,direction:'top'}));map.fitBounds(pg.getBounds(),{padding:[40,40]});
+if(R.point_c){L.marker(R.point_c,{icon:L.divIcon({className:'point-c-marker',html:'C',iconSize:[28,28],iconAnchor:[14,14]})}).addTo(map).bindTooltip('C · calculated',{permanent:true,direction:'top'});map.fitBounds(L.latLngBounds([...R.path,R.point_c]),{padding:[40,40]})}
+const rowsOf=s=>(D[s]||{}).rows||[],avg=a=>a.reduce((x,y)=>x+Number(y.value),0)/a.length;
+const kps=[],charts=[];
+R.services.forEach(s=>{const F=FORMS[s],d=D[s]||{},rows=rowsOf(s),has=rows.length||(d.note||'').trim(),hourly=F.kind==='hourly';
+ const numeric=rows.length>0&&rows.every(r=>Number.isFinite(Number(r.value)));
+ let main='';
+ if(rows.length&&numeric){const v=hourly?avg(rows):Number(rows[0].value),t=+v.toFixed(2);
+  main=`<p style="margin:8px 0"><span class="big-v">${t}</span> <span style="color:var(--mut)">${esc(F.unit)}${hourly?' (average of the selected hours)':''}</span></p>`;
+  kps.push(`<div class="card kpi k${kps.length%6+1}"><i class="ic">${SVI[s].icon}</i><b>${t}</b><span>${esc(SV[s])} · ${esc(F.unit)}${hourly?' (avg)':''}</span></div>`)}
+ else if(rows.length&&!hourly){main=`<p style="margin:8px 0"><span class="big-v">${esc(rows[0].value)}</span> <span style="color:var(--mut)">${esc(F.unit)}</span></p>`}
+ const sec=document.createElement('div');sec.className='card svc';
+ const holiday=d.holiday_context,reference=d.reference_context||d.freeflow_context||holiday;
+ const weeklyReference=reference&&(reference.reference_type==='weekly_weekend'||reference.weekend_date);
+ const referenceDate=reference&&(reference.weekend_date||reference.holiday_date);
+ const referenceLabel=reference&&(reference.weekend_day||reference.holiday_name);
+ const referenceInfo=reference?`<div class="note-box"><b>Directions API reference date</b><br>Study date: ${esc(reference.study_date)} · Route country: ${esc(reference.country_name)} (${esc(reference.country_code)}) · Time zone: ${esc(reference.timezone)}<br>${weeklyReference?'Weekly weekend day used':'Nearest public holiday used'}: <b>${esc(referenceLabel)} · ${esc(referenceDate)}</b> · Departure: <b>07:00 local time</b></div>`:'';
+ const apiJobLink=reference&&d.outscraper_job_id&&{{ 'true' if me.role=='admin' else 'false' }}?`<p><a href="/admin/outscraper/${encodeURIComponent(d.outscraper_job_id)}">Review Directions API response</a></p>`:'';
+ sec.innerHTML=`<div class="svc-h"><h3 style="font-size:17px">${SVI[s].icon} ${esc(SV[s])}</h3><span class="b ${has?'Completed':'Pending'}">${has?(d.source==='network'?'From road network':d.source==='outscraper'?'From Directions API':'Provided'):(R.status==='Processing'?'In preparation':'Not provided yet')}</span></div>
+ <p class="hint">${esc(SVI[s].desc)}</p>${has?'':'<p class="hint">This service is being prepared.</p>'}${main}
+ ${referenceInfo}${apiJobLink}
+ ${hourly&&rows.length?`${numeric?`<canvas id="ch_${s}" height="90"></canvas>`:''}<div class="tw" style="margin-top:10px"><table><thead><tr><th>Hour</th><th>${s==='volumes'?'Estimated volume':esc(F.label)}${F.unit?` (${esc(F.unit)})`:''}</th>${s==='volumes'?'<th>RMSE tolerance</th>':''}</tr></thead><tbody>${rows.map(r=>`<tr><td>${pad(r.hour)}:00 to ${pad(r.hour+1)}:00</td><td>${esc(r.value)}</td>${s==='volumes'?`<td>${esc(r.tolerance??'—')}</td>`:''}</tr>`).join('')}</tbody></table></div>`:''}
+ ${(d.note||'').trim()?`<div class="note-box"><b>${d.source==='network'?'Source':d.source==='outscraper'?'Directions API status':'Admin answer'}</b><br>${esc(d.note)}</div>`:''}${d.updated?`<p class="hint" style="margin:8px 0 0">Updated ${d.updated}</p>`:''}`;
+ secs.appendChild(sec);if(hourly&&numeric)charts.push([s,F,rows]);});
+document.getElementById('kp').innerHTML=kps.length?kps.join(''):'<div class="card">Technical values are not available yet.</div>';
+const ff=rowsOf('freeflow_speed')[0],sp=rowsOf('speed'),ft=rowsOf('freeflow_time')[0],tt=rowsOf('travel'),ins=[];
+if(ff&&sp.length&&ff.value>0)ins.push(`Average speed is ${Math.round(avg(sp)/ff.value*100)}% of the free flow speed.`);
+if(ft&&tt.length){const x=avg(tt)-ft.value;ins.push(`Average travel time is ${Math.abs(x).toFixed(1)} min ${x>=0?'above':'below'} the free flow time.`)}
+if(sp.length>1){const m=sp.reduce((a,b)=>b.value<a.value?b:a);ins.push(`Slowest hour: ${pad(m.hour)}:00 at ${m.value} km/h.`)}
+if(ins.length)document.getElementById('ins').innerHTML=`<div class="card result-insights"><h3>Key insights</h3><ul class="ins">${ins.map(i=>`<li>${i}</li>`).join('')}</ul></div>`;
+charts.forEach(([s,F,rows])=>new Chart(document.getElementById('ch_'+s),{type:'bar',data:{labels:rows.map(r=>pad(r.hour)+':00'),datasets:[{data:rows.map(r=>Number(r.value)),backgroundColor:'#7c3aed',borderRadius:4}]},
+ options:{plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,title:{display:true,text:F.unit},grid:{color:'#f0ebf8'}},x:{grid:{display:false}}}}}));
+</script>{% endblock %}

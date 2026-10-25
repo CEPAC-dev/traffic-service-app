@@ -1,0 +1,27 @@
+{% extends "base.html" %}{% block body %}
+<div class="section-heading profile-heading">
+  <div><span class="eyebrow">{{profile_role|upper}} ACCOUNT</span><h1>{{profile_role}} profile</h1><p>Manage your account details and password.</p></div>
+  <a class="btn alt" href="{{url_for('logout')}}">Log out</a>
+</div>
+<div class="profile-grid">
+  <section class="card">
+    <h2>Basic information</h2>
+    <p class="hint">Update the name and email address associated with your account.</p>
+    <form method="post" action="{{url_for('update_profile')}}">
+      <label for="profileName">Name</label><input id="profileName" name="name" maxlength="120" value="{{profile_user.name}}" autocomplete="name" required>
+      <label for="profileEmail">Email</label><input id="profileEmail" name="email" type="email" maxlength="254" value="{{profile_user.email}}" autocomplete="email" required>
+      <p><button class="btn" type="submit">Save profile</button></p>
+    </form>
+  </section>
+  <section class="card">
+    <h2>Change password</h2>
+    <p class="hint">Enter your current password to set a new one. Passwords must contain at least 6 characters.</p>
+    <form method="post" action="{{url_for('change_password')}}">
+      <label for="currentPassword">Current password</label><input id="currentPassword" name="current_password" type="password" autocomplete="current-password" required>
+      <label for="newPassword">New password</label><input id="newPassword" name="new_password" type="password" minlength="6" autocomplete="new-password" required>
+      <label for="confirmPassword">Confirm new password</label><input id="confirmPassword" name="confirm_password" type="password" minlength="6" autocomplete="new-password" required>
+      <p><button class="btn" type="submit">Change password</button></p>
+    </form>
+  </section>
+</div>
+{% endblock %}

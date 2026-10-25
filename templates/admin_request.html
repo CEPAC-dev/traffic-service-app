@@ -1,0 +1,457 @@
+{% extends "base.html" %}{% block body %}
+<div class="page-heading">
+  <div><a class="detail-back-link" href="{{url_for('admin')}}#requests-all">← All requests</a><span class="eyebrow">REQUEST REVIEW</span><h1>REQ-{{r.id}}</h1><p>{{r.created}} · <span class="b {{r.status}}">{{r.status}}</span></p></div>
+  <a class="btn alt" href="{{url_for('admin')}}#requests-all">Back to requests</a>
+</div>
+<div class="request-detail-grid admin-detail-grid">
+  <section class="card request-detail-card"><span class="eyebrow">CUSTOMER</span><h2>{{r.client}}</h2><dl><div><dt>Email</dt><dd>{{r.email}}</dd></div><div><dt>Request ID</dt><dd>REQ-{{r.id}}</dd></div></dl></section>
+  <section class="card request-detail-card"><span class="eyebrow">REQUEST</span><h2>{{r.area}}</h2><dl><div><dt>Services</dt><dd>{% for s in r.services %}<span class="pill">{{SVINFO[s].icon}} {{SERVICES[s]}}</span>{% endfor %}</dd></div><div><dt>Study date</dt><dd>{{r.d1}}</dd></div><div><dt>Time</dt><dd>{{r.time_range_label}} · {{r.hours_label}}</dd></div>{% if r.road_km %}<div><dt>Road length</dt><dd>{{r.road_km}} km</dd></div>{% endif %}{% if r.junctions %}<div><dt>Route check</dt><dd>{{r.junctions}} possible junction(s) detected</dd></div>{% endif %}</dl></section>
+</div>
+{% if 'travel' in r.services or 'speed' in r.services or 'freeflow_time' in r.services or 'freeflow_speed' in r.services or 'volumes' in r.services %}<div class="row-actions directions-actions">
+{% if 'travel' in r.services or 'speed' in r.services or 'volumes' in r.services %}{% if r.point_c %}<button class="btn" id="openDirectionsReview" type="button">API Directions · Review A → C</button>{% endif %}{% endif %}
+{% if 'freeflow_time' in r.services %}<a class="btn alt" href="{{url_for('admin_outscraper',source_request_id=r.id,service='freeflow_time')}}">API Directions · Free flow time</a>{% endif %}
+{% if 'volumes' in r.services %}{% if volumes_workflow and volumes_workflow.freeflow_speed %}<span class="pill">Free-flow speed received{% if volumes_workflow.freeflow_context %} · {{volumes_workflow.freeflow_context.weekend_day}} {{volumes_workflow.freeflow_context.weekend_date}}{% endif %}</span>{% elif volumes_workflow and volumes_workflow.freeflow_job_status in ('submitting','running','unknown') %}<span class="pill">Free-flow speed request {{volumes_workflow.freeflow_job_status}}</span>{% else %}<button class="btn alt" id="openFreeflowSpeedDialog" type="button">API Directions · Free flow speed for Volumes</button>{% endif %}{% elif 'freeflow_speed' in r.services %}<a class="btn alt" href="{{url_for('admin_outscraper',source_request_id=r.id,service='freeflow_speed')}}">API Directions · Free flow speed</a>{% endif %}
+</div>{% endif %}
+{% if 'volumes' in r.services %}
+<dialog id="freeflowSpeedDialog" class="directions-review-dialog freeflow-speed-dialog" data-prepare-url="{{url_for('prepare_volumes_freeflow_preview',rid=r.id)}}">
+<form method="dialog"><button class="dialog-close" aria-label="Close" type="submit">×</button></form>
+<h2>Free-flow speed · REQ-{{r.id}}</h2>
+<p class="hint">Review the route and the latest available weekly weekend date for this country. No API call is made before you confirm.</p>
+<div id="freeflowSpeedForm" class="grid2">
+  <div><label for="freeflowOrigin">Link origin</label><input id="freeflowOrigin" readonly></div>
+  <div><label for="freeflowDestination">Link destination</label><input id="freeflowDestination" readonly></div>
+  <div><label for="freeflowStudyDate">Study date</label><input id="freeflowStudyDate" readonly></div>
+  <div><label for="freeflowReferenceDate">Weekly weekend date</label><input id="freeflowReferenceDate" readonly></div>
+  <div><label for="freeflowReferenceDay">Weekend day · local time</label><input id="freeflowReferenceDay" readonly></div>
+  <div><label for="freeflowCountry">Route country</label><input id="freeflowCountry" readonly></div>
+</div>
+<div id="freeflowSpeedMessage" class="msg" role="status" aria-live="polite"></div>
+<div id="freeflowSpeedApproval" hidden>
+  <div class="note-box"><b>Exact API request prepared</b><p id="freeflowSpeedSummary"></p><p>Departure is 07:00 in the route's local time zone. The selected date is strictly before today's date in that time zone.</p></div>
+  <div class="cost-warning"><b>Scraper cost is unknown</b><p>Provider billing units and actual per-request cost are unavailable. Review the route/date before authorizing the API submission.</p></div>
+  <label class="cf approval-ack"><input type="checkbox" id="freeflowSpeedCostAck"> I understand the cost is unknown and authorize this exact request.</label>
+</div>
+<div class="outscraper-actions"><button class="btn" id="prepareFreeflowSpeed" type="button">Prepare API request</button><button class="btn" id="confirmFreeflowSpeed" type="button" hidden disabled>Confirm &amp; send to Scraper</button><button class="btn alt" id="cancelFreeflowSpeed" type="button">Cancel</button></div>
+</dialog>
+{% endif %}
+{% if 'travel' in r.services or 'speed' in r.services or 'volumes' in r.services %}{% if r.point_c %}
+<section class="card" id="requestDirectionsWorkflow" data-job-id="{{directions_workflow.job_id if directions_workflow else ''}}" data-workflow-status="{{directions_workflow.status if directions_workflow else ''}}" data-status-url="{{url_for('request_directions_status',rid=r.id)}}" style="margin:14px 0">
+<div class="svc-h"><h3>API Directions result workflow</h3><span id="directionsWorkflowBadge" class="b {{directions_workflow.status if directions_workflow else 'Pending'}}">{{directions_workflow.status|replace('_',' ')|title if directions_workflow else 'Not sent'}}</span></div>
+<p id="directionsWorkflowMessage" class="hint">{% if directions_workflow and directions_workflow.error %}{{directions_workflow.error}}{% elif directions_workflow and directions_workflow.status=='ready' %}Response processed and ready for administrator review.{% elif directions_workflow and directions_workflow.status=='confirmed' %}Results were confirmed by administrator {{directions_workflow.confirmed_by}} at {{directions_workflow.confirmed_at}}.{% elif directions_workflow %}Waiting for the linked Scraper response. This page checks the same request automatically.{% else %}No Directions request has been sent for this client request.{% endif %}</p>
+<div id="directionsResultReview" {% if not directions_workflow or directions_workflow.status not in ('ready','confirmed') %}hidden{% endif %}>
+{% if directions_workflow and directions_workflow.result %}
+<div class="tw"><table><tbody>
+<tr><th>Route</th><td>A → B</td></tr>
+<tr><th>Distance</th><td>{{'%.1f'|format(directions_workflow.result.distance_meters)}} meters</td></tr>
+<tr><th>Average time</th><td>{{'%.2f'|format(directions_workflow.result.time_seconds)}} seconds</td></tr>
+<tr><th>Average speed</th><td>{{'%.2f'|format(directions_workflow.result.speed_kmh)}} km/h</td></tr>
+</tbody></table></div>
+<details><summary>Hourly results used for client report</summary><div class="tw"><table><thead><tr><th>Hour</th><th>Distance (m)</th><th>Time (s)</th><th>Speed (km/h)</th><th>Basis</th></tr></thead><tbody>{% for item in directions_workflow.result.hourly %}<tr><td>{{'%02d:00'|format(item.hour)}}</td><td>{{'%.1f'|format(item.distance_m)}}</td><td>{{'%.2f'|format(item.time_seconds)}}</td><td>{{'%.2f'|format(item.speed_kmh)}}</td><td>{{'Reused available result' if item.reused_observation else 'Returned for this hour'}}</td></tr>{% endfor %}</tbody></table></div></details>
+{% endif %}
+<div class="row-actions" style="margin-top:12px"><a class="btn alt" id="viewDirectionsScraper" href="{{url_for('outscraper_job_detail',job_id=directions_workflow.job_id) if directions_workflow else '#'}}" {% if not directions_workflow %}hidden{% endif %}>View Data Scraper</a>
+<button class="btn" id="confirmDirectionsResults" type="button" {% if not directions_workflow or directions_workflow.status!='ready' %}hidden{% endif %}>{{'Save Actual Speed for MATLAB' if 'volumes' in r.services and 'speed' not in r.services and 'travel' not in r.services else 'Confirm & Send Results'}}</button></div>
+</div>
+</section>
+<dialog id="directionsReviewDialog" class="directions-review-dialog">
+<form method="dialog"><button class="dialog-close" aria-label="Close" type="submit">×</button></form>
+<h2>Review API Directions request</h2><p class="hint">Review the existing client request data. Nothing is sent until you confirm.</p>
+<div class="grid2">
+<div><label for="directionsPointA">Point A · Scraper origin</label><input id="directionsPointA" readonly value="{{'%.6f'|format(r.coords[0][0])}}, {{'%.6f'|format(r.coords[0][1])}}"></div>
+<div><label for="directionsPointC">Point C · Scraper destination</label><input id="directionsPointC" readonly value="{{'%.6f'|format(r.point_c[0])}}, {{'%.6f'|format(r.point_c[1])}}"></div>
+<div><label id="directionsStartLabel" for="directionsStartTime">Start time · route local time</label><input id="directionsStartTime" type="datetime-local" step="1" required></div>
+<div><label id="directionsEndLabel" for="directionsEndTime">End time · route local time</label><input id="directionsEndTime" type="datetime-local" step="1" required></div>
+<div><label for="directionsInterval">Time interval (minutes) · Optional</label><input id="directionsInterval" type="number" min="1" step="1"><small id="directionsIntervalDefault" class="hint"></small></div>
+</div>
+<div class="note-box" id="directionsDetectedLocation" role="status" style="margin-top:12px">Country and time zone will be detected from the route coordinates.</div>
+<div class="tip" style="margin-top:12px;text-align:left">The Scraper route is A → C. The result processor will extract A → B at the saved A-to-B road distance. The default interval is up to 60 minutes so each selected hour can receive a result; you can choose a shorter interval if needed.</div>
+<div class="cost-warning"><b>Scraper cost is unknown</b><p>Provider billing units and actual per-request cost are unavailable. No request is sent unless you check the authorization below and choose Send to Scraper.</p></div>
+<label class="cf approval-ack"><input type="checkbox" id="directionsUnknownCostAck"> I understand the cost is unknown and authorize this request.</label>
+<div class="outscraper-actions"><button class="btn" id="sendDirectionsToScraper" type="button" disabled>Send to Scraper</button><span id="directionsSendMessage" class="msg" role="status" aria-live="polite"></span></div>
+</dialog>
+{% endif %}{% endif %}
+{% if 'volumes' in r.services and volumes_workflow %}
+<section class="card" id="volumesWorkflow" data-status-url="{{url_for('volumes_workflow_status',rid=r.id)}}" data-rendered-status="{{volumes_workflow.status}}" style="margin:14px 0">
+<div class="svc-h"><h3>Traffic volumes · MATLAB workflow</h3><span id="volumesWorkflowBadge" class="b {{volumes_workflow.status}}">{{volumes_workflow.status|replace('_',' ')|title}}</span></div>
+<p id="volumesWorkflowMessage" class="hint" aria-live="polite">{% if volumes_workflow.error %}{{volumes_workflow.error}}{% elif volumes_workflow.status=='ready_for_review' %}MATLAB finished. Review the hourly volumes and RMSE tolerance before sending them to the client.{% elif volumes_workflow.status=='sent' %}Approved volume results have been sent to the client.{% else %}Provide lane count and complete both API steps. MATLAB starts automatically when all inputs are ready.{% endif %}</p>
+<div class="grid2">
+<div><label for="volumeLaneCount">Number of lanes</label><input id="volumeLaneCount" type="number" min="0.01" step="any" value="{{volumes_workflow.lanes or ''}}" {% if volumes_workflow.status in ('running','ready_for_review','sent') %}disabled{% endif %}></div>
+<div><label>Free-flow speed · weekly weekend reference</label><input readonly value="{{'%.2f'|format(volumes_workflow.freeflow_speed) if volumes_workflow.freeflow_speed else 'Waiting for API result'}}">{% if volumes_workflow.freeflow_context %}<small class="hint">{{volumes_workflow.freeflow_context.weekend_day}} {{volumes_workflow.freeflow_context.weekend_date}} · 07:00 {{volumes_workflow.freeflow_context.timezone}}</small>{% endif %}</div>
+</div>
+<p><button class="btn alt" id="saveVolumeLanes" type="button" {% if volumes_workflow.status in ('running','ready_for_review','sent') %}hidden{% endif %}>Save lanes &amp; run MATLAB when ready</button>
+<button class="btn alt" id="retryVolumeModel" type="button" {% if volumes_workflow.status!='failed' %}hidden{% endif %}>Retry MATLAB</button>
+<span class="msg" id="volumeWorkflowAction" aria-live="polite"></span></p>
+{% if volumes_workflow.result %}<div class="tw"><table><thead><tr><th>Hour</th><th>Lanes</th><th>Free-flow speed (km/h)</th><th>Actual speed (km/h)</th><th>Estimated volume (veh/h)</th><th>RMSE tolerance</th></tr></thead><tbody>
+{% for item in volumes_workflow.result.hourly %}{% set actual=volumes_workflow.result.inputs.actual_speed_by_hour[loop.index0] %}<tr><td>{{'%02d:00'|format(item.hour)}}</td><td>{{volumes_workflow.result.inputs.lanes}}</td><td>{{'%.2f'|format(volumes_workflow.result.inputs.freeflow_speed)}}</td><td>{{'%.2f'|format(actual.speed_kmh)}}</td><td>{{'%.2f'|format(item.value)}}</td><td>{{'%.2f'|format(item.tolerance)}}</td></tr>{% endfor %}
+</tbody></table></div>{% endif %}
+{% if volumes_workflow.status=='ready_for_review' %}<p><button class="btn" id="confirmVolumesResult" type="button">Approve &amp; Send Volumes to Client</button></p>{% endif %}
+</section>
+{% endif %}
+<div class="coordinate-readout request-coordinates" aria-label="Request coordinates">
+<div><b>Point A</b><code id="requestPointA"></code></div>
+<div><b>Point B</b><code id="requestPointB"></code></div>
+{% if r.point_c %}<div><b>Point C · calculated</b><code>{{'%.6f'|format(r.point_c[0])}}, {{'%.6f'|format(r.point_c[1])}}{% if r.point_c_distance_km %} · A→C road distance {{'%.3f'|format(r.point_c_distance_km)}} km{% endif %}</code></div>{% endif %}
+</div>
+<div class="grid2"><div id="rmap" style="height:300px"></div>
+<div class="side"><div class="card"><h3>Status</h3><div class="bar"><select id="st">{% for s in statuses %}<option {{ 'selected' if s==r.status }}>{{s}}</option>{% endfor %}</select>
+<span class="msg" id="stMsg"></span></div>
+<p style="margin:10px 0 0"><button class="btn alt" id="rerun" type="button">🔄 Re-run network lookup</button></p></div>
+<div class="card"><h3>General reply to client</h3><textarea id="rp" rows="3" placeholder="Optional message shown on the client's request list and results page">{{ r.reply or '' }}</textarea>
+<p><span class="msg" id="rpMsg"></span></p></div></div></div>
+{% if r.point_c %}<div class="card point-c-visibility"><label class="cf"><input type="checkbox" id="showPointC" {{ 'checked' if r.show_point_c }}> Show calculated point C to the client on the result page and Excel report</label><p class="hint">Point C is hidden from the client until you enable this option and save.</p></div>{% endif %}
+<div class="service-heading"><h2 class="t">Service data</h2><p>Update any values, status, or reply, then save them together.</p></div><div id="svcs"></div>
+<div class="save-all-bar"><span id="saveAllMsg" role="status" aria-live="polite"></span><button class="btn" id="saveAll" type="button">Save all changes</button></div>
+{% endblock %}
+{% block js %}<script>
+const REQ={{ r|tojson }},FORMS={{ forms|tojson }},SV={{ SERVICES|tojson }},SVI={{ SVINFO|tojson }};
+const esc=s=>String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'),pad=n=>String(n).padStart(2,'0');
+const coordinate=p=>p.map(value=>Number(value).toFixed(6)).join(', ');
+requestPointA.textContent=coordinate(REQ.coords[0]);requestPointB.textContent=coordinate(REQ.coords[1]);
+const map=L.map('rmap');tiles(map);const pg=L.polyline(REQ.path,{color:'#f97316',weight:5}).addTo(map);
+REQ.coords.forEach((p,i)=>L.marker(p).addTo(map).bindTooltip(i?'B':'A',{permanent:true,direction:'top'}));
+if(REQ.point_c){L.marker(REQ.point_c,{icon:L.divIcon({className:'point-c-marker',html:'C',iconSize:[28,28],iconAnchor:[14,14]})}).addTo(map).bindTooltip('C · calculated',{permanent:true,direction:'top'});map.fitBounds(L.latLngBounds([...REQ.path,REQ.point_c]),{padding:[40,40]})}else map.fitBounds(pg.getBounds(),{padding:[40,40]});
+const post=(u,b)=>fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(r=>r.json());
+const showPointC=document.getElementById('showPointC');
+const ok=el=>{el.textContent='Saved';setTimeout(()=>el.textContent='',2500)};
+rerun.onclick=async()=>{const r=await post(`/api/requests/${REQ.id}/network`,{});alert(r.error||(r.filled.length?`Filled from the network: ${r.filled.map(s=>SV[s]).join(', ')}`:`The network has no new data for this link (coverage ${Math.round(r.coverage*100)}%).`));location.reload()};
+const dirtyServices=new Set();
+let originalStatus=st.value,originalReply=rp.value,originalPointCVisible=showPointC?showPointC.checked:false;
+st.addEventListener('change',()=>stMsg.textContent=st.value===originalStatus?'':'Unsaved');
+rp.addEventListener('input',()=>rpMsg.textContent=rp.value===originalReply?'':'Unsaved');
+if(showPointC)showPointC.addEventListener('change',()=>saveAllMsg.textContent=showPointC.checked===originalPointCVisible?'':'Point C visibility has unsaved changes.');
+REQ.services.forEach(s=>{
+ const F=FORMS[s],saved=(REQ.data||{})[s]||{},hourly=F.kind==='hourly',sr=saved.rows||[],inputType=F.value_type==='mixed'?'text':'number',unit=F.unit?` (${esc(F.unit)})`:'',directionsManaged=(Boolean(REQ.point_c)&&['travel','speed'].includes(s))||s==='volumes',directionsDisabled=directionsManaged?'disabled':'';
+ const rows=hourly?REQ.hours.map(h=>{const f=sr.find(r=>r.hour===h);return{hour:h,value:f?f.value:''}}):[{value:sr[0]?sr[0].value:''}];
+ const el=document.createElement('div');el.className='card svc';
+ el.innerHTML=`<div class="svc-h"><h3>${SVI[s].icon} ${esc(SV[s])} ${saved.source==='network'?'<span class="pill">🗺️ From road network</span>':''}</h3><span class="b badge"></span></div><p class="hint">${esc(F.hint)}${s==='volumes'?' Calculated by MATLAB and released only after explicit review; manual entry is disabled.':directionsManaged?' Values are extracted automatically from the Scraper response; manual entry is disabled.':''}${s==='length'&&REQ.road_km?` The length of the route on the map is ${REQ.road_km} km.`:''}</p>
+ ${hourly?`<div class="tw"><table class="ed"><thead><tr><th>Hour</th><th>${esc(F.label)}${unit}</th></tr></thead><tbody>${rows.map((r,i)=>`<tr><td><b>${pad(r.hour)}:00 to ${pad(r.hour+1)}:00</b></td><td><input type="${inputType}" ${inputType==='number'?'step="any"':''} ${directionsDisabled} data-i="${i}" value="${esc(r.value)}"></td></tr>`).join('')||'<tr><td colspan="2">No hours were selected for this request.</td></tr>'}</tbody></table></div>`
+  :`<label>${esc(F.label)}${unit}</label><input type="${inputType}" ${inputType==='number'?'step="any"':''} ${directionsDisabled} data-i="0" value="${esc(rows[0].value)}" style="max-width:240px">`}
+ <label>Admin answer / notes for this service</label><textarea class="note" rows="3" ${directionsDisabled}>${esc(saved.note)}</textarea>
+ <p class="service-save-msg msg" aria-live="polite"></p>`;
+ document.getElementById('svcs').appendChild(el);
+ const badge=el.querySelector('.badge'),note=el.querySelector('.note');
+ const state=()=>{const d=rows.some(r=>r.value!=='')||note.value.trim();badge.className='b badge '+(d?'Completed':'Pending');badge.textContent=d?'Data entered':'No data yet'};
+ el.addEventListener('input',e=>{const t=e.target;if(t.dataset.i!==undefined)rows[t.dataset.i].value=t.value;dirtyServices.add(s);el.querySelector('.service-save-msg').textContent='Unsaved changes';state()});state();
+ el.dataset.service=s;
+ el._saveValues=()=>({rows:rows.filter(r=>r.value!==''),note:note.value});
+});
+saveAll.onclick=async()=>{
+ const button=saveAll, message=saveAllMsg;
+ button.disabled=true;message.textContent='Saving changes...';message.className='msg';
+ try{
+  const payload={services:{}};
+  dirtyServices.forEach(s=>{const card=document.querySelector(`[data-service="${s}"]`);payload.services[s]=card._saveValues()});
+  if(st.value!==originalStatus)payload.status=st.value;
+  if(rp.value!==originalReply)payload.reply=rp.value;
+  if(showPointC&&showPointC.checked!==originalPointCVisible)payload.point_c_visible=showPointC.checked;
+  if(!Object.keys(payload.services).length&&payload.status===undefined&&payload.reply===undefined&&payload.point_c_visible===undefined){message.textContent='There are no unsaved changes.';return}
+  const response=await fetch(`/api/requests/${REQ.id}/save-all`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+  const result=await response.json();
+  if(!response.ok||!result.ok)throw new Error(result.error||'Could not save the changes.');
+  dirtyServices.clear();originalStatus=st.value;originalReply=rp.value;if(showPointC)originalPointCVisible=showPointC.checked;
+  stMsg.textContent='';rpMsg.textContent='';
+  document.querySelectorAll('.service-save-msg').forEach(el=>el.textContent='');
+  message.textContent='All changes saved successfully.';message.className='msg saved-message';
+ }catch(error){message.textContent=error.message||'Could not save the changes.';message.className='msg error-message'}
+ finally{button.disabled=false}
+};
+const directionsDialog=document.getElementById('directionsReviewDialog');
+if(directionsDialog){
+ const workflowPanel=document.getElementById('requestDirectionsWorkflow');
+ const startInput=document.getElementById('directionsStartTime'),endInput=document.getElementById('directionsEndTime');
+ const intervalInput=document.getElementById('directionsInterval'),intervalDefault=document.getElementById('directionsIntervalDefault');
+ const costAck=document.getElementById('directionsUnknownCostAck'),sendButton=document.getElementById('sendDirectionsToScraper');
+ const sendMessage=document.getElementById('directionsSendMessage'),workflowMessage=document.getElementById('directionsWorkflowMessage');
+ const workflowBadge=document.getElementById('directionsWorkflowBadge'),review=document.getElementById('directionsResultReview');
+ const viewScraper=document.getElementById('viewDirectionsScraper'),confirmButton=document.getElementById('confirmDirectionsResults');
+ const detectedLocation=document.getElementById('directionsDetectedLocation');
+ const startLabel=document.getElementById('directionsStartLabel'),endLabel=document.getElementById('directionsEndLabel');
+ const volumeOnly=REQ.services.includes('volumes')&&!REQ.services.includes('speed')&&!REQ.services.includes('travel');
+ let routeLocation=null;
+ const sourceDate=REQ.d1||new Date().toISOString().slice(0,10);
+ const timeText=value=>value?String(value).slice(0,8):'00:00:00';
+ startInput.value=`${sourceDate}T${timeText(REQ.start_time)}`;
+ endInput.value=`${sourceDate}T${timeText(REQ.end_time)}`;
+ if(endInput.value<=startInput.value){const next=new Date(`${sourceDate}T00:00:00Z`);next.setUTCDate(next.getUTCDate()+1);endInput.value=`${next.toISOString().slice(0,10)}T${timeText(REQ.end_time)}`}
+ const routeTimestamp=(input,timeZone)=>{
+  const match=/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(input);
+  if(!match||!timeZone)return null;
+  const parts=match.slice(1).map(value=>Number(value||0));
+  const [year,month,day,hour,minute,second]=parts,wall=Date.UTC(year,month-1,day,hour,minute,second);
+  let candidate=wall;
+  const formatter=new Intl.DateTimeFormat('en-CA',{timeZone,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'});
+  for(let attempt=0;attempt<5;attempt++){
+   const values=Object.fromEntries(formatter.formatToParts(new Date(candidate)).filter(part=>part.type!=='literal').map(part=>[part.type,Number(part.value)]));
+   const displayed=Date.UTC(values.year,values.month-1,values.day,values.hour,values.minute,values.second),next=wall-(displayed-candidate);
+   if(next===candidate)break;
+   candidate=next;
+  }
+  const check=Object.fromEntries(formatter.formatToParts(new Date(candidate)).filter(part=>part.type!=='literal').map(part=>[part.type,Number(part.value)]));
+  if(check.year!==year||check.month!==month||check.day!==day||check.hour!==hour||check.minute!==minute||check.second!==second)return null;
+  return Math.floor(candidate/1000);
+ };
+ const defaultInterval=()=>{
+  const duration=Math.ceil((routeTimestamp(endInput.value,routeLocation?.timezone)-routeTimestamp(startInput.value,routeLocation?.timezone))/60);
+  return duration>0?Math.min(duration,60):null;
+ };
+ let intervalEdited=false;
+ const updateIntervalDefault=()=>{const minutes=defaultInterval();intervalDefault.textContent=minutes?`Default: ${minutes} minutes. Hourly results use a maximum 60-minute interval; clear this optional field to use the automatic default.`:'Choose a valid Start and End time to calculate the interval.';if(minutes&&!intervalEdited)intervalInput.value=String(minutes)};
+ updateIntervalDefault();
+ [startInput,endInput].forEach(input=>input.addEventListener('input',updateIntervalDefault));
+ intervalInput.addEventListener('input',()=>{intervalEdited=true});
+ document.getElementById('openDirectionsReview').onclick=async()=>{
+  costAck.checked=false;sendButton.disabled=true;sendMessage.textContent='';
+  routeLocation=null;intervalEdited=false;intervalInput.value='';
+  detectedLocation.textContent='Detecting country and time zone from the route coordinates...';
+  directionsDialog.showModal();
+  try{
+   const workflowResponse=await fetch(workflowPanel.dataset.statusUrl,{cache:'no-store'}),workflowData=await workflowResponse.json();
+   if(!workflowResponse.ok)throw new Error(workflowData.error||'Could not check the existing Directions request.');
+   const activeWorkflow=workflowData.workflow;
+   if(activeWorkflow&&!['failed','rejected','invalidated'].includes(activeWorkflow.status)){
+    detectedLocation.textContent=`A Scraper request is already linked to this client request (${activeWorkflow.status.replaceAll('_',' ')}). Use View Data Scraper or review the current result below; no duplicate request was sent.`;
+    return;
+   }
+   const response=await fetch(`/api/requests/${REQ.id}/directions/location`,{cache:'no-store'}),data=await response.json();
+   if(!response.ok)throw new Error(data.error||'Could not detect the route country.');
+   routeLocation=data.location;
+   detectedLocation.innerHTML=`Detected from route coordinates: <b>${esc(routeLocation.country_name)} (${esc(routeLocation.country_code)})</b> · Time zone: <b>${esc(routeLocation.timezone)}</b>. The API region and local timestamps use this detection.`;
+   startLabel.textContent=`Start time · ${routeLocation.timezone}`;
+   endLabel.textContent=`End time · ${routeLocation.timezone}`;
+   updateIntervalDefault();sendButton.disabled=!costAck.checked;
+  }catch(error){detectedLocation.textContent=error.message||'Could not detect the route country/time zone.'}
+ };
+ costAck.onchange=()=>{sendButton.disabled=!costAck.checked||!routeLocation};
+ const displayWorkflow=workflow=>{
+  if(!workflow)return;
+  workflowPanel.dataset.jobId=workflow.job_id;
+  workflowPanel.dataset.workflowStatus=workflow.status;
+  workflowBadge.textContent=workflow.status.replaceAll('_',' ');
+  workflowBadge.className=`b ${workflow.status}`;
+  if(workflowTimer&&['ready','confirmed','failed','rejected','invalidated'].includes(workflow.status)){window.clearInterval(workflowTimer);workflowTimer=null}
+  workflowMessage.textContent=workflow.error||(
+   workflow.status==='ready'?'Scraper response processed. Review the extracted A → B results below.':
+   workflow.status==='confirmed'?(volumeOnly?`Actual speed was saved for MATLAB at ${workflow.confirmed_at}; it was not sent to the client.`:`Results were confirmed and sent at ${workflow.confirmed_at}.`):
+   `Scraper status: ${workflow.job_status||workflow.status}. Waiting for a complete response.`
+  );
+  viewScraper.href=workflow.view_url;viewScraper.hidden=false;
+  if(workflow.result){
+   const result=workflow.result;
+   review.hidden=false;
+   review.innerHTML=`<div class="tw"><table><tbody>
+    <tr><th>Route</th><td>A → B</td></tr><tr><th>Distance</th><td>${Number(result.distance_meters).toFixed(1)} meters</td></tr>
+    <tr><th>Average time</th><td>${Number(result.time_seconds).toFixed(2)} seconds</td></tr>
+    <tr><th>Average speed</th><td>${Number(result.speed_kmh).toFixed(2)} km/h</td></tr>
+    </tbody></table></div><details><summary>${volumeOnly?'Hourly actual speeds saved internally for MATLAB':'Hourly results used for client report'}</summary><div class="tw"><table><thead><tr><th>Hour</th><th>Distance (m)</th><th>Time (s)</th><th>Speed (km/h)</th><th>Basis</th></tr></thead><tbody>
+    ${result.hourly.map(item=>`<tr><td>${pad(item.hour)}:00</td><td>${Number(item.distance_m).toFixed(1)}</td><td>${Number(item.time_seconds).toFixed(2)}</td><td>${Number(item.speed_kmh).toFixed(2)}</td><td>${item.reused_observation?'Reused available result':'Returned for this hour'}</td></tr>`).join('')}
+    </tbody></table></div></details>`;
+  }
+  confirmButton.hidden=workflow.status!=='ready';
+  confirmButton.dataset.jobId=workflow.job_id;
+ };
+ let lastProviderRefresh=0,workflowPollBusy=false,workflowTimer=null;
+ const pollWorkflow=async()=>{
+  if(workflowPollBusy)return;workflowPollBusy=true;
+  try{
+   const response=await fetch(workflowPanel.dataset.statusUrl,{cache:'no-store'}),data=await response.json();
+   if(!response.ok)throw new Error(data.error||'Could not read Directions workflow status.');
+   displayWorkflow(data.workflow);
+   if(data.workflow&&['submitting','running','unknown'].includes(data.workflow.job_status)&&Date.now()-lastProviderRefresh>15000){
+    lastProviderRefresh=Date.now();
+    const refresh=await post(`/api/outscraper/${encodeURIComponent(data.workflow.job_id)}/refresh`,{});
+    if(refresh.ok)window.setTimeout(pollWorkflow,500);
+   }
+  }catch(error){workflowMessage.textContent=error.message||'Could not check Scraper status.'}
+  finally{workflowPollBusy=false}
+ };
+ if(workflowPanel.dataset.jobId)workflowTimer=window.setInterval(pollWorkflow,5000);
+ sendButton.onclick=async()=>{
+  if(!costAck.checked)return;
+  if(!routeLocation){sendMessage.textContent='Detect the route country before sending.';sendButton.disabled=false;return}
+  const departure=routeTimestamp(startInput.value,routeLocation.timezone),finish=routeTimestamp(endInput.value,routeLocation.timezone),defaultMinutes=Math.ceil((finish-departure)/60);
+  const intervalValue=intervalInput.value.trim()===''?defaultMinutes:Number(intervalInput.value);
+  if(!departure||!finish||finish<=departure||!Number.isSafeInteger(intervalValue)||intervalValue<=0){
+   sendMessage.textContent='Enter a valid local time range and a positive whole-number interval in minutes.';sendButton.disabled=false;return;
+  }
+  sendButton.disabled=true;sendMessage.textContent='Preparing the exact A → C request...';
+  const pointA=coordinate(REQ.coords[0]),pointB=coordinate(REQ.coords[REQ.coords.length-1]),pointC=coordinate(REQ.point_c);
+  const config={
+   routes:[{origin:pointA,destination:pointC}],departure_time:departure,finish_time:finish,interval:intervalValue,
+   travel_mode:'car',language:'en',region:routeLocation.country_code,
+   trafficlens_request:{
+    source_request_id:REQ.id,point_a:pointA,point_b:pointB,point_c:pointC,
+    road_ab_meters:Number(REQ.road_km)*1000,interval_minutes:intervalValue,
+    country_code:routeLocation.country_code,country_name:routeLocation.country_name,timezone:routeLocation.timezone
+   }
+  };
+  try{
+   const previewResponse=await fetch('/api/outscraper/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(config)});
+   const previewData=await previewResponse.json();
+   if(!previewResponse.ok)throw new Error(previewData.error||'Could not prepare the Scraper request.');
+   sendMessage.textContent='Sending the reviewed request to the Scraper...';
+   const approvalResponse=await fetch(`/api/outscraper/${encodeURIComponent(previewData.id)}/approve`,{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({approval_token:previewData.approval_token,configuration:previewData.configuration,acknowledge_unknown_cost:true})
+   });
+   const approvalData=await approvalResponse.json();
+   if(!approvalResponse.ok)throw new Error(approvalData.error||'Scraper submission did not start.');
+   workflowPanel.dataset.jobId=previewData.id;
+   workflowPanel.dataset.workflowStatus='running';
+   directionsDialog.close();
+   workflowMessage.textContent='Request sent. Waiting for the response and automatic A → B extraction.';
+   viewScraper.href=`/admin/outscraper/${encodeURIComponent(previewData.id)}`;viewScraper.hidden=false;
+   workflowBadge.textContent='Running';workflowBadge.className='b running';
+   if(!workflowTimer)workflowTimer=window.setInterval(pollWorkflow,5000);pollWorkflow();
+  }catch(error){sendMessage.textContent=error.message||'Could not submit the Scraper request.';sendButton.disabled=false}
+ };
+ confirmButton.onclick=async()=>{
+  const jobId=confirmButton.dataset.jobId;if(!jobId)return;
+  confirmButton.disabled=true;workflowMessage.textContent=volumeOnly?'Saving the reviewed actual speed for MATLAB...':'Confirming results and sending the client notification...';
+  try{
+   const response=await post(`/api/requests/${REQ.id}/directions/confirm`,{job_id:jobId});
+   if(!response.ok)throw new Error(response.error||'Could not confirm these results.');
+   workflowMessage.textContent=response.message||`Results were confirmed and sent at ${response.confirmed_at}.`;
+   workflowBadge.textContent='Confirmed';workflowBadge.className='b confirmed';confirmButton.hidden=true;
+  }catch(error){workflowMessage.textContent=error.message||'Could not confirm these results.';confirmButton.disabled=false}
+ };
+ const volumesPanel=document.getElementById('volumesWorkflow');
+ if(volumesPanel){
+  const volumeMessage=document.getElementById('volumesWorkflowMessage');
+  const volumeBadge=document.getElementById('volumesWorkflowBadge');
+  const volumeAction=document.getElementById('volumeWorkflowAction');
+  const renderedStatus=volumesPanel.dataset.renderedStatus;
+  const refreshVolumes=async()=>{
+   try{
+    const response=await fetch(volumesPanel.dataset.statusUrl);
+    const payload=await response.json();
+    if(!response.ok)throw new Error(payload.error||'Could not load the Volumes workflow.');
+    const state=payload.workflow;
+    volumeBadge.textContent=state.status.replaceAll('_',' ').replace(/\b\w/g,c=>c.toUpperCase());
+    volumeBadge.className=`b ${state.status}`;
+    const volumeLocked=['running','ready_for_review','sent'].includes(state.status);
+    document.getElementById('volumeLaneCount').disabled=volumeLocked;
+    document.getElementById('saveVolumeLanes').hidden=volumeLocked;
+    document.getElementById('retryVolumeModel').hidden=state.status!=='failed';
+    if(state.error)volumeMessage.textContent=state.error;
+    else if(state.status==='waiting_for_inputs')volumeMessage.textContent='Waiting for lane count and both approved API results. MATLAB starts automatically when all inputs are ready.';
+    else if(state.status==='running')volumeMessage.textContent='MATLAB is calculating the hourly volume estimates...';
+    else if((state.status==='ready_for_review'||state.status==='sent')&&state.status!==renderedStatus)location.reload();
+    else if(state.status==='failed')volumeMessage.textContent='MATLAB calculation failed. Review the error and retry.';
+   }catch(error){volumeAction.textContent=error.message||'Could not refresh the workflow.'}
+  };
+  const saveLanes=document.getElementById('saveVolumeLanes');
+  saveLanes?.addEventListener('click',async()=>{
+   const lanes=document.getElementById('volumeLaneCount').value;
+   volumeAction.textContent='Saving lane count...';
+   try{
+    const response=await post(`/api/requests/${REQ.id}/volumes/lanes`,{lanes});
+    if(!response.ok)throw new Error(response.error||'Could not save lane count.');
+    volumeAction.textContent='Lane count saved.';
+    await refreshVolumes();
+   }catch(error){volumeAction.textContent=error.message||'Could not save lane count.'}
+  });
+  document.getElementById('retryVolumeModel')?.addEventListener('click',async()=>{
+   volumeAction.textContent='Starting MATLAB...';
+   try{
+    const response=await post(`/api/requests/${REQ.id}/volumes/run`,{});
+    if(!response.ok)throw new Error(response.error||'Could not start MATLAB.');
+    volumeAction.textContent='MATLAB started.';
+    await refreshVolumes();
+   }catch(error){volumeAction.textContent=error.message||'Could not start MATLAB.'}
+  });
+  document.getElementById('confirmVolumesResult')?.addEventListener('click',async event=>{
+   const button=event.currentTarget;button.disabled=true;volumeAction.textContent='Sending approved volumes to the client...';
+   try{
+    const response=await post(`/api/requests/${REQ.id}/volumes/confirm`,{});
+    if(!response.ok)throw new Error(response.error||'Could not send the volume results.');
+    location.reload();
+   }catch(error){volumeAction.textContent=error.message||'Could not send the volume results.';button.disabled=false}
+  });
+  window.setInterval(refreshVolumes,5000);
+  refreshVolumes();
+ }
+}
+ const freeflowDialog=document.getElementById('freeflowSpeedDialog');
+ if(freeflowDialog){
+  const prepareButton=document.getElementById('prepareFreeflowSpeed');
+  const confirmButton=document.getElementById('confirmFreeflowSpeed');
+  const cancelButton=document.getElementById('cancelFreeflowSpeed');
+  const approvalPanel=document.getElementById('freeflowSpeedApproval');
+  const costAck=document.getElementById('freeflowSpeedCostAck');
+  const message=document.getElementById('freeflowSpeedMessage');
+  let activePreview=null;
+  const invalidatePreview=async()=>{
+   if(!activePreview)return;
+   const pending=activePreview;activePreview=null;
+   try{
+    const response=await fetch(`/api/outscraper/${encodeURIComponent(pending.id)}/invalidate`,{
+     method:'POST',headers:{'Content-Type':'application/json'},
+     body:JSON.stringify({approval_token:pending.token})
+    });
+    if(!response.ok&&response.status!==409)throw new Error('The unapproved preview could not be invalidated.');
+   }catch(error){console.warn('Unable to invalidate the unapproved free-flow preview.',error)}
+  };
+  const showPreparedRequest=async()=>{
+   prepareButton.disabled=true;message.textContent='Preparing the route and latest previous weekend date...';
+   approvalPanel.hidden=true;confirmButton.hidden=true;costAck.checked=false;
+   try{
+    const sourceResponse=await fetch(freeflowDialog.dataset.prepareUrl,{cache:'no-store'});
+    const sourceData=await sourceResponse.json();
+    if(!sourceResponse.ok)throw new Error(sourceData.error||'Could not prepare the source request.');
+    const config=sourceData.configuration,context=config.trafficlens_context,route=config.routes[0];
+    document.getElementById('freeflowOrigin').value=route.origin;
+    document.getElementById('freeflowDestination').value=route.destination;
+    document.getElementById('freeflowStudyDate').value=context.study_date;
+    document.getElementById('freeflowReferenceDate').value=context.weekend_date;
+    document.getElementById('freeflowReferenceDay').value=`${context.weekend_day} · 07:00`;
+    document.getElementById('freeflowCountry').value=`${context.country_name} (${context.country_code}) · ${context.timezone}`;
+    message.textContent='Review the prepared route and reference date, then create the API preview.';
+    prepareButton.disabled=false;
+    prepareButton.onclick=async()=>{
+     prepareButton.disabled=true;message.textContent='Saving the exact request preview. No API call has been made.';
+     try{
+      const response=await fetch('/api/outscraper/preview',{
+       method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(config)
+      });
+      const data=await response.json();
+      if(response.status===400&&String(data.error||'').includes('weekly weekend date')){
+       message.textContent='The current date changed since this form was opened. Refreshing the weekend date...';
+       await showPreparedRequest();return;
+      }
+      if(!response.ok)throw new Error(data.error||'Could not create the API preview.');
+      activePreview={id:data.id,token:data.approval_token,configuration:data.configuration};
+      document.getElementById('freeflowSpeedSummary').textContent=
+       `${context.country_name} (${context.country_code}) · ${route.origin} → ${route.destination} · ${context.weekend_day} ${context.weekend_date} at 07:00 (${context.timezone}). Estimated cost is unknown.`;
+      approvalPanel.hidden=false;confirmButton.hidden=false;confirmButton.disabled=true;
+      prepareButton.hidden=true;message.textContent='Preview ready. Confirm below to authorize the API call.';
+     }catch(error){message.textContent=error.message||'Could not create the API preview.';prepareButton.disabled=false}
+    };
+   }catch(error){message.textContent=error.message||'Could not prepare the API request.';prepareButton.disabled=false}
+  };
+  document.getElementById('openFreeflowSpeedDialog')?.addEventListener('click',()=>{
+   message.textContent='';approvalPanel.hidden=true;prepareButton.hidden=false;prepareButton.disabled=true;
+   prepareButton.onclick=null;confirmButton.hidden=true;confirmButton.disabled=true;costAck.checked=false;
+   freeflowDialog.showModal();showPreparedRequest();
+  });
+  costAck.addEventListener('change',()=>{confirmButton.disabled=!costAck.checked||!activePreview});
+  confirmButton.addEventListener('click',async()=>{
+   if(!activePreview||!costAck.checked)return;
+   const pending=activePreview;confirmButton.disabled=true;message.textContent='Submitting the authorized request...';
+   try{
+    const response=await fetch(`/api/outscraper/${encodeURIComponent(pending.id)}/approve`,{
+     method:'POST',headers:{'Content-Type':'application/json'},
+     body:JSON.stringify({
+      approval_token:pending.token,configuration:pending.configuration,
+      acknowledge_unknown_cost:true
+     })
+    });
+    const data=await response.json();
+    if(!response.ok)throw new Error(data.error||'The API request was not approved.');
+    activePreview=null;
+    message.textContent='Authorized. The Scraper request is running; this page will refresh its status.';
+    window.setTimeout(()=>{freeflowDialog.close();location.reload()},1200);
+   }catch(error){message.textContent=error.message||'Could not confirm the API request. Check Directions API history before retrying.';confirmButton.disabled=false}
+  });
+  cancelButton.addEventListener('click',async()=>{await invalidatePreview();freeflowDialog.close()});
+  freeflowDialog.addEventListener('close',()=>{invalidatePreview()});
+ }
+</script>{% endblock %}

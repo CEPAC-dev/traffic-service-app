@@ -1,0 +1,266 @@
+{% extends "base.html" %}{% block body %}
+<div class="page-heading"><div><span class="eyebrow">SERVICE REQUEST</span><h1>Create a request</h1><p>Choose a road link, schedule, and the service data you need. The system handles processing.</p></div></div>
+<div class="search"><input id="q" placeholder="Search for a place, e.g. Nasr City"><button class="btn"
+    id="go">Search</button></div>
+{% if repeat_request %}<div class="tip source-request-tip"><b>Repeating request REQ-{{repeat_request.id}}</b><br>Its date, times, services and A/B locations have been copied below. You can edit them before submitting. This creates a new request; the original remains unchanged. Please confirm the no-intersections declaration again.</div>{% endif %}
+<div class="callout"><b>🔗 Select your link.</b> Click the map to choose the <b>start (A)</b> and the <b>end (B)</b> of
+  the link.
+  The link must be one road section with <b>no intersections, entrances or exits</b> between A and B.</div>
+<div class="study">
+  <div id="map"></div>
+  <div class="side">
+    <div class="card">
+      <h3>Selected link</h3>
+      <div id="info" class="coord"></div>
+      <div class="coordinate-readout" aria-live="polite">
+        <div><b>Point A</b><code id="pointACoordinates">Not selected</code></div>
+        <div><b>Point B</b><code id="pointBCoordinates">Not selected</code></div>
+        {% if session.get('role') == 'admin' %}<div id="pointCReadout" hidden><b>Point C · calculated</b><code id="pointCCoordinates">Not calculated</code></div>{% endif %}
+      </div>
+      <p style="margin:8px 0 0"><button class="btn alt" id="reset" type="button">Reset points</button></p>
+      <label class="cf"><input type="checkbox" id="nj"> I confirm this link has no intersections, entrances or
+        exits.</label>
+    </div>
+    <div class="card">
+      <h3>Date and time</h3><label>Date (one day only)</label><input type="date" id="d1">
+      <label for="startTime">Start time (hour:minute:second)</label><input type="time" id="startTime" step="1">
+      <label for="endTime">End time (hour:minute:second)</label><input type="time" id="endTime" step="1">
+      <p id="timeRangeSummary" class="hint" aria-live="polite">Choose a start and end time. Hourly services will include every hour touched by this time range.</p>
+      <div class="qbtns">
+        <button type="button" class="btn alt q" data-start="07:00:00" data-end="09:00:00">AM peak</button>
+        <button type="button" class="btn alt q" data-start="16:00:00" data-end="18:00:00">PM peak</button>
+        <button type="button" class="btn alt q" data-start="00:00:00" data-end="23:59:59">All day</button>
+        <button type="button" class="btn alt q" data-start="" data-end="">Clear</button>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Services</h3>
+      <div class="chk svl" id="svl">
+        {% for k,v in ACTIVE_SERVICES.items() %}<label><input type="checkbox" value="{{k}}" {{ 'checked' if (selected_service==k if selected_service else k in ('speed','travel')) }}><span><b>{{ SVINFO[k].icon }} {{v}}</b>{% if k in ('freeflow_time','freeflow_speed') %}<span class="pill"
+              style="margin-left:6px">Public holiday · 07:00</span>{% endif %}{% if k in NET_SERVICES %}<span class="pill"
+              style="margin-left:6px">⚡ Instant</span>{% endif %}</span></label>{%
+        endfor %}</div>
+      {% if 'freeflow_time' in ACTIVE_SERVICES %}<p class="hint">Free flow time uses Directions API at 7:00 AM on the nearest public holiday to your study date in the route's country.</p>{% endif %}
+      {% if 'freeflow_speed' in ACTIVE_SERVICES %}<p class="hint">Free flow speed uses the latest weekly weekend date strictly before today in the route's country, at 7:00 AM local time. The date used will appear in the result.</p>{% endif %}
+      {% if 'volumes' in ACTIVE_SERVICES %}<p class="hint">Select Traffic volumes by itself. The administrator calculates it using lane count, actual speed, and free-flow speed from the latest previous weekly weekend date at 7:00 AM. Supporting data is handled internally; only the reviewed volume result is sent to you.</p>{% endif %}
+      {% if NET_SERVICES %}<p class="hint">⚡ Instant services are answered right away from our road network when your
+        link is covered by it.</p>{% endif %}
+      <div class="order-actions">
+        <button class="btn" id="ok" disabled type="button">Confirm link</button>
+        <button class="btn alt" id="resetOrder" type="button">Reset order</button>
+      </div>
+      <div id="msg"></div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block js %}
+<script>
+  const repeatRequest = {{repeat_request|tojson if repeat_request else 'null'}};
+  const canPreviewPointC = {{ 'true' if session.get('role') == 'admin' else 'false' }};
+  let pts = [], line = null, extensionLine = null, markerC = null, route = null, seq = 0;
+  const map = L.map('map').setView([30.0444, 31.2357], 11); tiles(map); const rg = L.featureGroup().addTo(map);
+  const fmt = p => [+p.lat.toFixed(6), +p.lng.toFixed(6)];
+  d1.value = new Date().toISOString().slice(0, 10);
+  function updateCoordinates() {
+    pointACoordinates.textContent = pts[0] ? fmt(pts[0].getLatLng()).join(', ') : 'Not selected';
+    pointBCoordinates.textContent = pts[1] ? fmt(pts[1].getLatLng()).join(', ') : 'Not selected';
+    if (canPreviewPointC) {
+      pointCReadout.hidden = !route?.pointC;
+      pointCCoordinates.textContent = route?.pointC ? fmt({ lat: route.pointC[0], lng: route.pointC[1] }).join(', ') : 'Not calculated';
+    }
+  }
+  function hourSlots() {
+    const start = startTime.value.split(':').map(Number), end = endTime.value.split(':').map(Number);
+    if (start.length < 2 || end.length < 2 || !startTime.value || !endTime.value) return [];
+    const startSeconds = start[0] * 3600 + start[1] * 60 + (start[2] || 0);
+    const endSeconds = end[0] * 3600 + end[1] * 60 + (end[2] || 0);
+    if (endSeconds <= startSeconds) return [];
+    return Array.from({ length: Math.floor((endSeconds - 1) / 3600) - Math.floor(startSeconds / 3600) + 1 },
+      (_, index) => Math.floor(startSeconds / 3600) + index);
+  }
+  function check() {
+    const hours = hourSlots();
+    timeRangeSummary.textContent = hours.length
+      ? `Exact range: ${startTime.value}–${endTime.value}. Included hourly periods: ${hours.map(hour => `${String(hour).padStart(2, '0')}:00-${String(hour + 1).padStart(2, '0')}:00`).join(', ')}.`
+      : 'Choose a valid start and end time on the same day.';
+    const needsPointC = [...document.querySelectorAll('#svl input:checked')].some(input => ['speed', 'travel', 'volumes'].includes(input.value));
+    ok.disabled = !(pts.length == 2 && route?.road && route.junctions === 0 && (!needsPointC || route.pointC) && nj.checked && hours.length && d1.value && document.querySelector('#svl input:checked'))
+  }
+  function draw() {
+    if (line) { rg.removeLayer(line); line = null }
+    if (extensionLine) { rg.removeLayer(extensionLine); extensionLine = null }
+    if (markerC) { rg.removeLayer(markerC); markerC = null }
+    if (pts.length < 2) return;
+    const a = pts[0].getLatLng(), b = pts[1].getLatLng(), road = route && route.path;
+    line = L.polyline(road ? route.path : [a, b], { color: '#f97316', weight: 5, dashArray: road ? null : '8 8' }).addTo(rg);
+    if (canPreviewPointC && route?.extensionPath?.length) extensionLine = L.polyline(route.extensionPath, { color: '#2563eb', weight: 4, dashArray: '6 6' }).addTo(rg);
+    if (canPreviewPointC && route?.pointC) markerC = L.marker(route.pointC, { icon: L.divIcon({ className: 'point-c-marker', html: 'C', iconSize: [28, 28], iconAnchor: [14, 14] }) }).addTo(rg).bindTooltip('C · calculated', { permanent: true, direction: 'top' });
+  }
+  async function fetchRoadRoute(a, b) {
+    const response = await fetch(`https://router.project-osrm.org/route/v1/driving/${a.lng},${a.lat};${b.lng},${b.lat}?overview=full&geometries=geojson&steps=true`);
+    if (!response.ok) throw new Error('Road routing service is unavailable.');
+    const result = await response.json();
+    if (result.code !== 'Ok' || !result.routes?.length) throw new Error('Could not find a drivable road between these points.');
+    return result.routes[0];
+  }
+  function bearingDegrees(a, b) {
+    const rad = value => value * Math.PI / 180;
+    const lat1 = rad(a[0]), lat2 = rad(b[0]), lng = rad(b[1] - a[1]);
+    return (Math.atan2(Math.sin(lng) * Math.cos(lat2), Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(lng)) * 180 / Math.PI + 360) % 360;
+  }
+  function projectCoordinate(origin, bearing, distance) {
+    const radius = 6371000, rad = value => value * Math.PI / 180, brng = rad(bearing);
+    const lat1 = rad(origin[0]), lng1 = rad(origin[1]), angular = distance / radius;
+    const lat2 = Math.asin(Math.sin(lat1) * Math.cos(angular) + Math.cos(lat1) * Math.sin(angular) * Math.cos(brng));
+    const lng2 = lng1 + Math.atan2(Math.sin(brng) * Math.sin(angular) * Math.cos(lat1), Math.cos(angular) - Math.sin(lat1) * Math.sin(lat2));
+    return [lat2 * 180 / Math.PI, ((lng2 * 180 / Math.PI + 540) % 360) - 180];
+  }
+  function pointAlongRoad(coordinates, distance) {
+    let travelled = 0, extension = [coordinates[0]];
+    for (let index = 1; index < coordinates.length; index++) {
+      const from = coordinates[index - 1], to = coordinates[index];
+      const segment = L.latLng(from[0], from[1]).distanceTo(L.latLng(to[0], to[1]));
+      if (!segment) continue;
+      if (travelled + segment >= distance) {
+        const fraction = (distance - travelled) / segment;
+        const point = [from[0] + (to[0] - from[0]) * fraction, from[1] + (to[1] - from[1]) * fraction];
+        extension.push(point);
+        return { point, path: extension };
+      }
+      travelled += segment;
+      extension.push(to);
+    }
+    throw new Error('The road extension was shorter than the calculated distance.');
+  }
+  async function calculatePointC(A, B, Delta) {
+    const baseRoute = await fetchRoadRoute(A, B);
+    const coordinates = baseRoute.geometry.coordinates.map(([lng, lat]) => [lat, lng]);
+    const pathDistance = Number(baseRoute.distance);
+    const ratio = pathDistance / 1500;
+    const newDistance = Math.max(ratio * Delta * 1000, 1510 - pathDistance);
+    if (!(newDistance > 0) || coordinates.length < 2) throw new Error('Could not calculate a positive extension distance for point C.');
+    const last = coordinates[coordinates.length - 1], previous = coordinates[coordinates.length - 2];
+    const bearing = bearingDegrees(previous, last);
+    let probeDistance = Math.max(newDistance * 1.5, 500);
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const probe = projectCoordinate(last, bearing, probeDistance);
+      try {
+        const continuation = await fetchRoadRoute(L.latLng(last[0], last[1]), L.latLng(probe[0], probe[1]));
+        const extensionCoordinates = continuation.geometry.coordinates.map(([lng, lat]) => [lat, lng]);
+        if (Number(continuation.distance) >= newDistance) {
+          const result = pointAlongRoad(extensionCoordinates, newDistance);
+          return { baseRoute, pointC: result.point, extensionPath: result.path, ratio, newDistance,
+            routeDistanceToC: pathDistance + newDistance };
+        }
+      } catch (error) {
+        throw error;
+      }
+      probeDistance *= 2;
+    }
+    throw new Error('Could not extend the routed road far enough beyond B to place point C.');
+  }
+  async function solve() {
+    route = null; updateCoordinates(); check(); draw();
+    if (pts.length < 2) { info.textContent = pts.length ? 'Start (A) selected. Click the map to select the end (B).' : 'Click the map to select the start (A) of the link.'; return }
+    const a = pts[0].getLatLng(), b = pts[1].getLatLng(), my = ++seq;
+    const needsPointC = [...document.querySelectorAll('#svl input:checked')].some(input => ['speed', 'travel', 'volumes'].includes(input.value));
+    info.textContent = needsPointC ? 'Finding the road and calculating point C beyond B...' : 'Finding the road between A and B...';
+    try {
+      const computed = needsPointC ? await calculatePointC(a, b, a.distanceTo(b) / 1000) : null;
+      const rt = computed ? computed.baseRoute : await fetchRoadRoute(a, b);
+      if (my !== seq) return;
+      const full = rt.geometry.coordinates.map(c => [c[1], c[0]]), k = Math.ceil(full.length / 400);
+      const path = full.filter((_, i) => i % k === 0); if (path[path.length - 1] !== full[full.length - 1]) path.push(full[full.length - 1]);
+      const ints = rt.legs.flatMap(l => l.steps.flatMap(s => s.intersections)).slice(1, -1);
+      rt.waypoints?.forEach((w, i) => pts[i].setLatLng([w.location[1], w.location[0]]));
+      updateCoordinates();
+      route = {
+        road: true, path: path.map(p => [+p[0].toFixed(6), +p[1].toFixed(6)]),
+        km: +(rt.distance / 1000).toFixed(2), junctions: ints.filter(x => x.bearings.length >= 3).length,
+        pointC: computed?.pointC, extensionPath: computed?.extensionPath,
+        ratio: computed?.ratio, newDistance: computed?.newDistance,
+        routeDistanceToC: computed?.routeDistanceToC,
+      };
+    } catch (e) {
+      if (my !== seq) return;
+      route = { road: false, path: null, km: +(a.distanceTo(b) / 1000).toFixed(2), junctions: null };
+      route.error = e.message || 'Road route could not be calculated.';
+    }
+    updateCoordinates();
+    draw();
+    if (route.road) map.fitBounds(L.latLngBounds([...route.path, ...(canPreviewPointC ? route.extensionPath || [] : [])]), { padding: [25, 25], maxZoom: 16 });
+    const A = fmt(pts[0].getLatLng()), B = fmt(pts[1].getLatLng());
+    const pointCInfo = canPreviewPointC && route.pointC ? `<br>Delta (straight A–B): ${(a.distanceTo(b) / 1000).toFixed(3)} km<br>Ratio: ${route.ratio.toFixed(3)}<br>New Distance beyond B: ${(route.newDistance / 1000).toFixed(3)} km<br>Road distance A→C: ${(route.routeDistanceToC / 1000).toFixed(3)} km<br>Point C: ${fmt({lat:route.pointC[0],lng:route.pointC[1]}).join(', ')}` : '';
+    info.innerHTML = `A: ${A.join(', ')}<br>B: ${B.join(', ')}<br>` + (route.road ? `Road length: ~${route.km} km<br>` + (route.junctions ? `<b style="color:#9a3412">⚠ ${route.junctions} possible junction(s) along this road. Move A or B so the link has none.</b>` : '✅ No junctions found along this road.') + pointCInfo
+      : `${route.error || `Road not found, straight-line distance: ~${route.km} km`}<br><b style="color:#9a3412">The link could not be checked for intersections or point C, so it cannot be submitted.</b>`); check()
+  }
+  map.on('click', e => { if (pts.length >= 2) return; const m = L.marker(e.latlng, { draggable: true }).addTo(rg).bindTooltip(pts.length ? 'B' : 'A', { permanent: true, direction: 'top' }); m.on('dragend', solve); pts.push(m); updateCoordinates(); solve() });
+  reset.onclick = () => {   rg.clearLayers(); pts = []; line = null; extensionLine = null; markerC = null; route = null; seq++; nj.checked = false; msg.innerHTML = ''; updateCoordinates(); solve() };
+  resetOrder.onclick = () => {
+    rg.clearLayers(); pts = []; line = null; extensionLine = null; markerC = null; route = null; seq++;
+    nj.checked = false; msg.replaceChildren(); q.value = ''; updateCoordinates();
+    startTime.value = ''; endTime.value = '';
+    document.querySelectorAll('#svl input[type="checkbox"]').forEach(input => {
+      input.checked = input.value === 'speed' || input.value === 'travel';
+    });
+    d1.value = new Date().toISOString().slice(0, 10);
+    solve();
+  };
+  document.querySelectorAll('.q').forEach(b => b.onclick = () => {
+    startTime.value = b.dataset.start; endTime.value = b.dataset.end; check()
+  });
+  const enforceVolumeOnly = changed => {
+    const volume = document.querySelector('#svl input[value="volumes"]');
+    if (!volume) return;
+    if (changed?.value === 'volumes' && volume.checked) {
+      document.querySelectorAll('#svl input[type="checkbox"]').forEach(input => {
+        if (input !== volume) input.checked = false;
+      });
+    } else if (changed?.checked) {
+      volume.checked = false;
+    }
+  };
+  nj.onchange = check; d1.onchange = check; startTime.oninput = check; endTime.oninput = check;
+  svl.onchange = event => { enforceVolumeOnly(event.target); solve() };
+  if (repeatRequest) {
+    d1.value = repeatRequest.date;
+    startTime.value = repeatRequest.start_time;
+    endTime.value = repeatRequest.end_time;
+    document.querySelectorAll('#svl input[type="checkbox"]').forEach(input => {
+      input.checked = repeatRequest.services.includes(input.value);
+    });
+    enforceVolumeOnly(document.querySelector('#svl input:checked'));
+    repeatRequest.coords.forEach((coordinate, index) => {
+      const marker = L.marker(coordinate, { draggable: true }).addTo(rg)
+        .bindTooltip(index ? 'B' : 'A', { permanent: true, direction: 'top' });
+      marker.on('dragend', solve);
+      pts.push(marker);
+    });
+    map.setView(repeatRequest.coords[0], 14);
+    updateCoordinates();
+  }
+  solve();
+  go.onclick = async () => {
+    const s = q.value.trim(); if (!s) return; try {
+      const r = await (await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(s))).json();
+      if (r[0]) { const b = r[0].boundingbox.map(Number); map.fitBounds([[b[0], b[2]], [b[1], b[3]]]) } else alert('Place not found.')
+    } catch (e) { alert('Search failed. Check your connection.') }
+  };
+  q.onkeydown = e => { if (e.key === 'Enter') go.click() };
+  ok.onclick = async () => {
+    if (!route?.road || route.junctions !== 0) return;
+    const body = {
+      type: 'link', services: [...document.querySelectorAll('#svl input:checked')].map(i => i.value), date: d1.value,
+      start_time: startTime.value, end_time: endTime.value, hours: hourSlots(),
+      coords: [fmt(pts[0].getLatLng()), fmt(pts[1].getLatLng())], path: route.path, road_km: route.km, junctions: route.junctions, no_junctions: nj.checked,
+      point_c: route.pointC ? fmt({lat:route.pointC[0],lng:route.pointC[1]}) : null,
+      point_c_distance_km: route.routeDistanceToC ? route.routeDistanceToC / 1000 : null,
+      area: `Link A to B (~${route.km} km${route.road ? ' by road' : ', straight line'})`
+    };
+    const r = await fetch('/api/requests', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const j = await r.json(); if (!r.ok) return alert(j.error); ok.disabled = true;
+    const m = { Completed: 'Your results are ready. All the data came from our road network.', Processing: 'Part of your data is ready now. The rest is being prepared.', Pending: 'We will prepare your data and update this request.' }[j.status];
+    msg.innerHTML = `<p class="ok">Request REQ-${j.id} created. ${m}</p>` + (j.status === 'Pending' ? '' : `<a class="btn" href="/results/${j.id}">View available results</a> `) + `<a class="btn alt" href="/requests">My requests</a>`
+  };
+</script>{% endblock %}

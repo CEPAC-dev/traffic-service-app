@@ -1,0 +1,45 @@
+{% extends "base.html" %}{% block body %}
+<div class="page-heading">
+  <div><span class="eyebrow">REQUEST ACTIVITY</span><h1>My requests</h1><p>Track your traffic studies and open any request for details or results.</p></div>
+  <a class="btn" href="{{url_for('study')}}">＋ Create request</a>
+</div>
+{% if reqs %}
+<div class="request-toolbar"><div class="bar"><input type="search" id="requestSearch" placeholder="Search request ID, location, or service"><select id="requestStatus" aria-label="Filter by status"><option value="">All statuses</option>{% for s in statuses %}<option value="{{s}}">{{s}}</option>{% endfor %}</select><select id="requestResults" aria-label="Filter by result availability"><option value="">All requests</option><option value="available">Results available</option></select><input type="date" id="requestDate" aria-label="Filter by study date"><button class="btn alt" id="clearRequestFilters" type="button">Clear filters</button></div><span class="result-count" id="requestCount" aria-live="polite"></span></div>
+<div class="tw"><table id="myRequestsTable"><thead><tr><th>Request ID</th><th>Service</th><th>A → B</th><th>Date</th><th>Status</th><th>Action</th></tr></thead><tbody>
+{% for r in reqs %}<tr class="my-request-row" data-status="{{r.status}}" data-study-date="{{r.d1}}" data-results="{{'available' if r.results_available else 'none'}}"><td><b>REQ-{{r.id}}</b><small class="request-subtext">{{r.created}}</small></td><td>{% for s in r.services %}<span class="pill">{{SVINFO[s].icon}} {{SERVICES[s]}}</span>{% endfor %}</td><td>{{r.area}}<small class="request-subtext">{{r.time_range_label}} · {{r.hours_label}}</small></td><td>{{r.d1}}</td><td><span class="b {{r.status}}">{{r.status}}</span></td><td><div class="row-actions"><a class="btn alt" href="{{url_for('user_request_detail',rid=r.id)}}">View</a>{% if r.results_available %}<a class="btn" href="{{url_for('result',rid=r.id)}}">Results</a>{% endif %}<a class="btn alt" href="{{url_for('study',repeat_request_id=r.id)}}">Repeat / edit</a></div></td></tr>{% endfor %}
+</tbody></table><p class="empty-results" id="noMatchingRequests" hidden>No requests match your filters.</p></div>
+{% else %}<div class="card dashboard-empty"><h3>No requests yet</h3><p>Your submitted requests and their results will appear here.</p><a class="btn" href="{{ url_for('study') }}">Start your first study</a></div>{% endif %}
+{% endblock %}
+{% block js %}{% if reqs %}<script>
+const requestRows=[...document.querySelectorAll('.my-request-row')];
+const searchInput=document.getElementById('requestSearch');
+const statusInput=document.getElementById('requestStatus');
+const resultsInput=document.getElementById('requestResults');
+const dateInput=document.getElementById('requestDate');
+const countLabel=document.getElementById('requestCount');
+const emptyMessage=document.getElementById('noMatchingRequests');
+statusInput.value={{initial_status|tojson}};
+resultsInput.value={{initial_results|tojson}};
+function filterRequests(){
+ const query=searchInput.value.trim().toLocaleLowerCase();
+ let visible=0;
+ requestRows.forEach(row=>{
+  const matchesQuery=!query||row.textContent.toLocaleLowerCase().includes(query);
+  const matchesStatus=!statusInput.value||row.dataset.status===statusInput.value;
+  const matchesResults=!resultsInput.value||row.dataset.results===resultsInput.value;
+  const matchesDate=!dateInput.value||row.dataset.studyDate===dateInput.value;
+  row.hidden=!(matchesQuery&&matchesStatus&&matchesResults&&matchesDate);
+  if(!row.hidden)visible++;
+ });
+ countLabel.textContent=`Showing ${visible} of ${requestRows.length} requests`;
+ emptyMessage.hidden=visible!==0;
+}
+searchInput.addEventListener('input',filterRequests);
+statusInput.addEventListener('change',filterRequests);
+resultsInput.addEventListener('change',filterRequests);
+dateInput.addEventListener('change',filterRequests);
+document.getElementById('clearRequestFilters').addEventListener('click',()=>{
+ searchInput.value='';statusInput.value='';resultsInput.value='';dateInput.value='';filterRequests();
+});
+filterRequests();
+</script>{% endif %}{% endblock %}

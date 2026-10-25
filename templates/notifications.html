@@ -1,0 +1,20 @@
+{% extends "base.html" %}{% block body %}
+<div class="section-heading"><div><h2>Notifications</h2><p>Updates about new requests and replies from the administrator.</p></div></div>
+<div class="card device-notification-controls">
+  <h3>Device notifications</h3>
+  <p class="hint">Allow browser notifications to see new requests or replies as system notifications on this device while TrafficLens is open.</p>
+  <button class="btn" id="enableDeviceNotifications" type="button">Enable device notifications</button>
+  <span id="deviceNotificationStatus" class="msg" role="status" aria-live="polite"></span>
+</div>
+<section class="notification-list">
+  {% for item in notifications %}
+  <a class="card notification-item {{'unread' if not item.read_at}}" href="{{url_for('open_notification',notification_id=item.id)}}">
+    <span class="notification-item-icon" aria-hidden="true">{{'📨' if item.kind=='new_request' else '💬'}}</span>
+    <span class="notification-item-body"><b>{{item.title}}</b><span>{{item.message}}</span><small>{{item.created_at}}</small></span>
+    {% if not item.read_at %}<span class="notification-unread-label">New</span>{% endif %}
+  </a>
+  {% else %}
+  <div class="card">لا توجد إشعارات حتى الآن.</div>
+  {% endfor %}
+</section>
+{% endblock %}

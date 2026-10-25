@@ -1,0 +1,11 @@
+{% extends "base.html" %}{% block body %}
+<div class="card auth"><h2 class="t">{{ 'Sign in' if mode=='login' else 'Create account' }}</h2>
+<form method="post">
+{% if mode=='register' %}<label>Name</label><input name="name" required>{% endif %}
+<label>Email</label><input name="email" type="email" required>
+<label>Password</label><input name="password" type="password" required>
+<p><button class="btn" style="width:100%">{{ 'Sign in' if mode=='login' else 'Create account' }}</button></p></form>
+{% if mode=='login' %}<p>New here? <a href="{{ url_for('register') }}">Create an account</a></p>
+<p style="color:var(--mut);font-size:13px">Demo admin: admin@demo.com / admin123</p>
+{% else %}<p>Already registered? <a href="{{ url_for('login') }}">Sign in</a></p>{% endif %}</div>
+{% endblock %}

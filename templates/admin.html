@@ -1,0 +1,211 @@
+{% extends "base.html" %}{% block body %}
+<div class="page-heading"><div><span class="eyebrow">TRAFFIC OPERATIONS</span><h1>Dashboard</h1><p>Track service requests from intake through processing and review.</p></div><a class="btn" href="{{ url_for('admin') }}#requests-all">Review requests</a></div>
+<section id="t-overview">
+<div class="kpis dashboard-kpis">
+<button class="card kpi dashboard-kpi kpi-violet kpi-action" data-status=""><i class="kpi-icon">▤</i><b>{{ stats.total }}</b><span>Total requests</span></button>
+<button class="card kpi dashboard-kpi kpi-orange kpi-action" data-status="Pending"><i class="kpi-icon">＋</i><b>{{ stats.by_status.Pending }}</b><span>New requests</span></button>
+<button class="card kpi dashboard-kpi kpi-blue kpi-action" data-status="Processing"><i class="kpi-icon">↻</i><b>{{ stats.by_status.Processing }}</b><span>Processing</span></button>
+<button class="card kpi dashboard-kpi kpi-orange kpi-action" data-status="review"><i class="kpi-icon">⌕</i><b>{{ stats.waiting_review }}</b><span>Waiting for review</span></button>
+<button class="card kpi dashboard-kpi kpi-green kpi-action" data-status="Completed"><i class="kpi-icon">✓</i><b>{{ stats.by_status.Completed }}</b><span>Completed / sent</span></button>
+</div>
+<p class="dashboard-footnote">This system marks a request Completed when its results are available to the user; it does not store a separate sent status.</p>
+<div class="dashboard-section">
+<div class="section-heading"><div><h2>Request overview</h2><p>Current request state and service demand.</p></div></div>
+<div class="dashboard-charts dashboard-charts-compact"><article class="card chart-card"><h3>Requests by status</h3><p class="sub">New, active, completed, and rejected requests.</p><canvas id="c1" height="150"></canvas></article>
+<article class="card chart-card"><h3>Requests by service</h3><p class="sub">Services requested across the platform.</p><canvas id="c2" height="150"></canvas></article></div>
+</div>
+<div class="dashboard-section">
+<div class="section-heading"><div><h2>Recent requests</h2><p>Latest client submissions requiring attention.</p></div><a class="btn alt" href="{{url_for('admin')}}#requests">All requests</a></div>
+<div class="card table-card"><div class="tw"><table class="recent-table"><thead><tr><th>Request ID</th><th>User</th><th>Service</th><th>A</th><th>B</th><th>Status</th><th>Created at</th><th>Action</th></tr></thead><tbody>
+{% for r in reqs[:8] %}<tr><td><b>REQ-{{r.id}}</b></td><td>{{r.client}}</td><td>{% for service in r.services %}<span class="pill">{{SVINFO[service].icon}} {{SERVICES[service]}}</span>{% endfor %}</td>
+<td class="request-data-cell">{{'%.5f, %.5f'|format(r.coords[0][0],r.coords[0][1]) if r.coords else '-'}}</td><td class="request-data-cell">{{'%.5f, %.5f'|format(r.coords[-1][0],r.coords[-1][1]) if r.coords else '-'}}</td>
+<td><span class="b {{'waiting_review' if r.waiting_for_review else r.status}}">{{r.dashboard_status}}</span></td><td>{{r.created}}</td><td><a class="btn btn-small" href="{{url_for('admin_request',rid=r.id)}}">View</a></td></tr>
+{% else %}<tr><td colspan="8"><div class="table-empty"><b>No requests yet</b><span>New client requests will appear here.</span></div></td></tr>{% endfor %}
+</tbody></table></div></div>
+</div>
+</section>
+
+<section id="t-requests" hidden>
+<div class="section-heading"><div><h2>All requests</h2><p>Search and filter requests by service, lifecycle status, or submission date.</p></div><div class="row-actions"><a class="btn alt" href="{{url_for('admin_outscraper')}}">Directions API history</a><button class="btn alt" id="deleteAllRequests" type="button">Delete all requests</button></div></div>
+<div class="request-filters">
+<label><span>Search</span><input id="gs" type="search" placeholder="Request ID, user, or link"></label>
+<label><span>Service</span><select id="filterService"><option value="">All services</option>{% for key,name in SERVICES.items() %}<option value="{{key}}">{{name}}</option>{% endfor %}</select></label>
+<label><span>Status</span><select id="filterStatus"><option value="">All statuses</option><option value="Pending">Pending</option><option value="Processing">Processing</option><option value="review">Waiting for review</option><option value="Completed">Completed / sent</option><option value="Rejected">Rejected</option></select></label>
+<label><span>Created date</span><input id="filterDate" type="date"></label>
+<button class="btn alt" id="clr" type="button">Clear filters</button>
+</div>
+<div class="card table-card"><div class="tw"><table id="rt" class="request-table"><thead><tr><th>Request ID</th><th>User</th><th>Service</th><th>A</th><th>B</th><th>Status</th><th>Created at</th><th>Action</th></tr></thead><tbody>
+{% for r in reqs %}<tr class="dr" data-status="{{r.status}}" data-review="{{'true' if r.waiting_for_review else 'false'}}" data-service="{{r.services|join(',')}}" data-created="{{r.created[:10]}}"><td><b>REQ-{{r.id}}</b></td><td>{{r.client}}</td><td>{% for service in r.services %}<span class="pill">{{SVINFO[service].icon}} {{SERVICES[service]}}</span>{% endfor %}</td>
+<td class="request-data-cell">{{'%.5f, %.5f'|format(r.coords[0][0],r.coords[0][1]) if r.coords else '-'}}</td><td class="request-data-cell">{{'%.5f, %.5f'|format(r.coords[-1][0],r.coords[-1][1]) if r.coords else '-'}}</td>
+<td><span class="b {{'waiting_review' if r.waiting_for_review else r.status}}">{{r.dashboard_status}}</span></td><td>{{r.created}}</td><td><div class="row-actions"><a class="btn btn-small" href="{{url_for('admin_request',rid=r.id)}}">View</a>{% if r.status not in ('Completed','Rejected') %}<button class="btn alt btn-small reject-request" data-id="{{r.id}}">Reject</button>{% endif %}<button class="btn alt delete-request" data-id="{{r.id}}">Delete</button></div></td></tr>
+{% else %}<tr class="empty-row"><td colspan="8"><div class="table-empty"><b>No requests yet</b><span>New client requests will appear here.</span></div></td></tr>{% endfor %}
+<tr id="noRequestMatches" hidden><td colspan="8"><div class="table-empty"><b>No matching requests</b><span>Try changing or clearing the filters.</span></div></td></tr>
+</tbody></table></div></div>
+<div class="pagination-bar"><span id="requestCount" class="result-count" aria-live="polite"></span><div class="pagination-controls"><button id="pagePrevious" type="button" aria-label="Previous page">‹</button><span id="pageCurrent" class="page-current">1</span><button id="pageNext" type="button" aria-label="Next page">›</button></div></div>
+</section>
+
+<section id="t-users" hidden>
+<div class="section-heading"><div><h2>Users</h2><p>Find clients and manage administrator access.</p></div></div>
+<div class="request-toolbar"><div class="bar"><input id="us" type="search" placeholder="Search users by name or email"><select id="ur"><option value="">All roles</option><option>admin</option><option>client</option></select></div></div>
+<div class="tw"><table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Requests</th><th>Completed</th><th>Last request</th><th>Action</th></tr></thead><tbody>
+{% for u in users %}<tr class="ur"><td>{{u.name}}</td><td>{{u.email}}</td><td><span class="b role-{{u.role}}">{{u.role}}</span></td><td>{{u.n}}</td><td>{{u.done}}</td><td>{{u.last or '-'}}</td>
+<td>{% if u.id==me.uid %}<span class="pill">You</span>{% else %}<button class="btn alt rl" data-id="{{u.id}}" data-name="{{u.name}}" data-role="{{ 'client' if u.role=='admin' else 'admin' }}">{{ 'Remove admin' if u.role=='admin' else 'Make admin' }}</button>{% endif %}</td></tr>{% endfor %}</tbody></table></div></section>
+
+<section id="t-services" hidden>
+<p class="sub" style="font-size:14px">Choose which services clients can request, edit their descriptions, or add a custom service.</p>
+<div class="svedit">{% for k,service in SERVICE_CATALOG.items() %}<div class="card service-card"><h3>{{ SVINFO[k].icon }} {{service.name}}</h3>
+<label class="cf"><input type="checkbox" class="service-enabled" data-k="{{k}}" {{ 'checked' if service.enabled }}> Available to clients</label>
+<textarea rows="4" data-k="{{k}}">{{ SVINFO[k].desc }}</textarea>
+<p><button class="btn svs" data-k="{{k}}" type="button">Save description</button> <button class="btn alt svr" data-k="{{k}}" type="button">Reset description</button><span class="msg"></span></p></div>{% endfor %}</div>
+<div class="card" style="margin-top:14px"><h3>Add a service</h3>
+<div class="grid2"><div><label for="newServiceName">Service name</label><input id="newServiceName" maxlength="80" placeholder="e.g. Traffic volume or LOS"></div>
+<div><label for="newServiceUnit">Unit (optional)</label><input id="newServiceUnit" maxlength="24" placeholder="e.g. veh/h"></div></div>
+<label for="newServiceKind">Data entry</label><select id="newServiceKind"><option value="hourly">One value for each selected hour</option><option value="static">One value for the whole link</option></select>
+<p><button class="btn" id="addService" type="button">Add service</button><span class="msg" id="addServiceMsg"></span></p></div></section>
+
+<section id="t-network" hidden>
+{% if not net.have_geo %}<div class="tip">⚠ The network tools need geopandas. Install it with <b>pip install geopandas pyogrio</b> and restart the app.</div>{% endif %}
+<p class="sub" style="font-size:14px">Upload your road network. When a client asks for a service the network can answer, the data is filled in automatically.
+If <b>every</b> requested service is answered, the request becomes <b>Completed</b> at once. If only <b>some</b> are, it becomes <b>Processing</b> and the client can already see those results while you prepare the rest.</p>
+<div class="grid2"><div class="card"><h3 class="ct">📁 Network file</h3><p class="sub">Shapefile (.zip with .shp, .dbf, .shx, .prj), GeoJSON or GeoPackage. Road links as lines.</p>
+{% if net.cfg.file %}<p style="text-align:center">Current file: <b>{{ net.cfg.filename }}</b><br>{{ net.cfg.features }} links · CRS {{ net.cfg.crs }} · uploaded {{ net.cfg.uploaded }}</p>{% endif %}
+<input type="file" id="nf" accept=".zip,.geojson,.json,.gpkg"><p><button class="btn" id="nu" type="button">Upload network</button><span class="msg" id="nm"></span></p></div>
+<div class="card"><h3 class="ct">🔗 Match your columns</h3>
+{% if net.cfg.file %}<p class="sub">Choose which column in your file holds each value.</p>
+{% for key,label in [('lanes','Number of lanes'),('speed','Free flow speed (speed limit)'),('capacity','Capacity (veh/h)'),('road_name','Road name (optional)')] %}
+<label>{{label}}</label><select data-k="{{key}}"><option value="">Not available</option>{% for c in net.cfg.columns %}<option {{ 'selected' if net.cfg.get(key)==c }}>{{c}}</option>{% endfor %}</select>{% endfor %}
+<label>Speed unit</label><select data-k="speed_unit">{% for u in ['km/h','mph','m/s'] %}<option {{ 'selected' if net.cfg.get('speed_unit')==u }}>{{u}}</option>{% endfor %}</select>
+<label>Matching distance (metres)</label><input type="number" data-k="tol" value="{{ net.cfg.get('tol',25) }}">
+<label>Minimum coverage of the link (%)</label><input type="number" data-k="min_cov" value="{{ net.cfg.get('min_cov',80) }}">
+<p><button class="btn" id="ns" type="button">Save</button><span class="msg" id="nm2"></span></p>
+{% else %}<p class="sub">Upload a file first.</p>{% endif %}</div></div>
+<div class="card" style="margin-top:14px"><h3 class="ct">⚡ Answered from the network</h3>
+{% if net.services %}<p style="text-align:center">{% for k in net.services %}<span class="pill">{{ SVINFO[k].icon }} {{ SERVICES[k] }}</span>{% endfor %}</p>
+<p class="sub">The road network fills in any requested service it can calculate from the configured columns. Other services can be entered manually.</p>
+{% else %}<p class="sub">No network yet. Every request will wait for you.</p>{% endif %}</div></section>
+{% endblock %}
+{% block js %}<script>
+const ST={{stats|tojson }},SECTIONS=['overview','requests','users','services','network'];
+const post=(u,b)=>fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(r=>r.json());
+function sectionFromHash(){const hash=location.hash.slice(1);if(hash.startsWith('requests'))return'requests';return SECTIONS.includes(hash)?hash:'overview'}
+function showSection(section){SECTIONS.forEach(name=>{document.getElementById(`t-${name}`).hidden=name!==section});document.querySelectorAll('.side-link[data-section]').forEach(link=>link.classList.toggle('active',link.dataset.section===section))}
+
+/* overview */
+const C=['#7c3aed','#16a34a','#f97316','#a855f7','#22c55e','#fb923c'],ax={y:{beginAtZero:true,ticks:{precision:0},grid:{color:'#f0ebf8'}},x:{grid:{display:false}}},nl={plugins:{legend:{display:false}}};
+const statusColors={Pending:'#f59e0b',Processing:'#7c3aed',Completed:'#16a34a',Rejected:'#dc4b55'};
+new Chart(c1,{type:'doughnut',data:{labels:Object.keys(ST.by_status),datasets:[{data:Object.values(ST.by_status),backgroundColor:Object.keys(ST.by_status).map(s=>statusColors[s]||'#94a3b8')}]}});
+new Chart(c2,{type:'bar',data:{labels:Object.keys(ST.by_service),datasets:[{data:Object.values(ST.by_service),backgroundColor:C,borderRadius:6}]},options:{...nl,scales:ax}});
+
+/* Search, filter, and paginate the request list. */
+const rows=[...document.querySelectorAll('#rt tbody tr.dr')],pageSize=10;
+const searchRequests=document.getElementById('gs'),serviceFilter=document.getElementById('filterService'),statusFilter=document.getElementById('filterStatus'),dateFilter=document.getElementById('filterDate');
+let currentPage=1,filteredRows=[];
+const requestCount=document.getElementById('requestCount'),pageCurrent=document.getElementById('pageCurrent'),pagePrevious=document.getElementById('pagePrevious'),pageNext=document.getElementById('pageNext'),noRequestMatches=document.getElementById('noRequestMatches');
+function applyRequests(){
+ const query=searchRequests.value.trim().toLocaleLowerCase();
+ filteredRows=rows.filter(row=>{
+  const searchMatch=!query||row.textContent.toLocaleLowerCase().includes(query);
+  const selectedService=serviceFilter.value;
+  const serviceMatch=!selectedService||row.dataset.service.split(',').includes(selectedService);
+  const selectedStatus=statusFilter.value;
+  const statusMatch=!selectedStatus||(selectedStatus==='review'?row.dataset.review==='true':row.dataset.status===selectedStatus);
+  const dateMatch=!dateFilter.value||row.dataset.created===dateFilter.value;
+  return searchMatch&&serviceMatch&&statusMatch&&dateMatch;
+ });
+ const pageCount=Math.max(1,Math.ceil(filteredRows.length/pageSize));
+ currentPage=Math.min(currentPage,pageCount);
+ const start=(currentPage-1)*pageSize,end=Math.min(start+pageSize,filteredRows.length);
+ rows.forEach(row=>{row.hidden=true});
+ filteredRows.slice(start,end).forEach(row=>{row.hidden=false});
+ noRequestMatches.hidden=filteredRows.length!==0||rows.length===0;
+ requestCount.textContent=filteredRows.length?`Showing ${start+1}–${end} of ${filteredRows.length} requests`:'Showing 0 requests';
+ pageCurrent.textContent=String(currentPage);
+ pagePrevious.disabled=currentPage<=1;
+ pageNext.disabled=currentPage>=pageCount;
+}
+searchRequests.addEventListener('input',()=>{currentPage=1;applyRequests()});
+serviceFilter.addEventListener('change',()=>{currentPage=1;applyRequests()});
+statusFilter.addEventListener('change',()=>{currentPage=1;applyRequests()});
+dateFilter.addEventListener('change',()=>{currentPage=1;applyRequests()});
+pagePrevious.addEventListener('click',()=>{currentPage--;applyRequests()});
+pageNext.addEventListener('click',()=>{currentPage++;applyRequests()});
+clr.onclick=()=>{searchRequests.value='';serviceFilter.value='';statusFilter.value='';dateFilter.value='';currentPage=1;applyRequests()};
+function applyHash(){
+ const section=sectionFromHash();showSection(section);
+ if(location.hash==='#requests'||location.hash==='#requests-all'){statusFilter.value='';currentPage=1}
+ if(section==='requests'&&location.hash.startsWith('#requests-')){
+  const requestedStatus=location.hash.slice('#requests-'.length);
+  const statusValues={'all':'','pending':'Pending','processing':'Processing','review':'review','completed':'Completed'};
+  if(Object.prototype.hasOwnProperty.call(statusValues,requestedStatus)){statusFilter.value=statusValues[requestedStatus];currentPage=1}
+ }
+ applyRequests();
+}
+document.querySelectorAll('.side-link[data-section]').forEach(link=>link.addEventListener('click',()=>{if(link.dataset.section==='requests'&&location.hash==='#requests-all')applyHash()}));
+document.querySelectorAll('[data-request-filter]').forEach(link=>link.addEventListener('click',()=>{statusFilter.value=link.dataset.requestFilter;currentPage=1;applyRequests()}));
+document.querySelectorAll('.kpi-action').forEach(button=>button.addEventListener('click',()=>{
+ statusFilter.value=button.dataset.status;currentPage=1;location.hash=button.dataset.status==='review'?'requests-review':button.dataset.status?`requests-${button.dataset.status.toLowerCase()}`:'requests-all';applyRequests();
+}));
+window.addEventListener('hashchange',applyHash);applyHash();
+document.querySelectorAll('.reject-request').forEach(b=>b.onclick=async()=>{
+ if(!confirm(`Reject request REQ-${b.dataset.id}?`))return;
+ b.disabled=true;
+ const r=await post(`/api/requests/${b.dataset.id}/status`,{status:'Rejected'});
+ if(!r.ok){b.disabled=false;alert(r.error||'Could not reject this request.');return}
+ location.hash='requests';location.reload();
+});
+document.querySelectorAll('.delete-request').forEach(b=>b.onclick=async()=>{
+ if(!confirm(`Permanently delete request REQ-${b.dataset.id}, its notifications, and its linked review workflow?`))return;
+ b.disabled=true;
+ try{
+  const response=await fetch(`/api/requests/${b.dataset.id}/delete`,{method:'POST'});
+  const result=await response.json();
+  if(!response.ok||!result.ok)throw new Error(result.error||'Could not delete this request.');
+  location.hash='requests';location.reload();
+ }catch(error){b.disabled=false;alert(error.message||'Could not delete this request.')}
+});
+document.getElementById('deleteAllRequests').onclick=async event=>{
+ const button=event.currentTarget;
+ if(!confirm(`Permanently delete all ${rows.length} requests, their notifications, and linked review workflows? Separate Directions API history will be retained.`))return;
+ if(prompt('Type DELETE to confirm deleting every request:')!=='DELETE')return;
+ button.disabled=true;
+ try{
+  const response=await fetch('/api/requests/delete-all',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirmation:'DELETE_ALL_REQUESTS'})});
+  const result=await response.json();
+  if(!response.ok||!result.ok)throw new Error(result.error||'Could not delete all requests.');
+  location.hash='requests';location.reload();
+ }catch(error){button.disabled=false;alert(error.message||'Could not delete all requests.')}
+};
+
+/* users: search, role filter, promote / demote */
+const urs=[...document.querySelectorAll('tr.ur')];
+function fu(){const q=us.value.toLowerCase();urs.forEach(r=>r.hidden=!((!q||r.textContent.toLowerCase().includes(q))&&(!ur.value||r.children[2].textContent.trim()===ur.value)))}
+us.oninput=fu;ur.onchange=fu;
+document.querySelectorAll('.rl').forEach(b=>b.onclick=async()=>{
+ if(!confirm(b.dataset.role==='admin'?`Make ${b.dataset.name} an admin? They will see all requests and users.`:`Remove admin rights from ${b.dataset.name}?`))return;
+ const r=await post(`/api/users/${b.dataset.id}/role`,{role:b.dataset.role});if(r.error)return alert(r.error);location.hash='users';location.reload()});
+
+/* services: editable explanations */
+const note=el=>{const m=el.closest('.card').querySelector('.msg');m.textContent='Saved';setTimeout(()=>m.textContent='',2500)};
+document.querySelectorAll('.svs').forEach(b=>b.onclick=async()=>{const t=b.closest('.card').querySelector('textarea');const r=await post(`/api/services/${b.dataset.k}`,{description:t.value});if(r.ok){t.value=r.description;note(b)}});
+document.querySelectorAll('.svr').forEach(b=>b.onclick=async()=>{const t=b.closest('.card').querySelector('textarea');const r=await post(`/api/services/${b.dataset.k}`,{description:''});if(r.ok){t.value=r.description;note(b)}});
+document.querySelectorAll('.service-enabled').forEach(i=>i.onchange=async()=>{
+ const r=await post(`/api/services/${i.dataset.k}/availability`,{enabled:i.checked});
+ if(!r.ok){i.checked=!i.checked;alert(r.error||'Could not update service availability');return}
+ note(i);
+});
+document.getElementById('addService').onclick=async()=>{
+ const m=document.getElementById('addServiceMsg');m.textContent='Adding...';
+ const r=await post('/api/services/custom',{name:newServiceName.value,unit:newServiceUnit.value,kind:newServiceKind.value});
+ if(!r.ok){m.textContent=r.error||'Could not add service';m.style.color='#b3261e';return}
+ location.hash='services';location.reload();
+};
+
+/* network: upload and column mapping */
+document.getElementById('nu').onclick=async()=>{const f=document.getElementById('nf').files[0],m=document.getElementById('nm');
+ if(!f){m.textContent='Choose a file first';return}m.textContent='Uploading and reading the network...';
+ const fd=new FormData();fd.append('file',f);const r=await fetch('/api/network/upload',{method:'POST',body:fd}).then(x=>x.json());
+ if(r.error){m.textContent=r.error;m.style.color='#b3261e';return}location.hash='network';location.reload()};
+const nsb=document.getElementById('ns');
+if(nsb)nsb.onclick=async()=>{const b={};document.querySelectorAll('#t-network [data-k]').forEach(e=>b[e.dataset.k]=e.value);
+ const r=await post('/api/network/config',b),m=document.getElementById('nm2');m.textContent=r.error||'Saved';if(r.ok){location.hash='network';setTimeout(()=>location.reload(),600)}};
+</script>{% endblock %}

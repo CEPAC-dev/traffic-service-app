@@ -1,0 +1,93 @@
+{% extends "base.html" %}{% block body %}
+<div class="banner dashboard-banner"><div><span class="eyebrow">OUTSCRAPER REQUEST</span><h1>Request {{job.id[:8]}}</h1><p>Created {{job.created_at}}</p></div><div class="row-actions">{% if request_workflow %}<a class="btn alt" href="{{url_for('admin_request',rid=request_workflow.request_id)}}">Back to client request REQ-{{request_workflow.request_id}}</a>{% endif %}<a class="btn" href="{{url_for('admin_outscraper',duplicate_job_id=job.id)}}">إعادة الطلب مع التعديل</a><a class="btn alt" href="{{url_for('admin_outscraper')}}">Back to Directions API</a></div></div>
+<div class="grid2 outscraper-detail-kpis">
+  <article class="card"><span class="eyebrow">APPROVAL</span><h2>{{job.approval_status|replace('_',' ')|title}}</h2><p>Approved: {{job.approved_at or '—'}} · Rejected: {{job.rejected_at or '—'}}</p></article>
+  <article class="card"><span class="eyebrow">EXECUTION</span><h2 id="executionStatus">{{job.execution_status|replace('_',' ')|title}}</h2><p>Provider ID(s): {% for provider_id in job.provider_ids %}<code>{{provider_id}}</code> {% else %}Unavailable{% endfor %}</p></article>
+  <article class="card"><span class="eyebrow">COST</span><h2>Estimated: Cost unknown</h2><p>Actual: Unavailable · Currency: Unknown</p></article>
+  <article class="card"><span class="eyebrow">RESULTS</span><h2 id="resultCount">{{job.result_count}}</h2><p>Stored locally. <a href="{{url_for('export_outscraper_results',job_id=job.id)}}">Export CSV</a></p></article>
+</div>
+{% if job.error %}<div class="flash" id="jobError">{{job.error}}</div>{% endif %}
+{% if job.approval_token %}<section class="card approval-panel" id="resumeApproval">
+  <span class="eyebrow">SAVED PREVIEW · NO PROVIDER CALL HAS BEEN MADE</span>
+  <h2>Continue approval</h2>
+  <p>This exact configuration remains awaiting your decision. Reloading this page did not submit it.</p>
+  <div class="cost-warning"><b>Cost unknown · Estimate unavailable</b><p>Provider billable units and actual per-request cost are unavailable. Planned HTTP submissions are not billing units.</p></div>
+  <label class="cf approval-ack"><input type="checkbox" id="resumeCostAck"> I understand the cost is unknown and explicitly authorize this saved configuration anyway.</label>
+  <div class="outscraper-actions"><button class="btn" id="resumeApprove" type="button" disabled>Approve despite unknown cost</button><button class="btn alt" id="resumeReject" type="button">Reject — do not submit</button></div>
+  {% if not api_configured %}<p class="flash">OUTSCRAPER_API_KEY is not configured on this server.</p>{% endif %}
+  <span id="resumeApprovalMessage" class="msg" aria-live="polite"></span>
+</section>{% endif %}
+<section class="card"><h2>Approved request configuration</h2>
+  {% if job.config.trafficlens_request %}{% set source=job.config.trafficlens_request %}<div class="tip"><b>Linked client request REQ-{{source.source_request_id}}</b><br>Detected country: <b>{{source.country_name}} ({{source.country_code}})</b> · Time zone: <b>{{source.timezone}}</b><br>Scraper route: <b>A → C</b> · {{source.point_a}} → {{source.point_c}}<br>Result extraction: <b>A → B</b> · {{source.point_a}} → {{source.point_b}} · Saved A→B road distance: {{'%.1f'|format(source.road_ab_meters)}} m · Interval: {{source.interval_minutes}} minutes{% if request_workflow %}<br>Client result workflow: <b>{{request_workflow.status|replace('_',' ')|title}}</b>{% if request_workflow.confirmed_at %} · Confirmed {{request_workflow.confirmed_at}}{% endif %}{% endif %}</div>{% endif %}
+  {% if job.config.trafficlens_context %}{% set holiday=job.config.trafficlens_context %}<div class="tip"><b>{{SERVICES[holiday.service]}} · reference date</b><br>Study date: {{holiday.study_date}} · Route country: {{holiday.country_name}} ({{holiday.country_code}}) · Time zone: {{holiday.timezone}}<br>{% if holiday.reference_type=='weekly_weekend' %}Latest weekly weekend date before today:{% else %}Nearest public holiday used:{% endif %} <b>{% if holiday.reference_type=='weekly_weekend' %}{{holiday.weekend_day}} · {{holiday.weekend_date}}{% else %}{{holiday.holiday_name}} · {{holiday.holiday_date}}{% endif %}</b> · Departure: <b>07:00 local time</b></div>{% endif %}
+  <p>Departure: {% if job.config.trafficlens_context %}07:00 on {% if job.config.trafficlens_context.reference_type=='weekly_weekend' %}{{job.config.trafficlens_context.weekend_date}}{% else %}{{job.config.trafficlens_context.holiday_date}}{% endif %} ({{job.config.trafficlens_context.timezone}}){% elif job.config.departure_time %}{{job.config.departure_time}}{% else %}Provider current time{% endif %} · Finish: {{job.config.finish_time or 'Not set'}} · Interval: {% if job.config.trafficlens_request %}{{job.config.trafficlens_request.interval_minutes}} minutes{% else %}{{job.config.interval or 'Not set'}} (provider unit not documented){% endif %}</p>
+  <p>Travel mode: {{job.config.travel_mode}} · Language: {{job.config.language}} · Region: {{job.config.region or 'Provider default'}}</p>
+  <p>Planned HTTP submissions: {{job.routes|length}} (one per route; not billable units). Provider-billable volume: unknown.</p>
+  <h3>API request sent for each route</h3>
+  <p class="sub api-request-note">Shows the exact method, URL, and query parameters used by TrafficLens. The API key is never displayed or stored with these details.</p>
+  <div class="sent-api-requests">
+    {% for route in job.routes %}
+    <details class="sent-api-request">
+      <summary>Route {{route.route_index}} · {{'Request details' if route.request_details else 'Not submitted'}}</summary>
+      {% if route.request_details %}
+      <p><b>Attempt started:</b> {{route.submitted_at or '—'}} · <b>Method:</b> {{route.request_details.method}}</p>
+      <label>Request URL</label><code class="api-request-url">{{route.request_details.url}}</code>
+      <label>Headers</label><pre class="api-request-headers">{% for name, value in route.request_details.headers.items() %}{{name}}: {{value}}
+{% endfor %}</pre>
+      <div class="tw"><table class="api-params-table"><thead><tr><th>Query parameter</th><th>Value sent</th></tr></thead><tbody>
+        {% for parameter in route.request_details.query_parameters %}<tr><td><code>{{parameter.name}}</code></td><td>{{parameter.value}}</td></tr>{% endfor %}
+      </tbody></table></div>
+      {% else %}<p>This route has not been submitted to Outscraper.</p>{% endif %}
+    </details>
+    {% endfor %}
+  </div>
+  <div class="tw"><table><thead><tr><th>Route</th><th>Origin</th><th>Destination</th><th>Execution</th><th>Provider ID</th><th>Result count</th><th>Details</th></tr></thead><tbody>
+    {% for route in job.routes %}<tr><td>{{route.route_index}}</td><td>{{route.origin}}</td><td>{{route.destination}}</td><td>{{route.execution_status|replace('_',' ')|title}}</td><td><code>{{route.provider_request_id or '—'}}</code></td><td>{{route.result_count}}</td><td>{% if route.result_pretty %}<details><summary>View response</summary><pre class="outscraper-json">{{route.result_pretty}}</pre></details>{% else %}No result yet{% endif %}</td></tr>{% endfor %}
+  </tbody></table></div>
+  {% if job.execution_status in ('running','unknown') %}<p><button class="btn alt" id="refreshStatus" type="button">Refresh provider status</button> <span id="refreshMessage" class="msg" aria-live="polite"></span></p>{% endif %}
+  {% if job.execution_status=='unknown' %}<p class="tip">Submission status is uncertain. Do not submit again. This page will only check a provider request ID when one is available.</p>{% endif %}
+</section>
+{% endblock %}
+{% block js %}
+{% if job.approval_token %}
+<script>
+const savedOutscraperConfig={{job.config|tojson}},savedOutscraperToken={{job.approval_token|tojson}},resumeCostAck=document.getElementById('resumeCostAck'),resumeApprove=document.getElementById('resumeApprove'),resumeMessage=document.getElementById('resumeApprovalMessage');
+resumeCostAck.onchange=()=>{resumeApprove.disabled=!resumeCostAck.checked};
+resumeApprove.onclick=async()=>{
+ if(!resumeCostAck.checked)return;resumeApprove.disabled=true;resumeMessage.textContent='Saving approval and starting asynchronous submission...';
+ try{
+  const response=await fetch('/api/outscraper/{{job.id}}/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({approval_token:savedOutscraperToken,configuration:savedOutscraperConfig,acknowledge_unknown_cost:true})}),data=await response.json();
+  if(!response.ok){resumeMessage.textContent=data.error||'Approval failed';resumeApprove.disabled=false;return}
+  resumeMessage.textContent='Approved. No refresh or retry will submit this configuration again.';setTimeout(()=>location.reload(),900);
+ }catch(error){resumeMessage.textContent='Submission status may be uncertain. Refresh request history; do not approve again.'}
+};
+document.getElementById('resumeReject').onclick=async()=>{
+ if(!confirm('Reject this saved configuration? No provider request will be sent.'))return;
+ const button=document.getElementById('resumeReject');button.disabled=true;resumeMessage.textContent='Recording rejection...';
+ try{
+  const response=await fetch('/api/outscraper/{{job.id}}/reject',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({approval_token:savedOutscraperToken})}),data=await response.json();
+  if(!response.ok){resumeMessage.textContent=data.error||'Could not reject request';button.disabled=false;return}
+  resumeMessage.textContent='Rejected and recorded. No provider request was sent.';setTimeout(()=>location.reload(),700);
+ }catch(error){resumeMessage.textContent='Could not record rejection; check request history before taking further action.';button.disabled=false}
+};
+</script>
+{% endif %}
+{% if job.execution_status in ('running','unknown') %}
+<script>
+const refreshButton=document.getElementById('refreshStatus'),refreshMessage=document.getElementById('refreshMessage');let pollCount=0,pollTimer;
+async function refreshProviderStatus(){
+ if(pollCount>=8)return;pollCount++;if(refreshButton)refreshButton.disabled=true;
+ try{
+  const response=await fetch('/api/outscraper/{{job.id}}/refresh',{method:'POST'}),data=await response.json();
+  if(!response.ok){refreshMessage.textContent=data.error||'Status check failed';return}
+  refreshMessage.textContent=data.routes.some(route=>route.throttled)?'Please wait before checking again.':'Provider status checked.';
+  if(['completed','failed'].includes(data.status)){location.reload();return}
+ }catch(error){refreshMessage.textContent='Status check failed. No submission was repeated.'}
+ finally{if(refreshButton)refreshButton.disabled=false}
+ if(pollCount<8)pollTimer=setTimeout(refreshProviderStatus,15000);
+}
+if(refreshButton)refreshButton.onclick=refreshProviderStatus;
+if('{{job.execution_status}}'==='running'&&{{ 'true' if job.routes|selectattr('provider_request_id')|list else 'false' }})pollTimer=setTimeout(refreshProviderStatus,15000);
+</script>
+{% endif %}
+{% endblock %}

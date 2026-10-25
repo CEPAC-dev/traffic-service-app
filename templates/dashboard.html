@@ -1,0 +1,49 @@
+{% extends "base.html" %}{% block body %}
+<div class="page-heading">
+  <div><span class="eyebrow">YOUR TRAFFICLENS ACCOUNT</span><h1>Dashboard</h1><p>Welcome back, {{me.name}}. Track requests and discover traffic services.</p></div>
+  <a class="btn" href="{{url_for('study')}}">＋ Create new request</a>
+</div>
+
+<div class="kpis dashboard-kpis user-kpis">
+  <a class="card kpi dashboard-kpi kpi-violet" href="{{url_for('my_requests')}}"><i class="kpi-icon">▤</i><b>{{total_requests}}</b><span>My requests</span></a>
+  <a class="card kpi dashboard-kpi kpi-blue" href="{{url_for('my_requests')}}?status=Processing"><i class="kpi-icon">↻</i><b>{{request_counts.get('Processing',0)}}</b><span>Processing</span></a>
+  <a class="card kpi dashboard-kpi kpi-green" href="{{url_for('my_requests')}}?status=Completed"><i class="kpi-icon">✓</i><b>{{request_counts.get('Completed',0)}}</b><span>Completed</span></a>
+  <a class="card kpi dashboard-kpi kpi-orange" href="{{url_for('my_requests')}}?results=available"><i class="kpi-icon">◉</i><b>{{results_available}}</b><span>Results available</span></a>
+</div>
+
+<section aria-labelledby="availableServicesHeading">
+  <div class="section-heading"><div><span class="eyebrow">SERVICE CATALOG</span><h2 id="availableServicesHeading">Available services</h2><p>Select a service to start a request. Processing happens in the background.</p></div></div>
+  <div class="dashboard-service-grid">
+    {% for key,name in active_services.items() %}
+    <article class="card dashboard-service-card"><div class="dashboard-service-icon">{{SVINFO[key].icon}}</div><div class="dashboard-service-content"><h3>{{name}}</h3><p>{{SVINFO[key].desc}}</p><a class="service-create-link" href="{{url_for('study',service=key)}}">Create request <span aria-hidden="true">→</span></a></div></article>
+    {% else %}
+    <div class="card">There are no services available right now.</div>
+    {% endfor %}
+  </div>
+</section>
+
+<section aria-labelledby="recentRequestsHeading">
+  <div class="section-heading"><div><span class="eyebrow">REQUEST ACTIVITY</span><h2 id="recentRequestsHeading">Recent requests</h2><p>Status and links to available results for your latest requests.</p></div><a class="btn alt" href="{{url_for('my_requests')}}">View all requests</a></div>
+  {% if reqs %}
+  <div class="dashboard-request-list">
+    {% for r in reqs %}
+    <article class="card dashboard-request">
+      <div class="dashboard-request-main"><div><span class="eyebrow">REQ-{{r.id}}</span><h3>{{r.area}}</h3><p>{{r.d1}} · {{r.time_range_label}}</p></div><span class="b {{r.status}}">{{r.status}}</span></div>
+      <div class="dashboard-request-services">{% for s in r.services %}<span class="pill">{{SVINFO[s].icon}} {{SERVICES[s]}}</span>{% endfor %}</div>
+      <div class="row-actions">
+        {% if r.status=='Completed' or (r.status=='Processing' and r.progress[0]>0) %}<a class="btn" href="{{url_for('result',rid=r.id)}}">{{'View results' if r.status=='Completed' else 'View available results'}}</a>{% endif %}
+        <a class="btn alt" href="{{url_for('user_request_detail',rid=r.id)}}">Request details</a>
+      </div>
+    </article>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="card dashboard-empty"><h3>No requests yet</h3><p>Your submitted requests and their results will appear here.</p><a class="btn" href="{{url_for('study')}}">Create your first request</a></div>
+  {% endif %}
+</section>
+
+<section class="card dashboard-profile-link">
+  <div><h2>Profile</h2><p>Update your account details or change your password.</p></div>
+  <a class="btn alt" href="{{url_for('profile')}}">Manage profile</a>
+</section>
+{% endblock %}
