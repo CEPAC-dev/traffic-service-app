@@ -75,6 +75,11 @@ class RequestDeletionTests(unittest.TestCase):
                 "VALUES(?,?,'failed',60,'2026-01-01','2026-01-01')",
                 (job_id, request_id),
             )
+            traffic.db().execute(
+                "INSERT INTO volume_freeflow_attempts(job_id,request_id,submitted_at,status) "
+                "VALUES(?,?,'2026-01-01','failed')",
+                (job_id, request_id),
+            )
             traffic.db().commit()
 
         response = self.client.post(f"/api/requests/{request_id}/delete")
@@ -85,6 +90,7 @@ class RequestDeletionTests(unittest.TestCase):
             self.assertIsNone(traffic.db().execute("SELECT 1 FROM requests WHERE id=?", (request_id,)).fetchone())
             self.assertIsNone(traffic.db().execute("SELECT 1 FROM notifications WHERE request_id=?", (request_id,)).fetchone())
             self.assertIsNone(traffic.db().execute("SELECT 1 FROM request_directions_workflows WHERE request_id=?", (request_id,)).fetchone())
+            self.assertIsNone(traffic.db().execute("SELECT 1 FROM volume_freeflow_attempts WHERE request_id=?", (request_id,)).fetchone())
             self.assertIsNotNone(traffic.db().execute("SELECT 1 FROM outscraper_jobs WHERE id=?", (job_id,)).fetchone())
 
     def test_delete_all_requires_explicit_confirmation_and_removes_every_request(self):
@@ -643,6 +649,37 @@ class OutscraperWorkflowTests(unittest.TestCase):
         self.assertEqual(weekday, "Friday")
         self.assertLess(reference_date, saturday_morning.date())
 
+    def test_client_can_create_request_with_volumes_and_other_services(self):
+        with self.client.session_transaction() as session:
+            session.update(uid=self.client_id, name="Volume client", role="client")
+        payload = {
+            "services": ["volumes", "speed", "travel"],
+            "date": "2026-10-01",
+            "start_time": "07:00:00",
+            "end_time": "09:00:00",
+            "coords": [[30.138239, 31.395698], [30.137423, 31.393946]],
+            "path": [[30.138239, 31.395698], [30.137423, 31.393946]],
+            "road_km": 0.19,
+            "junctions": 0,
+            "no_junctions": True,
+            "point_c": [30.129997, 31.383281],
+            "point_c_distance_km": 1.7,
+            "area": "Combined service test",
+        }
+        with mock.patch.object(traffic, "apply_network", return_value=None):
+            response = self.client.post("/api/requests", json=payload)
+        self.assertEqual(response.status_code, 200, response.get_json())
+        with traffic.app.app_context():
+            row = traffic.db().execute(
+                "SELECT services FROM requests WHERE id=?", (response.get_json()["id"],)
+            ).fetchone()
+            workflow = traffic.db().execute(
+                "SELECT status FROM volumes_workflows WHERE request_id=?",
+                (response.get_json()["id"],),
+            ).fetchone()
+        self.assertEqual(json.loads(row["services"]), ["volumes", "speed", "travel"])
+        self.assertEqual(workflow["status"], "waiting_for_inputs")
+
     def test_volumes_freeflow_form_endpoint_returns_route_and_reference_context(self):
         request_id = self.insert_volume_request()
         with mock.patch.object(traffic, "_route_holiday_location", return_value=("EG", "Egypt", "Africa/Cairo")), \
@@ -834,12 +871,13 @@ class OutscraperWorkflowTests(unittest.TestCase):
         self.assertIn(("A-to-B distance (m)", 190), summary)
 
 
-    def insert_volume_request(self, status="Processing"):
+    def insert_volume_request(self, status="Processing", services=None):
+        services = services or ["volumes"]
         with traffic.app.app_context():
             cursor = traffic.db().execute(
                 "INSERT INTO requests(user_id,created,d1,d2,services,area,bbox,coords,status,type,hours,path,road_km,start_time,end_time,point_c,point_c_distance_km,data) "
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (self.client_id, "2025-12-18", "2025-12-18", "2025-12-18", '["volumes"]',
+                (self.client_id, "2025-12-18", "2025-12-18", "2025-12-18", json.dumps(services),
                  "Volume workflow test", "[30.1,31.3,30.2,31.4]", "[[30.138239,31.395698],[30.137423,31.393946]]",
                  status, "link", "[7,8]", "[[30.138239,31.395698],[30.137423,31.393946]]",
                  0.19, "07:00:00", "09:00:00", "[30.129997,31.383281]", 1.7, "{}"),
@@ -870,7 +908,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
                     "distance_m": 440.0, "time_seconds": 58.48,
                 },
                 {
-                    "hour": 8, "speed_kmh": 29.420689655172414,
+                    "hour": 8, "speed_kmh": 29.0,
                     "distance_m": 440.0, "time_seconds": 53.84,
                 },
             ],
@@ -878,7 +916,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
         }
         with traffic.app.app_context():
             traffic.db().execute(
-                "UPDATE volumes_workflows SET lanes=1, freeflow_speed=29.420689655172414 "
+                "UPDATE volumes_workflows SET lanes=1, freeflow_speed=30,freeflow_accepted=1 "
                 "WHERE request_id=?",
                 (request_id,),
             )
@@ -915,14 +953,14 @@ class OutscraperWorkflowTests(unittest.TestCase):
                     {
                         "hour": 7,
                         "lanes": 1,
-                        "freeflow_speed": 29.420689655172414,
+                        "freeflow_speed": 30,
                         "actual_speed": 27.085714285714285,
                     },
                     {
                         "hour": 8,
                         "lanes": 1,
-                        "freeflow_speed": 29.420689655172414,
-                        "actual_speed": 29.420689655172414,
+                        "freeflow_speed": 30,
+                        "actual_speed": 29.0,
                     },
                 ])
                 result_book = Workbook()
@@ -933,10 +971,10 @@ class OutscraperWorkflowTests(unittest.TestCase):
                     "Estimated Volume", "RMSE Tolerance",
                 ])
                 result_sheet.append([
-                    request_id, 1, 29.42068965517241, 27.08571428571429, 7, 898.61, 118.18,
+                    request_id, 1, 30, 27.08571428571429, 7, 898.61, 118.18,
                 ])
                 result_sheet.append([
-                    request_id, 1, 29.42068965517241, 29.42068965517241, 8, 923.03, 128.37,
+                    request_id, 1, 30, 29.0, 8, 923.03, 128.37,
                 ])
                 result_book.save(prepared["result_workbook"])
                 result_book.close()
@@ -984,7 +1022,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
         request_id = self.insert_volume_request()
         with traffic.app.app_context():
             traffic.db().execute(
-                "UPDATE volumes_workflows SET lanes=2, freeflow_speed=40, actual_result_json=? "
+                "UPDATE volumes_workflows SET lanes=2, freeflow_speed=40, freeflow_accepted=1, actual_result_json=? "
                 "WHERE request_id=?",
                 ('{"hourly":[{"hour":7,"speed_kmh":25}]}', request_id),
             )
@@ -1010,7 +1048,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
         }
         with traffic.app.app_context():
             traffic.db().execute(
-                "UPDATE volumes_workflows SET lanes=2, freeflow_speed=40, actual_result_json=? "
+                "UPDATE volumes_workflows SET lanes=2, freeflow_speed=40, freeflow_accepted=1, actual_result_json=? "
                 "WHERE request_id=?",
                 ('{"hourly":[{"hour":7,"speed_kmh":25},{"hour":8,"speed_kmh":30}]}', request_id),
             )
@@ -1087,7 +1125,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
                 "SELECT * FROM requests WHERE id=?", (request_id,)
             ).fetchone()
             with mock.patch.object(traffic, "_route_holiday_location", return_value=("EG", "Egypt", "Africa/Cairo")):
-                with mock.patch.object(traffic, "_latest_previous_weekly_weekend", return_value=(dt.date(2026, 10, 24), "Saturday")):
+                with mock.patch.object(traffic, "_nearest_previous_weekly_weekend", return_value=(dt.date(2026, 10, 24), "Saturday")):
                     prepared = traffic._outscraper_prefill_from_request(source_request, "freeflow_speed")
                     response = self.client.post("/api/outscraper/preview", json=prepared["prefill_config"])
         self.assertEqual(response.status_code, 201, response.get_json())
@@ -1207,6 +1245,264 @@ class OutscraperWorkflowTests(unittest.TestCase):
         self.assertEqual(workflow["freeflow_job_status"], "completed")
         self.assertEqual(workflow["freeflow_context"]["weekend_date"], weekend_date.isoformat())
 
+    def test_volume_freeflow_uses_a_to_c_window_and_nearest_eligible_weekend(self):
+        request_id = self.insert_volume_request()
+        weekend = dt.date(2026, 10, 9)
+        with traffic.app.app_context():
+            source = traffic.db().execute(
+                "SELECT * FROM requests WHERE id=?", (request_id,)
+            ).fetchone()
+            with mock.patch.object(traffic, "_route_holiday_location", return_value=("EG", "Egypt", "Africa/Cairo")):
+                with mock.patch.object(traffic, "_nearest_previous_weekly_weekend", return_value=(weekend, "Friday")):
+                    prepared = traffic._outscraper_prefill_from_request(source, "freeflow_speed")
+        configuration = prepared["prefill_config"]
+        context = configuration["trafficlens_context"]
+        self.assertEqual(configuration["routes"][0]["origin"], "30.138239, 31.395698")
+        self.assertEqual(configuration["routes"][0]["destination"], "30.129997, 31.383281")
+        self.assertTrue(context["volume_input"])
+        self.assertEqual(context["weekend_date"], "2026-10-09")
+        self.assertEqual(configuration["interval"], 60)
+        start_local = dt.datetime.fromtimestamp(configuration["departure_time"], ZoneInfo("Africa/Cairo"))
+        finish_local = dt.datetime.fromtimestamp(configuration["finish_time"], ZoneInfo("Africa/Cairo"))
+        self.assertEqual((start_local.date(), start_local.hour), (weekend, 7))
+        self.assertEqual((finish_local.date(), finish_local.hour), (weekend, 8))
+
+    def test_freeflow_mismatch_requires_explicit_use_anyway_before_matlab(self):
+        request_id = self.insert_volume_request(
+            services=["volumes", "speed", "freeflow_speed"],
+        )
+        weekend_date = dt.date(2026, 10, 24)
+        departure = int(dt.datetime.combine(
+            weekend_date, dt.time(7), tzinfo=ZoneInfo("Africa/Cairo")
+        ).timestamp())
+        finish = int(dt.datetime.combine(
+            weekend_date, dt.time(8), tzinfo=ZoneInfo("Africa/Cairo")
+        ).timestamp())
+        context = {
+            "source_request_id": request_id,
+            "service": "freeflow_speed",
+            "volume_input": True,
+            "study_date": "2025-12-18",
+            "country_code": "EG",
+            "country_name": "Egypt",
+            "timezone": "Africa/Cairo",
+            "reference_type": "weekly_weekend",
+            "weekend_date": weekend_date.isoformat(),
+            "weekend_day": "Saturday",
+            "departure_time": departure,
+            "finish_time": finish,
+            "interval_minutes": 60,
+            "road_ab_meters": 190,
+        }
+        job_id = f"freeflow-mismatch-{request_id}"
+        response_data = {
+            "status": "Success",
+            "data": [[
+                {
+                    "timestamp": departure + 900,
+                    "road_distance_timing(meters:seconds)": {"0": 0, "190": 10},
+                },
+                {
+                    "timestamp": departure + 2700,
+                    "road_distance_timing(meters:seconds)": {"0": 0, "190": 7.2},
+                },
+            ]],
+        }
+        with traffic.app.app_context():
+            now = traffic._timestamp_now()
+            traffic.db().execute(
+                "UPDATE volumes_workflows SET lanes=2,actual_result_json=? WHERE request_id=?",
+                (json.dumps({"hourly": [
+                    {"hour": 7, "speed_kmh": 50},
+                    {"hour": 8, "speed_kmh": 96},
+                ]}), request_id),
+            )
+            traffic.db().execute(
+                "INSERT INTO outscraper_jobs(id,created_at,updated_at,config_json,config_hash,approval_token_hash,execution_status) "
+                "VALUES(?,?,?,?,?,?, 'completed')",
+                (job_id, now, now, json.dumps({"trafficlens_context": context}), "hash", "token"),
+            )
+            traffic.db().execute(
+                "INSERT INTO outscraper_job_routes(job_id,route_index,origin,destination,execution_status,raw_response_json) "
+                "VALUES(?,1,'A','C','completed',?)",
+                (job_id, json.dumps(response_data)),
+            )
+            traffic.db().execute(
+                "UPDATE volumes_workflows SET freeflow_job_id=? WHERE request_id=?",
+                (job_id, request_id),
+            )
+            traffic.db().commit()
+            with mock.patch.object(traffic, "_start_volume_calculation") as start_model:
+                traffic._persist_holiday_result_context(job_id)
+                start_model.assert_not_called()
+            workflow = traffic.db().execute(
+                "SELECT freeflow_speed,freeflow_accepted,freeflow_validation_json FROM volumes_workflows WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+        self.assertAlmostEqual(workflow["freeflow_speed"], 95)
+        self.assertEqual(workflow["freeflow_accepted"], 0)
+        validation = json.loads(workflow["freeflow_validation_json"])
+        self.assertEqual(validation["mismatched_hours"], ["08:00"])
+
+        prepared_run = {"request_id": request_id, "hours": [7, 8], "input_workbook": "in.xlsx"}
+        with mock.patch.object(traffic.volumes_runner, "find_existing_volume_result", return_value=None), \
+                mock.patch.object(traffic.volumes_runner, "prepare_volume_run", return_value=prepared_run), \
+                mock.patch.object(traffic.threading, "Thread") as worker:
+            worker.return_value.start.return_value = None
+            response = self.client.post(
+                f"/api/requests/{request_id}/volumes/freeflow/accept",
+                json={"use_anyway": True},
+            )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertTrue(response.get_json()["overridden"])
+        with traffic.app.app_context():
+            workflow = traffic.db().execute(
+                "SELECT status,freeflow_accepted,freeflow_override FROM volumes_workflows WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+            request_data = json.loads(traffic.db().execute(
+                "SELECT data FROM requests WHERE id=?", (request_id,)
+            ).fetchone()["data"])
+        self.assertEqual(workflow["status"], "running")
+        self.assertEqual(workflow["freeflow_accepted"], 1)
+        self.assertEqual(workflow["freeflow_override"], 1)
+        self.assertEqual(request_data["freeflow_speed"]["rows"][0]["value"], 95)
+        worker.assert_called_once()
+
+    def test_use_anyway_is_blocked_when_actual_speed_hours_are_missing(self):
+        request_id = self.insert_volume_request(services=["volumes", "freeflow_speed"])
+        with traffic.app.app_context():
+            traffic.db().execute(
+                "UPDATE volumes_workflows SET freeflow_speed=95,freeflow_result_json=?,"
+                "freeflow_validation_json=?,status='waiting_for_inputs' WHERE request_id=?",
+                (
+                    json.dumps({"selected_speed_kmh": 95}),
+                    json.dumps({
+                        "is_valid": False,
+                        "mismatched_hours": ["08:00"],
+                        "missing_hours": ["09:00"],
+                    }),
+                    request_id,
+                ),
+            )
+            traffic.db().commit()
+        with mock.patch.object(traffic, "_start_volume_calculation") as start_model:
+            response = self.client.post(
+                f"/api/requests/{request_id}/volumes/freeflow/accept",
+                json={"use_anyway": True},
+            )
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("missing", response.get_json()["error"])
+        start_model.assert_not_called()
+        with traffic.app.app_context():
+            workflow = traffic.db().execute(
+                "SELECT status,freeflow_accepted FROM volumes_workflows WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+        self.assertEqual(workflow["status"], "waiting_for_inputs")
+        self.assertEqual(workflow["freeflow_accepted"], 0)
+
+    def test_accept_freeflow_recovers_hourly_speeds_from_existing_directions_review(self):
+        request_id = self.insert_volume_request(services=["volumes", "freeflow_speed"])
+        job_id = f"saved-directions-{request_id}"
+        actual_result = {
+            "hourly": [
+                {"hour": 7, "speed_kmh": 68.4},
+                {"hour": 8, "speed_kmh": 57.0},
+            ],
+        }
+        with traffic.app.app_context():
+            now = traffic._timestamp_now()
+            traffic.db().execute(
+                "UPDATE volumes_workflows SET lanes=2,freeflow_speed=80,"
+                "freeflow_job_id='freeflow-existing',freeflow_result_json=?,"
+                "freeflow_validation_json=?,actual_result_json=NULL WHERE request_id=?",
+                (
+                    json.dumps({"selected_speed_kmh": 80}),
+                    json.dumps({
+                        "is_valid": False,
+                        "mismatched_hours": [],
+                        "missing_hours": ["07:00", "08:00"],
+                    }),
+                    request_id,
+                ),
+            )
+            traffic.db().execute(
+                "INSERT INTO request_directions_workflows(job_id,request_id,status,interval_seconds,created_at,updated_at,result_json) "
+                "VALUES(?,?,'ready',3600,?,?,?)",
+                (job_id, request_id, now, now, json.dumps(actual_result)),
+            )
+            traffic.db().commit()
+
+        with mock.patch.object(traffic, "_start_volume_calculation", return_value=True) as start_model:
+            response = self.client.post(
+                f"/api/requests/{request_id}/volumes/freeflow/accept",
+                json={},
+            )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertTrue(response.get_json()["accepted"])
+        self.assertFalse(response.get_json()["overridden"])
+        start_model.assert_called_once_with(request_id)
+        with traffic.app.app_context():
+            workflow = traffic.db().execute(
+                "SELECT actual_result_json,freeflow_validation_json,freeflow_accepted "
+                "FROM volumes_workflows WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+        self.assertEqual(
+            [item["speed_kmh"] for item in json.loads(workflow["actual_result_json"])["hourly"]],
+            [68.4, 57.0],
+        )
+        self.assertTrue(json.loads(workflow["freeflow_validation_json"])["is_valid"])
+        self.assertEqual(workflow["freeflow_accepted"], 1)
+
+    def test_freeflow_comparison_uses_and_persists_client_report_hourly_speeds(self):
+        request_id = self.insert_volume_request(services=["volumes", "speed"])
+        report_speeds = [
+            {"hour": 7, "value": 50.0},
+            {"hour": 8, "value": 45.0},
+        ]
+        stale_internal_result = {
+            "hourly": [
+                {"hour": 7, "speed_kmh": 12.0},
+                {"hour": 8, "speed_kmh": 13.0},
+            ],
+        }
+        with traffic.app.app_context():
+            traffic.db().execute(
+                "UPDATE requests SET data=? WHERE id=?",
+                (json.dumps({"speed": {"rows": report_speeds}}), request_id),
+            )
+            traffic.db().execute(
+                "UPDATE volumes_workflows SET actual_result_json=?,freeflow_result_json=? "
+                "WHERE request_id=?",
+                (
+                    json.dumps(stale_internal_result),
+                    json.dumps({"selected_speed_kmh": 60.0, "context": {}}),
+                    request_id,
+                ),
+            )
+            traffic.db().commit()
+
+            self.assertTrue(traffic._evaluate_volume_freeflow(request_id))
+            workflow = traffic.db().execute(
+                "SELECT actual_result_json,freeflow_validation_json FROM volumes_workflows WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+
+        stored_actual = json.loads(workflow["actual_result_json"])
+        validation = json.loads(workflow["freeflow_validation_json"])
+        self.assertEqual(
+            [item["speed_kmh"] for item in stored_actual["hourly"]],
+            [item["value"] for item in report_speeds],
+        )
+        self.assertEqual(
+            [item["actual_speed_kmh"] for item in validation["rows"]],
+            [item["value"] for item in report_speeds],
+        )
+        self.assertTrue(validation["is_valid"])
+
     def test_actual_speed_confirmation_is_internal_for_volumes_only_request(self):
         request_id = self.insert_volume_request()
         job_id = f"volume-directions-{request_id}"
@@ -1239,8 +1535,8 @@ class OutscraperWorkflowTests(unittest.TestCase):
                 json={"job_id": job_id},
             )
         self.assertEqual(response.status_code, 200, response.get_json())
-        self.assertIn("not sent to the client", response.get_json()["message"])
-        start_model.assert_called_once_with(request_id)
+        self.assertIn("no unrequested service data was sent to the client", response.get_json()["message"])
+        start_model.assert_not_called()
         with traffic.app.app_context():
             request_row = traffic.db().execute(
                 "SELECT status,data FROM requests WHERE id=?", (request_id,)
@@ -1253,8 +1549,173 @@ class OutscraperWorkflowTests(unittest.TestCase):
         self.assertEqual(volume_row["status"], "waiting_for_inputs")
         self.assertEqual(__import__("json").loads(volume_row["actual_result_json"]), result)
 
+    def test_directions_confirmation_shares_one_scrape_with_selected_services_and_volumes(self):
+        request_id = self.insert_volume_request(services=["volumes", "speed", "travel"])
+        job_id = f"volume-and-speed-{request_id}"
+        result = {
+            "hourly": [
+                {"hour": 7, "speed_kmh": 50.0, "travel_minutes": 0.25, "time_seconds": 15.0, "distance_m": 190.0},
+                {"hour": 8, "speed_kmh": 45.0, "travel_minutes": 0.3, "time_seconds": 18.0, "distance_m": 190.0},
+            ],
+            "distance_meters": 190.0,
+            "time_seconds": 16.5,
+            "speed_kmh": 41.45,
+        }
+        with traffic.app.app_context():
+            now = traffic._timestamp_now()
+            traffic.db().execute(
+                "INSERT INTO outscraper_jobs(id,created_at,updated_at,config_json,config_hash,approval_token_hash) "
+                "VALUES(?,? ,? ,'{}','hash','token')",
+                (job_id, now, now),
+            )
+            traffic.db().execute(
+                "INSERT INTO request_directions_workflows(job_id,request_id,status,interval_seconds,created_at,updated_at,result_json) "
+                "VALUES(?,?,'ready',3600,?,?,?)",
+                (job_id, request_id, now, now, json.dumps(result)),
+            )
+            traffic.db().commit()
+        response = self.client.post(
+            f"/api/requests/{request_id}/directions/confirm",
+            json={"job_id": job_id},
+        )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertIn("also saved internally", response.get_json()["message"])
+        with traffic.app.app_context():
+            request_row = traffic.db().execute(
+                "SELECT status,data FROM requests WHERE id=?", (request_id,)
+            ).fetchone()
+            volume_workflow = traffic.db().execute(
+                "SELECT actual_result_json,freeflow_accepted FROM volumes_workflows WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+        request_data = json.loads(request_row["data"])
+        self.assertEqual(request_row["status"], "Processing")
+        self.assertEqual(request_data["speed"]["rows"][1]["value"], 45.0)
+        self.assertEqual(request_data["travel"]["rows"][0]["value"], 0.25)
+        self.assertNotIn("volumes", request_data)
+        self.assertEqual(json.loads(volume_workflow["actual_result_json"]), result)
+        self.assertEqual(volume_workflow["freeflow_accepted"], 0)
+        with self.client.session_transaction() as session:
+            session.update(uid=self.client_id, name="Volume client", role="client")
+        result_page = self.client.get(f"/results/{request_id}")
+        self.assertIn(b"Speed", result_page.data)
+        self.assertIn(b"Travel time", result_page.data)
+        self.assertNotIn(b"actual_result_json", result_page.data)
+
+    def test_directions_can_be_confirmed_after_volumes_were_sent(self):
+        request_id = self.insert_volume_request(
+            services=["lanes", "volumes", "speed", "travel"],
+        )
+        job_id = f"directions-after-volumes-{request_id}"
+        result = {
+            "hourly": [
+                {
+                    "hour": 7, "speed_kmh": 50.0, "travel_minutes": 0.25,
+                    "distance_m": 190.0, "time_seconds": 15.0,
+                    "reused_observation": False,
+                },
+                {
+                    "hour": 8, "speed_kmh": 45.0, "travel_minutes": 0.3,
+                    "distance_m": 190.0, "time_seconds": 18.0,
+                    "reused_observation": False,
+                },
+            ],
+            "distance_meters": 190.0,
+            "time_seconds": 16.5,
+            "speed_kmh": 41.45,
+        }
+        existing_volumes = {
+            "volumes": {
+                "rows": [
+                    {"hour": 7, "value": 800, "tolerance": 40},
+                    {"hour": 8, "value": 750, "tolerance": 35},
+                ],
+                "source": "matlab",
+            },
+        }
+        with traffic.app.app_context():
+            now = traffic._timestamp_now()
+            traffic.db().execute(
+                "UPDATE requests SET data=?,status='Processing' WHERE id=?",
+                (json.dumps(existing_volumes), request_id),
+            )
+            traffic.db().execute(
+                "UPDATE volumes_workflows SET status='sent',lanes=3,result_json=? WHERE request_id=?",
+                (
+                    json.dumps({
+                        "hourly": existing_volumes["volumes"]["rows"],
+                        "inputs": {
+                            "lanes": 3,
+                            "freeflow_speed": 60,
+                            "actual_speed_by_hour": [
+                                {"hour": 7, "speed_kmh": 50},
+                                {"hour": 8, "speed_kmh": 45},
+                            ],
+                        },
+                    }),
+                    request_id,
+                ),
+            )
+            traffic.db().execute(
+                "INSERT INTO request_directions_workflows(job_id,request_id,status,interval_seconds,created_at,updated_at,result_json) "
+                "VALUES(?,?,'ready',3600,?,?,?)",
+                (job_id, request_id, now, now, json.dumps(result)),
+            )
+            traffic.db().commit()
+
+        pending_admin_page = self.client.get(f"/admin/requests/{request_id}")
+        self.assertIn(b"Confirm &amp; Send Speed / Travel to Client", pending_admin_page.data)
+        self.assertIn(b"Traffic volumes have already been sent.", pending_admin_page.data)
+        response = self.client.post(
+            f"/api/requests/{request_id}/directions/confirm",
+            json={"job_id": job_id},
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        with traffic.app.app_context():
+            request_row = traffic.db().execute(
+                "SELECT status,data FROM requests WHERE id=?", (request_id,)
+            ).fetchone()
+            volume_workflow = traffic.db().execute(
+                "SELECT status FROM volumes_workflows WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+            directions_workflow = traffic.db().execute(
+                "SELECT status FROM request_directions_workflows WHERE job_id=?",
+                (job_id,),
+            ).fetchone()
+        data = json.loads(request_row["data"])
+        self.assertEqual(request_row["status"], "Completed")
+        self.assertEqual(data["lanes"]["rows"], [{"value": 3.0}])
+        self.assertEqual(data["speed"]["rows"][1]["value"], 45.0)
+        self.assertEqual(data["travel"]["rows"][0]["value"], 0.25)
+        self.assertEqual(data["volumes"], existing_volumes["volumes"])
+        self.assertEqual(volume_workflow["status"], "sent")
+        self.assertEqual(directions_workflow["status"], "confirmed")
+        admin_page = self.client.get(f"/admin/requests/{request_id}")
+        self.assertEqual(admin_page.status_code, 200)
+        self.assertIn(b"const REQ=", admin_page.data)
+        self.assertIn(b"const rows=hourly?REQ.hours.map", admin_page.data)
+
+    def test_saving_volume_lanes_populates_requested_lanes_service(self):
+        request_id = self.insert_volume_request(services=["lanes", "volumes"])
+        with mock.patch.object(traffic, "_start_volume_calculation", return_value=False):
+            response = self.client.post(
+                f"/api/requests/{request_id}/volumes/lanes",
+                json={"lanes": "3"},
+            )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        with traffic.app.app_context():
+            row = traffic.db().execute(
+                "SELECT data FROM requests WHERE id=?", (request_id,)
+            ).fetchone()
+        self.assertEqual(
+            json.loads(row["data"])["lanes"]["rows"],
+            [{"value": 3.0}],
+        )
+
     def test_admin_approval_sends_volume_and_rmse_tolerance_to_client(self):
-        request_id = self.insert_volume_request()
+        request_id = self.insert_volume_request(services=["lanes", "volumes"])
         result = {
             "hourly": [
                 {"hour": 7, "value": 812.5, "tolerance": 43.2},
@@ -1299,6 +1760,12 @@ class OutscraperWorkflowTests(unittest.TestCase):
         response = self.client.post(f"/api/requests/{request_id}/volumes/confirm", json={})
         self.assertEqual(response.status_code, 200, response.get_json())
         self.assertEqual(response.get_json()["status"], "sent")
+        self.assertEqual(response.get_json()["request_status"], "Completed")
+        with traffic.app.app_context():
+            request_data = json.loads(traffic.db().execute(
+                "SELECT data FROM requests WHERE id=?", (request_id,)
+            ).fetchone()["data"])
+        self.assertEqual(request_data["lanes"]["rows"], [{"value": 2.0}])
         with self.client.session_transaction() as session:
             session.update(uid=self.client_id, name="Volume client", role="client")
         client_result = self.client.get(f"/results/{request_id}")
@@ -1308,6 +1775,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
         self.assertIn(b"812.5", client_result.data)
         self.assertIn(b"2026-09-26", client_result.data)
         self.assertIn(b"Saturday", client_result.data)
+        self.assertIn(b"Number of lanes", client_result.data)
         export_response = self.client.get(f"/results/{request_id}/export.xlsx")
         workbook = load_workbook(BytesIO(export_response.data), data_only=True)
         details = list(workbook["Service Details"].values)
@@ -1315,6 +1783,20 @@ class OutscraperWorkflowTests(unittest.TestCase):
         self.assertTrue(any(row[2] == 812.5 and row[3] == 43.2 and row[5] == "MATLAB" for row in details[1:]))
         summary = list(workbook["Request Summary"].values)
         self.assertTrue(any("weekly weekend used" in str(row[0]) and "Saturday · 2026-09-26" in str(row[1]) for row in summary))
+
+    def test_request_cannot_be_marked_completed_before_every_selected_service_is_ready(self):
+        request_id = self.insert_volume_request(services=["volumes", "speed"])
+        direct = self.client.post(
+            f"/api/requests/{request_id}/status",
+            json={"status": "Completed"},
+        )
+        self.assertEqual(direct.status_code, 409)
+        self.assertIn("every selected service", direct.get_json()["error"])
+        bulk = self.client.post(
+            f"/api/requests/{request_id}/save-all",
+            json={"status": "Completed", "services": {}},
+        )
+        self.assertEqual(bulk.status_code, 409)
 
     def test_request_directions_interpolation_requires_profile_to_reach_point_b(self):
         self.assertEqual(traffic._interpolate_route_seconds({"0": 0, "100": 10, "200": 30}, 150), 20)
@@ -1353,6 +1835,92 @@ class OutscraperWorkflowTests(unittest.TestCase):
             traffic.db().commit()
             with self.assertRaisesRegex(ValueError, "no usable timing data"):
                 traffic._extract_request_directions_result(job_id)
+
+    def test_ready_directions_hourly_speeds_are_saved_for_volumes_before_client_confirmation(self):
+        request_id = self.insert_volume_request(services=["volumes", "speed"])
+        job_id = f"ready-volume-directions-{request_id}"
+        timezone = ZoneInfo("Africa/Cairo")
+        start = int(dt.datetime(2025, 12, 18, 16, 0, tzinfo=timezone).timestamp())
+        finish = int(dt.datetime(2025, 12, 18, 18, 0, tzinfo=timezone).timestamp())
+        config = {
+            "departure_time": start,
+            "finish_time": finish,
+            "trafficlens_request": {
+                "point_a": "30.138239, 31.395698",
+                "point_b": "30.137423, 31.393946",
+                "point_c": "30.129997, 31.383281",
+                "timezone": "Africa/Cairo",
+                "road_ab_meters": 190,
+            },
+        }
+        response = {
+            "status": "Success",
+            "data": [[
+                {
+                    "timestamp": start + 300,
+                    "road_distance_timing(meters:seconds)": {"0": 0, "190": 10},
+                },
+                {
+                    "timestamp": start + 3600 + 300,
+                    "road_distance_timing(meters:seconds)": {"0": 0, "190": 12},
+                },
+            ]],
+        }
+        with traffic.app.app_context():
+            now = traffic._timestamp_now()
+            traffic.db().execute(
+                "UPDATE requests SET hours='[16,17]' WHERE id=?",
+                (request_id,),
+            )
+            traffic.db().execute(
+                "UPDATE volumes_workflows SET lanes=2,freeflow_result_json=? "
+                "WHERE request_id=?",
+                (
+                    json.dumps({"selected_speed_kmh": 80, "context": {}}),
+                    request_id,
+                ),
+            )
+            traffic.db().execute(
+                "INSERT INTO outscraper_jobs(id,created_at,updated_at,config_json,config_hash,approval_token_hash) "
+                "VALUES(?,?,?,?,?,?)",
+                (job_id, now, now, json.dumps(config), "hash", "token"),
+            )
+            traffic.db().execute(
+                "INSERT INTO outscraper_job_routes(job_id,route_index,origin,destination,execution_status,raw_response_json) "
+                "VALUES(?,1,'A','C','completed',?)",
+                (job_id, json.dumps(response)),
+            )
+            traffic.db().execute(
+                "INSERT INTO request_directions_workflows(job_id,request_id,status,interval_seconds,created_at,updated_at) "
+                "VALUES(?,?,'running',3600,?,?)",
+                (job_id, request_id, now, now),
+            )
+            traffic.db().commit()
+
+            with mock.patch.object(traffic, "_start_volume_calculation") as start_calculation:
+                traffic._extract_request_directions_result(job_id)
+                start_calculation.assert_called_once_with(request_id)
+
+            saved = traffic.db().execute(
+                "SELECT actual_result_json,freeflow_validation_json FROM volumes_workflows WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+            directions = traffic.db().execute(
+                "SELECT status FROM request_directions_workflows WHERE job_id=?",
+                (job_id,),
+            ).fetchone()
+        actual = json.loads(saved["actual_result_json"])
+        validation = json.loads(saved["freeflow_validation_json"])
+        self.assertEqual(
+            [item["speed_kmh"] for item in actual["hourly"]],
+            [68.4, 57.0],
+        )
+        self.assertEqual(
+            [item["actual_speed_kmh"] for item in validation["rows"]],
+            [68.4, 57.0],
+        )
+        self.assertTrue(validation["is_valid"])
+        self.assertEqual(directions["status"], "ready")
 
     def test_preview_cost_unknown_and_exact_configuration_is_persisted(self):
         payload = {**self.config, "routes": self.config["routes"] * 2}
@@ -1466,10 +2034,10 @@ class OutscraperWorkflowTests(unittest.TestCase):
         self.assertEqual(clean["trafficlens_context"]["holiday_date"], config["trafficlens_context"]["holiday_date"])
         self.assertEqual(clean["routes"][0]["departure_time"], clean["trafficlens_context"]["departure_time"])
         changed_route = {**config, "routes": [{**config["routes"][0], "origin": "Changed"}]}
-        with self.assertRaisesRegex(ValueError, "Reference route and 7:00 AM departure"):
+        with self.assertRaisesRegex(ValueError, "Reference route and departure time"):
             integration.validate_configuration(changed_route)
         changed_time = {**config, "routes": [{**config["routes"][0], "departure_time": config["routes"][0]["departure_time"] + 3600}]}
-        with self.assertRaisesRegex(ValueError, "Reference route and 7:00 AM departure"):
+        with self.assertRaisesRegex(ValueError, "Reference route and departure time"):
             integration.validate_configuration(changed_time)
 
     def test_completed_holiday_api_result_persists_date_in_request_and_exports(self):
@@ -1771,6 +2339,11 @@ class OutscraperWorkflowTests(unittest.TestCase):
         with self.client.session_transaction() as session:
             session.update(uid=client_user_id, name="Notification client", role="client")
 
+        admin_client = traffic.app.test_client()
+        with admin_client.session_transaction() as session:
+            session.update(uid=1, name="Admin", role="admin")
+        unread_before = admin_client.get("/api/notifications/unread-count").get_json()["count"]
+
         request_payload = {
             "services": ["travel"], "date": "2026-10-21",
             "start_time": "07:00:00", "end_time": "08:00:00",
@@ -1783,15 +2356,12 @@ class OutscraperWorkflowTests(unittest.TestCase):
         self.assertEqual(created.status_code, 200, created.get_json())
         request_id = created.get_json()["id"]
 
-        admin_client = traffic.app.test_client()
-        with admin_client.session_transaction() as session:
-            session.update(uid=1, name="Admin", role="admin")
         admin_notifications = admin_client.get("/notifications")
         self.assertEqual(admin_notifications.status_code, 200)
         self.assertIn(b"New request", admin_notifications.data)
         self.assertIn(f"REQ-{request_id}".encode(), admin_notifications.data)
         admin_count = admin_client.get("/api/notifications/unread-count").get_json()
-        self.assertEqual(admin_count["count"], 1)
+        self.assertEqual(admin_count["count"], unread_before + 1)
         with traffic.app.app_context():
             notification_id = traffic.db().execute(
                 "SELECT id FROM notifications WHERE user_id=1 AND request_id=? AND kind='new_request'",
@@ -1800,7 +2370,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
         opened = admin_client.get(f"/notifications/{notification_id}/open")
         self.assertEqual(opened.status_code, 302)
         self.assertTrue(opened.headers["Location"].endswith(f"/admin/requests/{request_id}"))
-        self.assertEqual(admin_client.get("/api/notifications/unread-count").get_json()["count"], 0)
+        self.assertEqual(admin_client.get("/api/notifications/unread-count").get_json()["count"], unread_before)
 
         with admin_client.session_transaction() as session:
             session.update(uid=1, name="Admin", role="admin")
@@ -2045,17 +2615,33 @@ class OutscraperWorkflowTests(unittest.TestCase):
             self.assertEqual(response.status_code, 400)
             self.assertIn("could not be verified", response.get_json()["error"])
 
-    def test_traffic_volumes_must_be_requested_by_itself(self):
+    def test_traffic_volumes_can_be_requested_with_other_services(self):
+        with self.client.session_transaction() as session:
+            session.update(uid=self.client_id, name="Volume client", role="client")
         response = self.client.post("/api/requests", json={
             "services": ["volumes", "speed"],
             "date": "2025-12-18",
             "start_time": "07:00:00",
             "end_time": "08:00:00",
             "coords": [[30.138239, 31.395698], [30.137423, 31.393946]],
+            "path": [[30.138239, 31.395698], [30.137423, 31.393946]],
+            "road_km": 0.19,
+            "junctions": 0,
             "no_junctions": True,
+            "point_c": [30.129997, 31.383281],
+            "point_c_distance_km": 1.7,
         })
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("requested by itself", response.get_json()["error"])
+        self.assertEqual(response.status_code, 200, response.get_json())
+        with traffic.app.app_context():
+            saved = traffic.db().execute(
+                "SELECT services FROM requests WHERE id=?", (response.get_json()["id"],)
+            ).fetchone()
+            workflow = traffic.db().execute(
+                "SELECT status FROM volumes_workflows WHERE request_id=?",
+                (response.get_json()["id"],),
+            ).fetchone()
+        self.assertEqual(json.loads(saved["services"]), ["volumes", "speed"])
+        self.assertEqual(workflow["status"], "waiting_for_inputs")
 
     def test_study_request_stores_exact_times_and_all_overlapping_hours(self):
         study_page = self.client.get("/study")

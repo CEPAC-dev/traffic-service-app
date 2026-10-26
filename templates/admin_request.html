@@ -18,16 +18,18 @@
 <h2>Free-flow speed · REQ-{{r.id}}</h2>
 <p class="hint">Review the route and the latest available weekly weekend date for this country. No API call is made before you confirm.</p>
 <div id="freeflowSpeedForm" class="grid2">
-  <div><label for="freeflowOrigin">Link origin</label><input id="freeflowOrigin" readonly></div>
-  <div><label for="freeflowDestination">Link destination</label><input id="freeflowDestination" readonly></div>
+  <div><label for="freeflowOrigin">Point A · Scraper origin</label><input id="freeflowOrigin" readonly></div>
+  <div><label for="freeflowDestination">Point C · Scraper destination</label><input id="freeflowDestination" readonly></div>
   <div><label for="freeflowStudyDate">Study date</label><input id="freeflowStudyDate" readonly></div>
-  <div><label for="freeflowReferenceDate">Weekly weekend date</label><input id="freeflowReferenceDate" readonly></div>
-  <div><label for="freeflowReferenceDay">Weekend day · local time</label><input id="freeflowReferenceDay" readonly></div>
+  <div><label for="freeflowReferenceDate">Weekly weekend date</label><input id="freeflowReferenceDate" type="date" required></div>
+  <div><label for="freeflowStartTime">Start time · route local time</label><input id="freeflowStartTime" type="datetime-local" step="60" required></div>
+  <div><label for="freeflowEndTime">End time · route local time</label><input id="freeflowEndTime" type="datetime-local" step="60" required></div>
+  <div><label for="freeflowInterval">Time interval (minutes) · Optional</label><input id="freeflowInterval" type="number" min="1" step="1" value="60"></div>
   <div><label for="freeflowCountry">Route country</label><input id="freeflowCountry" readonly></div>
 </div>
 <div id="freeflowSpeedMessage" class="msg" role="status" aria-live="polite"></div>
 <div id="freeflowSpeedApproval" hidden>
-  <div class="note-box"><b>Exact API request prepared</b><p id="freeflowSpeedSummary"></p><p>Departure is 07:00 in the route's local time zone. The selected date is strictly before today's date in that time zone.</p></div>
+  <div class="note-box"><b>Exact API request prepared</b><p id="freeflowSpeedSummary"></p><p>The selected weekly weekend date must be strictly before today in the route's local time zone.</p></div>
   <div class="cost-warning"><b>Scraper cost is unknown</b><p>Provider billing units and actual per-request cost are unavailable. Review the route/date before authorizing the API submission.</p></div>
   <label class="cf approval-ack"><input type="checkbox" id="freeflowSpeedCostAck"> I understand the cost is unknown and authorize this exact request.</label>
 </div>
@@ -37,7 +39,7 @@
 {% if 'travel' in r.services or 'speed' in r.services or 'volumes' in r.services %}{% if r.point_c %}
 <section class="card" id="requestDirectionsWorkflow" data-job-id="{{directions_workflow.job_id if directions_workflow else ''}}" data-workflow-status="{{directions_workflow.status if directions_workflow else ''}}" data-status-url="{{url_for('request_directions_status',rid=r.id)}}" style="margin:14px 0">
 <div class="svc-h"><h3>API Directions result workflow</h3><span id="directionsWorkflowBadge" class="b {{directions_workflow.status if directions_workflow else 'Pending'}}">{{directions_workflow.status|replace('_',' ')|title if directions_workflow else 'Not sent'}}</span></div>
-<p id="directionsWorkflowMessage" class="hint">{% if directions_workflow and directions_workflow.error %}{{directions_workflow.error}}{% elif directions_workflow and directions_workflow.status=='ready' %}Response processed and ready for administrator review.{% elif directions_workflow and directions_workflow.status=='confirmed' %}Results were confirmed by administrator {{directions_workflow.confirmed_by}} at {{directions_workflow.confirmed_at}}.{% elif directions_workflow %}Waiting for the linked Scraper response. This page checks the same request automatically.{% else %}No Directions request has been sent for this client request.{% endif %}</p>
+<p id="directionsWorkflowMessage" class="hint">{% if directions_workflow and directions_workflow.error %}{{directions_workflow.error}}{% elif directions_workflow and directions_workflow.status=='ready' and volumes_workflow and volumes_workflow.status=='sent' and ('speed' in r.services or 'travel' in r.services) %}Traffic volumes have already been sent. Review and confirm these Directions results to send the selected Speed/Travel services; this will not rerun MATLAB.{% elif directions_workflow and directions_workflow.status=='ready' %}Response processed and ready for administrator review.{% elif directions_workflow and directions_workflow.status=='confirmed' %}Results were confirmed by administrator {{directions_workflow.confirmed_by}} at {{directions_workflow.confirmed_at}}.{% elif directions_workflow %}Waiting for the linked Scraper response. This page checks the same request automatically.{% else %}No Directions request has been sent for this client request.{% endif %}</p>
 <div id="directionsResultReview" {% if not directions_workflow or directions_workflow.status not in ('ready','confirmed') %}hidden{% endif %}>
 {% if directions_workflow and directions_workflow.result %}
 <div class="tw"><table><tbody>
@@ -49,7 +51,7 @@
 <details><summary>Hourly results used for client report</summary><div class="tw"><table><thead><tr><th>Hour</th><th>Distance (m)</th><th>Time (s)</th><th>Speed (km/h)</th><th>Basis</th></tr></thead><tbody>{% for item in directions_workflow.result.hourly %}<tr><td>{{'%02d:00'|format(item.hour)}}</td><td>{{'%.1f'|format(item.distance_m)}}</td><td>{{'%.2f'|format(item.time_seconds)}}</td><td>{{'%.2f'|format(item.speed_kmh)}}</td><td>{{'Reused available result' if item.reused_observation else 'Returned for this hour'}}</td></tr>{% endfor %}</tbody></table></div></details>
 {% endif %}
 <div class="row-actions" style="margin-top:12px"><a class="btn alt" id="viewDirectionsScraper" href="{{url_for('outscraper_job_detail',job_id=directions_workflow.job_id) if directions_workflow else '#'}}" {% if not directions_workflow %}hidden{% endif %}>View Data Scraper</a>
-<button class="btn" id="confirmDirectionsResults" type="button" {% if not directions_workflow or directions_workflow.status!='ready' %}hidden{% endif %}>{{'Save Actual Speed for MATLAB' if 'volumes' in r.services and 'speed' not in r.services and 'travel' not in r.services else 'Confirm & Send Results'}}</button></div>
+<button class="btn" id="confirmDirectionsResults" type="button" {% if not directions_workflow or directions_workflow.status!='ready' %}hidden{% endif %}>{% if 'volumes' in r.services and volumes_workflow and volumes_workflow.status=='sent' and ('speed' in r.services or 'travel' in r.services) %}Confirm &amp; Send Speed / Travel to Client{% elif 'volumes' in r.services and 'speed' not in r.services and 'travel' not in r.services %}Save Actual Speed for MATLAB{% else %}Confirm &amp; Send Results{% endif %}</button></div>
 </div>
 </section>
 <dialog id="directionsReviewDialog" class="directions-review-dialog">
@@ -72,11 +74,17 @@
 {% if 'volumes' in r.services and volumes_workflow %}
 <section class="card" id="volumesWorkflow" data-status-url="{{url_for('volumes_workflow_status',rid=r.id)}}" data-rendered-status="{{volumes_workflow.status}}" style="margin:14px 0">
 <div class="svc-h"><h3>Traffic volumes · MATLAB workflow</h3><span id="volumesWorkflowBadge" class="b {{volumes_workflow.status}}">{{volumes_workflow.status|replace('_',' ')|title}}</span></div>
-<p id="volumesWorkflowMessage" class="hint" aria-live="polite">{% if volumes_workflow.error %}{{volumes_workflow.error}}{% elif volumes_workflow.status=='ready_for_review' %}MATLAB finished. Review the hourly volumes and RMSE tolerance before sending them to the client.{% elif volumes_workflow.status=='sent' %}Approved volume results have been sent to the client.{% else %}Provide lane count and complete both API steps. MATLAB starts automatically when all inputs are ready.{% endif %}</p>
+<p id="volumesWorkflowMessage" class="hint" aria-live="polite">{% if volumes_workflow.error %}{{volumes_workflow.error}}{% elif volumes_workflow.status=='ready_for_review' %}MATLAB finished. Review the hourly volumes and RMSE tolerance before sending them to the client.{% elif volumes_workflow.status=='sent' %}Approved volume results have been sent to the client.{% else %}Provide lane count, confirm actual speeds, and accept a valid free-flow speed. MATLAB starts only after all required inputs are ready.{% endif %}</p>
 <div class="grid2">
 <div><label for="volumeLaneCount">Number of lanes</label><input id="volumeLaneCount" type="number" min="0.01" step="any" value="{{volumes_workflow.lanes or ''}}" {% if volumes_workflow.status in ('running','ready_for_review','sent') %}disabled{% endif %}></div>
-<div><label for="volumeFreeflowSpeed">Free-flow speed · weekly weekend reference</label><input id="volumeFreeflowSpeed" readonly value="{{'%.2f'|format(volumes_workflow.freeflow_speed) if volumes_workflow.freeflow_speed is not none else 'Waiting for API result'}}"><small id="volumeFreeflowContext" class="hint">{% if volumes_workflow.freeflow_context %}{{volumes_workflow.freeflow_context.weekend_day}} {{volumes_workflow.freeflow_context.weekend_date}} · 07:00 {{volumes_workflow.freeflow_context.timezone}}{% endif %}</small></div>
+<div><label for="volumeFreeflowSpeed">Free-flow speed · weekly weekend reference</label><input id="volumeFreeflowSpeed" readonly value="{{'%.2f'|format(volumes_workflow.freeflow_speed) if volumes_workflow.freeflow_speed is not none else 'Waiting for API result'}}"><small id="volumeFreeflowContext" class="hint">{% if volumes_workflow.freeflow_context %}{{volumes_workflow.freeflow_context.weekend_day}} {{volumes_workflow.freeflow_context.weekend_date}} · selected local time window {{volumes_workflow.freeflow_context.timezone}}{% endif %}</small></div>
 </div>
+<div id="freeflowValidationPanel" class="note-box" {% if not volumes_workflow.freeflow_validation %}hidden{% endif %}>
+<b id="freeflowValidationMessage">{% if volumes_workflow.freeflow_validation %}{% if volumes_workflow.freeflow_validation.is_valid %}Free-flow speed is higher than actual speed for every requested hour.{% else %}{{volumes_workflow.error or 'Review the hourly comparison below.'}}{% endif %}{% endif %}</b>
+<div id="freeflowComparisonTable" class="tw" {% if not volumes_workflow.freeflow_validation %}hidden{% endif %}><table><thead><tr><th>Hour</th><th>Actual speed</th><th>Free-flow speed</th><th>Check</th></tr></thead><tbody>{% if volumes_workflow.freeflow_validation %}{% for item in volumes_workflow.freeflow_validation.rows %}<tr><td>{{'%02d:00'|format(item.hour)}}</td><td>{{'%.2f'|format(item.actual_speed_kmh) if item.actual_speed_kmh is not none else 'Waiting for Directions'}}</td><td>{{'%.2f'|format(item.freeflow_speed_kmh)}}</td><td>{{'✓' if item.valid else '✗'}}</td></tr>{% endfor %}{% endif %}</tbody></table></div>
+<div class="row-actions"><span class="pill" id="freeflowAcceptedBadge" {% if not volumes_workflow.freeflow_accepted %}hidden{% endif %}>Free-flow accepted{% if volumes_workflow.freeflow_override %} · Used anyway{% endif %}</span><button class="btn" id="useFreeflowAnyway" type="button" {% if not volumes_workflow.freeflow_validation or volumes_workflow.freeflow_validation.missing_hours or not volumes_workflow.freeflow_validation.mismatched_hours %}hidden{% endif %}>Use anyway</button><button class="btn alt" id="resendFreeflowSpeed" type="button" {% if volumes_workflow.freeflow_accepted or volumes_workflow.freeflow_job_status in ('submitting','running','unknown') or not volumes_workflow.freeflow_job_id or volumes_workflow.freeflow_speed is none %}hidden{% endif %}>Re-send</button></div>
+</div>
+<details id="freeflowAttempts"><summary>Free-flow request attempts (cost is unknown)</summary><div id="freeflowAttemptList" class="sent-api-requests"></div></details>
 <p><button class="btn alt" id="saveVolumeLanes" type="button" {% if volumes_workflow.status in ('running','ready_for_review','sent') %}hidden{% endif %}>Save lanes &amp; run MATLAB when ready</button>
 <button class="btn alt" id="retryVolumeModel" type="button" {% if volumes_workflow.status!='failed' %}hidden{% endif %}>Retry MATLAB</button>
 <span class="msg" id="volumeWorkflowAction" aria-live="polite"></span></p>
@@ -103,6 +111,8 @@
 {% endblock %}
 {% block js %}<script>
 const REQ={{ r|tojson }},FORMS={{ forms|tojson }},SV={{ SERVICES|tojson }},SVI={{ SVINFO|tojson }};
+const VOLUMES_ALREADY_SENT={{ 'true' if volumes_workflow and volumes_workflow.status=='sent' else 'false' }};
+const HAS_CLIENT_DIRECTIONS={{ 'true' if 'speed' in r.services or 'travel' in r.services else 'false' }};
 const esc=s=>String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'),pad=n=>String(n).padStart(2,'0');
 const coordinate=p=>p.map(value=>Number(value).toFixed(6)).join(', ');
 requestPointA.textContent=coordinate(REQ.coords[0]);requestPointB.textContent=coordinate(REQ.coords[1]);
@@ -229,7 +239,7 @@ if(directionsDialog){
   workflowBadge.className=`b ${workflow.status}`;
   if(workflowTimer&&['ready','confirmed','failed','rejected','invalidated'].includes(workflow.status)){window.clearInterval(workflowTimer);workflowTimer=null}
   workflowMessage.textContent=workflow.error||(
-   workflow.status==='ready'?'Scraper response processed. Review the extracted A → B results below.':
+   workflow.status==='ready'?(VOLUMES_ALREADY_SENT&&HAS_CLIENT_DIRECTIONS?'Traffic volumes have already been sent. Confirm below to automatically send the saved Speed / Travel results; MATLAB will not run again.':'Scraper response processed. Review the extracted A → B results below.'):
    workflow.status==='confirmed'?(volumeOnly?`Actual speed was saved for MATLAB at ${workflow.confirmed_at}; it was not sent to the client.`:`Results were confirmed and sent at ${workflow.confirmed_at}.`):
    `Scraper status: ${workflow.job_status||workflow.status}. Waiting for a complete response.`
   );
@@ -309,8 +319,9 @@ if(directionsDialog){
   try{
    const response=await post(`/api/requests/${REQ.id}/directions/confirm`,{job_id:jobId});
    if(!response.ok)throw new Error(response.error||'Could not confirm these results.');
-   workflowMessage.textContent=response.message||`Results were confirmed and sent at ${response.confirmed_at}.`;
-   workflowBadge.textContent='Confirmed';workflowBadge.className='b confirmed';confirmButton.hidden=true;
+   workflowMessage.textContent=response.message||'Results confirmed. Reloading the saved request data...';
+   workflowBadge.textContent='Confirmed';workflowBadge.className='b confirmed';
+   window.setTimeout(()=>location.reload(),300);
   }catch(error){workflowMessage.textContent=error.message||'Could not confirm these results.';confirmButton.disabled=false}
  };
  const volumesPanel=document.getElementById('volumesWorkflow');
@@ -332,12 +343,19 @@ if(directionsDialog){
     const referenceLabel=document.getElementById('volumeFreeflowContext');
     const receivedPill=document.getElementById('freeflowReceivedPill');
     const freeflowButton=document.getElementById('openFreeflowSpeedDialog');
+    const validationPanel=document.getElementById('freeflowValidationPanel');
+    const validationMessage=document.getElementById('freeflowValidationMessage');
+    const comparisonTable=document.getElementById('freeflowComparisonTable');
+    const useAnywayButton=document.getElementById('useFreeflowAnyway');
+    const resendButton=document.getElementById('resendFreeflowSpeed');
+    const acceptedBadge=document.getElementById('freeflowAcceptedBadge');
+    const attemptList=document.getElementById('freeflowAttemptList');
     const hasFreeflowSpeed=state.freeflow_speed!==null&&state.freeflow_speed!==undefined;
     const freeflowActive=['submitting','running','unknown'].includes(state.freeflow_job_status);
     if(speedInput)speedInput.value=hasFreeflowSpeed?Number(state.freeflow_speed).toFixed(2):'Waiting for API result';
     if(referenceLabel){
      const context=state.freeflow_context;
-     referenceLabel.textContent=context?`${context.weekend_day} ${context.weekend_date} · 07:00 ${context.timezone}`:'';
+     referenceLabel.textContent=context?`${context.weekend_day} ${context.weekend_date} · ${context.timezone}`:'';
     }
     if(receivedPill){
      receivedPill.hidden=!hasFreeflowSpeed&&!freeflowActive;
@@ -346,6 +364,32 @@ if(directionsDialog){
       :freeflowActive?`Free-flow speed request ${state.freeflow_job_status.replaceAll('_',' ')}`:'';
     }
     if(freeflowButton)freeflowButton.hidden=hasFreeflowSpeed||freeflowActive;
+    if(validationPanel&&validationMessage&&comparisonTable){
+     const validation=state.freeflow_validation;
+     validationPanel.hidden=!validation;
+     if(validation){
+      const valid=validation.is_valid;
+      validationPanel.className=`note-box ${valid?'freeflow-valid':'freeflow-invalid'}`;
+      validationMessage.textContent=valid
+       ?'Free-flow speed is higher than actual speed for every requested hour.'
+       :state.error||'Review the hourly comparison below.';
+      comparisonTable.hidden=false;
+      comparisonTable.innerHTML=`<table><thead><tr><th>Hour</th><th>Actual speed</th><th>Free-flow speed</th><th>Check</th></tr></thead><tbody>${validation.rows.map(item=>
+       `<tr><td>${pad(item.hour)}:00</td><td>${item.actual_speed_kmh===null?'Waiting for Directions':Number(item.actual_speed_kmh).toFixed(2)}</td><td>${Number(item.freeflow_speed_kmh).toFixed(2)}</td><td>${item.valid===true?'✓':item.valid===false?'✗':'—'}</td></tr>`
+      ).join('')}</tbody></table>`;
+     }
+    }
+    if(acceptedBadge){
+     acceptedBadge.hidden=!state.freeflow_accepted;
+     acceptedBadge.textContent=`Free-flow accepted${state.freeflow_override?' · Used anyway':''}`;
+    }
+    if(useAnywayButton)useAnywayButton.hidden=state.freeflow_accepted||!!state.freeflow_validation?.missing_hours?.length||!state.freeflow_validation?.mismatched_hours?.length;
+    if(resendButton)resendButton.hidden=state.freeflow_accepted||freeflowActive||!state.freeflow_job_id||!hasFreeflowSpeed;
+    if(attemptList){
+     attemptList.innerHTML=(state.freeflow_attempts||[]).map(attempt=>
+      `<div class="sent-api-request"><a href="/admin/outscraper/${encodeURIComponent(attempt.id)}">${esc(attempt.submitted_at)} · ${esc(attempt.status)}</a><p class="hint">${attempt.result?`Selected free-flow speed: ${Number(attempt.result.selected_speed_kmh).toFixed(2)} km/h`:'No usable result recorded.'}${attempt.validation?` · ${attempt.validation.is_valid?'Passed validation':attempt.validation.mismatched_hours?.length?`Needs re-send at ${attempt.validation.mismatched_hours.join(', ')}`:'Waiting for actual speed'}`:''}${attempt.accepted?` · Accepted${attempt.override?' with Use anyway':''}`:''}</p>${attempt.error?`<p class="hint">${esc(attempt.error)}</p>`:''}</div>`
+     ).join('')||'<p class="hint">No free-flow attempts have been submitted.</p>';
+    }
     const volumeLocked=['running','ready_for_review','sent'].includes(state.status);
     document.getElementById('volumeLaneCount').disabled=volumeLocked;
     document.getElementById('saveVolumeLanes').hidden=volumeLocked;
@@ -374,6 +418,17 @@ if(directionsDialog){
     volumeAction.textContent='Lane count saved.';
     await refreshVolumes();
    }catch(error){volumeAction.textContent=error.message||'Could not save lane count.'}
+  });
+  document.getElementById('useFreeflowAnyway')?.addEventListener('click',async()=>{
+   if(!window.confirm('The free-flow speed is not higher than actual speed for every selected hour. Use this value anyway and continue to MATLAB?'))
+    return;
+   volumeAction.textContent='Recording explicit free-flow override and starting MATLAB...';
+   try{
+    const response=await post(`/api/requests/${REQ.id}/volumes/freeflow/accept`,{use_anyway:true});
+    if(!response.ok)throw new Error(response.error||'Could not accept the free-flow value.');
+    volumeAction.textContent=response.matlab_started?'Free-flow accepted. MATLAB started.':'Free-flow accepted. Waiting for the remaining MATLAB inputs.';
+    await refreshVolumes();
+   }catch(error){volumeAction.textContent=error.message||'Could not accept the free-flow value.'}
   });
   document.getElementById('retryVolumeModel')?.addEventListener('click',async()=>{
    volumeAction.textContent='Starting MATLAB...';
@@ -404,7 +459,40 @@ if(directionsDialog){
   const approvalPanel=document.getElementById('freeflowSpeedApproval');
   const costAck=document.getElementById('freeflowSpeedCostAck');
   const message=document.getElementById('freeflowSpeedMessage');
+  const dateInput=document.getElementById('freeflowReferenceDate');
+  const startInput=document.getElementById('freeflowStartTime');
+  const endInput=document.getElementById('freeflowEndTime');
+  const intervalInput=document.getElementById('freeflowInterval');
   let activePreview=null;
+  const localDateTime=(timestamp,timeZone)=>{
+   const parts=Object.fromEntries(new Intl.DateTimeFormat('en-CA',{
+    timeZone,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'
+   }).formatToParts(new Date(timestamp*1000)).filter(part=>part.type!=='literal').map(part=>[part.type,part.value]));
+   return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
+  };
+  const timestampFor=(value,timeZone)=>{
+   const match=/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(value);
+   if(!match)return null;
+   const [year,month,day,hour,minute]=match.slice(1).map(Number);
+   const wall=Date.UTC(year,month-1,day,hour,minute),formatter=new Intl.DateTimeFormat('en-CA',{
+    timeZone,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'
+   });
+   let candidate=wall;
+   for(let attempt=0;attempt<5;attempt++){
+    const parts=Object.fromEntries(formatter.formatToParts(new Date(candidate)).filter(part=>part.type!=='literal').map(part=>[part.type,Number(part.value)]));
+    const shown=Date.UTC(parts.year,parts.month-1,parts.day,parts.hour,parts.minute);
+    const next=wall-(shown-candidate);if(next===candidate)break;candidate=next;
+   }
+   const check=Object.fromEntries(formatter.formatToParts(new Date(candidate)).filter(part=>part.type!=='literal').map(part=>[part.type,Number(part.value)]));
+   return check.year===year&&check.month===month&&check.day===day&&check.hour===hour&&check.minute===minute
+    ?Math.floor(candidate/1000):null;
+  };
+  const dayName=date=>new Date(`${date}T12:00:00Z`).toLocaleDateString('en-US',{weekday:'long',timeZone:'UTC'});
+  dateInput.addEventListener('change',()=>{
+   if(!dateInput.value)return;
+   if(startInput.value)startInput.value=`${dateInput.value}T${startInput.value.slice(11)}`;
+   if(endInput.value)endInput.value=`${dateInput.value}T${endInput.value.slice(11)}`;
+  });
   const invalidatePreview=async()=>{
    if(!activePreview)return;
    const pending=activePreview;activePreview=null;
@@ -417,7 +505,7 @@ if(directionsDialog){
    }catch(error){console.warn('Unable to invalidate the unapproved free-flow preview.',error)}
   };
   const showPreparedRequest=async()=>{
-   prepareButton.disabled=true;message.textContent='Preparing the route and latest previous weekend date...';
+   prepareButton.disabled=true;message.textContent='Preparing the A → C route and weekly weekend reference...';
    approvalPanel.hidden=true;confirmButton.hidden=true;costAck.checked=false;
    try{
     const sourceResponse=await fetch(freeflowDialog.dataset.prepareUrl,{cache:'no-store'});
@@ -427,37 +515,55 @@ if(directionsDialog){
     document.getElementById('freeflowOrigin').value=route.origin;
     document.getElementById('freeflowDestination').value=route.destination;
     document.getElementById('freeflowStudyDate').value=context.study_date;
-    document.getElementById('freeflowReferenceDate').value=context.weekend_date;
-    document.getElementById('freeflowReferenceDay').value=`${context.weekend_day} · 07:00`;
+    dateInput.value=context.weekend_date;
+    startInput.value=localDateTime(config.departure_time,context.timezone);
+    endInput.value=localDateTime(config.finish_time,context.timezone);
+    intervalInput.value=config.interval||60;
     document.getElementById('freeflowCountry').value=`${context.country_name} (${context.country_code}) · ${context.timezone}`;
-    message.textContent='Review the prepared route and reference date, then create the API preview.';
+    message.textContent='Review the A → C route, eligible weekly weekend date, local time window and interval. No API call is made before approval.';
     prepareButton.disabled=false;
     prepareButton.onclick=async()=>{
      prepareButton.disabled=true;message.textContent='Saving the exact request preview. No API call has been made.';
      try{
+      const startTimestamp=timestampFor(startInput.value,context.timezone);
+      const finishTimestamp=timestampFor(endInput.value,context.timezone);
+      const intervalValue=intervalInput.value.trim()===''?Math.min(60,Math.ceil((finishTimestamp-startTimestamp)/60)):Number(intervalInput.value);
+      if(!dateInput.value||!startTimestamp||!finishTimestamp||finishTimestamp<=startTimestamp||
+        startInput.value.slice(0,10)!==dateInput.value||endInput.value.slice(0,10)!==dateInput.value||
+        !Number.isSafeInteger(intervalValue)||intervalValue<=0)
+       throw new Error('Choose a valid weekly weekend date and a same-day local time range with a positive whole-minute interval.');
+      const weekday=dayName(dateInput.value);
+      const reviewedConfig=JSON.parse(JSON.stringify(config));
+      reviewedConfig.routes[0].departure_time=startTimestamp;
+      reviewedConfig.departure_time=startTimestamp;
+      reviewedConfig.finish_time=finishTimestamp;
+      reviewedConfig.interval=intervalValue;
+      reviewedConfig.trafficlens_context.weekend_date=dateInput.value;
+      reviewedConfig.trafficlens_context.weekend_day=weekday;
+      reviewedConfig.trafficlens_context.departure_time=startTimestamp;
+      reviewedConfig.trafficlens_context.finish_time=finishTimestamp;
+      reviewedConfig.trafficlens_context.interval_minutes=intervalValue;
       const response=await fetch('/api/outscraper/preview',{
-       method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(config)
+       method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(reviewedConfig)
       });
       const data=await response.json();
-      if(response.status===400&&String(data.error||'').includes('weekly weekend date')){
-       message.textContent='The current date changed since this form was opened. Refreshing the weekend date...';
-       await showPreparedRequest();return;
-      }
       if(!response.ok)throw new Error(data.error||'Could not create the API preview.');
       activePreview={id:data.id,token:data.approval_token,configuration:data.configuration};
       document.getElementById('freeflowSpeedSummary').textContent=
-       `${context.country_name} (${context.country_code}) · ${route.origin} → ${route.destination} · ${context.weekend_day} ${context.weekend_date} at 07:00 (${context.timezone}). Estimated cost is unknown.`;
+       `${context.country_name} (${context.country_code}) · ${route.origin} → ${route.destination} · ${weekday} ${dateInput.value} · ${startInput.value.slice(11)}–${endInput.value.slice(11)} (${context.timezone}) · ${intervalValue}-minute interval. Estimated cost is unknown.`;
       approvalPanel.hidden=false;confirmButton.hidden=false;confirmButton.disabled=true;
       prepareButton.hidden=true;message.textContent='Preview ready. Confirm below to authorize the API call.';
      }catch(error){message.textContent=error.message||'Could not create the API preview.';prepareButton.disabled=false}
     };
    }catch(error){message.textContent=error.message||'Could not prepare the API request.';prepareButton.disabled=false}
   };
-  document.getElementById('openFreeflowSpeedDialog')?.addEventListener('click',()=>{
+  const openFreeflowDialog=()=>{
    message.textContent='';approvalPanel.hidden=true;prepareButton.hidden=false;prepareButton.disabled=true;
    prepareButton.onclick=null;confirmButton.hidden=true;confirmButton.disabled=true;costAck.checked=false;
    freeflowDialog.showModal();showPreparedRequest();
-  });
+  };
+  document.getElementById('openFreeflowSpeedDialog')?.addEventListener('click',openFreeflowDialog);
+  document.getElementById('resendFreeflowSpeed')?.addEventListener('click',openFreeflowDialog);
   costAck.addEventListener('change',()=>{confirmButton.disabled=!costAck.checked||!activePreview});
   confirmButton.addEventListener('click',async()=>{
    if(!activePreview||!costAck.checked)return;

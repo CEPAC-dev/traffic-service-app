@@ -4,6 +4,7 @@ import csv
 import datetime as dt
 import io
 import json
+import math
 import os
 import re
 import socket
@@ -224,17 +225,48 @@ def validate_configuration(payload):
         reference_label = _text(label_value, "Weekly weekend day" if service == "freeflow_speed" else "Public holiday")
         origin = _text(context.get("origin"), "Reference route origin")
         destination = _text(context.get("destination"), "Reference route destination")
-        expected_departure = int(dt.datetime.combine(reference_date, dt.time(7), tzinfo=timezone).timestamp())
+        volume_input = context.get("volume_input") is True
+        if volume_input:
+            try:
+                expected_departure = _timestamp(context.get("departure_time"), "Free-flow start time")
+                expected_finish = _timestamp(context.get("finish_time"), "Free-flow end time")
+                interval_minutes = context.get("interval_minutes")
+                road_ab_meters = float(context.get("road_ab_meters"))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Volume free-flow context has an invalid A→C time range or A→B distance") from exc
+            if (
+                expected_departure is None
+                or expected_finish is None
+                or isinstance(interval_minutes, bool)
+                or not isinstance(interval_minutes, int)
+                or interval_minutes <= 0
+                or not math.isfinite(road_ab_meters)
+                or road_ab_meters <= 0
+            ):
+                raise ValueError("Volume free-flow context has an invalid A→C time range or A→B distance")
+            local_start = dt.datetime.fromtimestamp(expected_departure, timezone)
+            local_finish = dt.datetime.fromtimestamp(expected_finish, timezone)
+            if (
+                local_start.date() != reference_date
+                or local_finish.date() != reference_date
+                or local_start >= local_finish
+                or departure_time != expected_departure
+                or finish_time != expected_finish
+                or interval != interval_minutes
+            ):
+                raise ValueError("Free-flow start/end and interval must match the reviewed weekly-weekend context")
+        else:
+            expected_departure = int(dt.datetime.combine(reference_date, dt.time(7), tzinfo=timezone).timestamp())
         if (
             len(clean_routes) != 1
             or clean_routes[0]["origin"] != origin
             or clean_routes[0]["destination"] != destination
             or clean_routes[0].get("departure_time") != expected_departure
-            or departure_time is not None
-            or finish_time is not None
-            or interval is not None
+            or (not volume_input and departure_time is not None)
+            or (not volume_input and finish_time is not None)
+            or (not volume_input and interval is not None)
         ):
-            raise ValueError("Reference route and 7:00 AM departure must match the configured context")
+            raise ValueError("Reference route and departure time must match the configured context")
         normalized_context = {
             "source_request_id": source_request_id,
             "service": service,
@@ -252,6 +284,14 @@ def validate_configuration(payload):
                 weekend_date=reference_date.isoformat(),
                 weekend_day=reference_label,
             )
+            if volume_input:
+                normalized_context.update(
+                    volume_input=True,
+                    departure_time=expected_departure,
+                    finish_time=expected_finish,
+                    interval_minutes=interval_minutes,
+                    road_ab_meters=road_ab_meters,
+                )
         else:
             normalized_context.update(
                 holiday_date=reference_date.isoformat(),
