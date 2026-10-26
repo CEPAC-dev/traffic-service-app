@@ -26,7 +26,7 @@
 {% block js %}<script>
 const R={{ r|tojson }},FORMS={{ forms|tojson }},SV={{ SERVICES|tojson }},SVI={{ SVINFO|tojson }},D=R.data||{};
 const esc=s=>String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'),pad=n=>String(n).padStart(2,'0');
-const map=L.map('rmap');tiles(map);const pg=L.polyline(R.path,{color:'#f97316',weight:5}).addTo(map);
+const map=L.map('rmap');tiles(map);const pg=L.polyline(R.path,{color:'#0D9488',weight:5}).addTo(map);
 R.coords.forEach((p,i)=>L.marker(p).addTo(map).bindTooltip(i?'B':'A',{permanent:true,direction:'top'}));map.fitBounds(pg.getBounds(),{padding:[40,40]});
 if(R.point_c){L.marker(R.point_c,{icon:L.divIcon({className:'point-c-marker',html:'C',iconSize:[28,28],iconAnchor:[14,14]})}).addTo(map).bindTooltip('C · calculated',{permanent:true,direction:'top'});map.fitBounds(L.latLngBounds([...R.path,R.point_c]),{padding:[40,40]})}
 const rowsOf=s=>(D[s]||{}).rows||[],avg=a=>a.reduce((x,y)=>x+Number(y.value),0)/a.length;
@@ -57,6 +57,6 @@ if(ff&&sp.length&&ff.value>0)ins.push(`Average speed is ${Math.round(avg(sp)/ff.
 if(ft&&tt.length){const x=avg(tt)-ft.value;ins.push(`Average travel time is ${Math.abs(x).toFixed(1)} min ${x>=0?'above':'below'} the free flow time.`)}
 if(sp.length>1){const m=sp.reduce((a,b)=>b.value<a.value?b:a);ins.push(`Slowest hour: ${pad(m.hour)}:00 at ${m.value} km/h.`)}
 if(ins.length)document.getElementById('ins').innerHTML=`<div class="card result-insights"><h3>Key insights</h3><ul class="ins">${ins.map(i=>`<li>${i}</li>`).join('')}</ul></div>`;
-charts.forEach(([s,F,rows])=>new Chart(document.getElementById('ch_'+s),{type:'bar',data:{labels:rows.map(r=>pad(r.hour)+':00'),datasets:[{data:rows.map(r=>Number(r.value)),backgroundColor:'#7c3aed',borderRadius:4}]},
- options:{plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,title:{display:true,text:F.unit},grid:{color:'#f0ebf8'}},x:{grid:{display:false}}}}}));
+charts.forEach(([s,F,rows])=>new Chart(document.getElementById('ch_'+s),{type:'bar',data:{labels:rows.map(r=>pad(r.hour)+':00'),datasets:[{data:rows.map(r=>Number(r.value)),backgroundColor:'#0F766E',borderRadius:4}]},
+ options:{plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,title:{display:true,text:F.unit},grid:{color:'#E4EBF2'}},x:{grid:{display:false}}}}}));
 </script>{% endblock %}

@@ -91,8 +91,8 @@ function sectionFromHash(){const hash=location.hash.slice(1);if(hash.startsWith(
 function showSection(section){SECTIONS.forEach(name=>{document.getElementById(`t-${name}`).hidden=name!==section});document.querySelectorAll('.side-link[data-section]').forEach(link=>link.classList.toggle('active',link.dataset.section===section))}
 
 /* overview */
-const C=['#7c3aed','#16a34a','#f97316','#a855f7','#22c55e','#fb923c'],ax={y:{beginAtZero:true,ticks:{precision:0},grid:{color:'#f0ebf8'}},x:{grid:{display:false}}},nl={plugins:{legend:{display:false}}};
-const statusColors={Pending:'#f59e0b',Processing:'#7c3aed',Completed:'#16a34a',Rejected:'#dc4b55'};
+const C=['#0F766E','#2563EB','#F59E0B','#0D9488','#102A43','#94A3B8'],ax={y:{beginAtZero:true,ticks:{precision:0},grid:{color:'#E4EBF2'}},x:{grid:{display:false}}},nl={plugins:{legend:{display:false}}};
+const statusColors={Pending:'#f59e0b',Processing:'#2563EB',Completed:'#16a34a',Rejected:'#DC2626'};
 new Chart(c1,{type:'doughnut',data:{labels:Object.keys(ST.by_status),datasets:[{data:Object.values(ST.by_status),backgroundColor:Object.keys(ST.by_status).map(s=>statusColors[s]||'#94a3b8')}]}});
 new Chart(c2,{type:'bar',data:{labels:Object.keys(ST.by_service),datasets:[{data:Object.values(ST.by_service),backgroundColor:C,borderRadius:6}]},options:{...nl,scales:ax}});
 
@@ -196,7 +196,7 @@ document.querySelectorAll('.service-enabled').forEach(i=>i.onchange=async()=>{
 document.getElementById('addService').onclick=async()=>{
  const m=document.getElementById('addServiceMsg');m.textContent='Adding...';
  const r=await post('/api/services/custom',{name:newServiceName.value,unit:newServiceUnit.value,kind:newServiceKind.value});
- if(!r.ok){m.textContent=r.error||'Could not add service';m.style.color='#b3261e';return}
+ if(!r.ok){m.textContent=r.error||'Could not add service';m.style.color='#B91C1C';return}
  location.hash='services';location.reload();
 };
 
@@ -204,8 +204,9 @@ document.getElementById('addService').onclick=async()=>{
 document.getElementById('nu').onclick=async()=>{const f=document.getElementById('nf').files[0],m=document.getElementById('nm');
  if(!f){m.textContent='Choose a file first';return}m.textContent='Uploading and reading the network...';
  const fd=new FormData();fd.append('file',f);const r=await fetch('/api/network/upload',{method:'POST',body:fd}).then(x=>x.json());
- if(r.error){m.textContent=r.error;m.style.color='#b3261e';return}location.hash='network';location.reload()};
+ if(r.error){m.textContent=r.error;m.style.color='#B91C1C';return}location.hash='network';location.reload()};
 const nsb=document.getElementById('ns');
 if(nsb)nsb.onclick=async()=>{const b={};document.querySelectorAll('#t-network [data-k]').forEach(e=>b[e.dataset.k]=e.value);
  const r=await post('/api/network/config',b),m=document.getElementById('nm2');m.textContent=r.error||'Saved';if(r.ok){location.hash='network';setTimeout(()=>location.reload(),600)}};
 </script>{% endblock %}
+

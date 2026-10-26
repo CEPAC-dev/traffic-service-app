@@ -1,6 +1,8 @@
-import csv, hashlib, io, json, math, os, secrets, sqlite3, threading, time, datetime as dt
+import csv, hashlib, io, json, math, os, re, secrets, sqlite3, threading, time, warnings, datetime as dt
 from functools import lru_cache, wraps
+from pathlib import Path
 from flask import Flask, g, render_template, request, redirect, url_for, session, jsonify, abort, flash
+from flask import send_file
 from werkzeug.security import generate_password_hash, check_password_hash
 from dotenv import load_dotenv
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -20,6 +22,7 @@ except ModuleNotFoundError:
     TimezoneFinder = None
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 app = Flask(__name__)
@@ -38,6 +41,15 @@ DB = os.environ.get("TRAFFICLENS_DB") or os.path.join(os.path.dirname(os.path.ab
 SERVICES = {"lanes": "Number of lanes", "speed": "Speed", "travel": "Travel time", "length": "Length",
             "freeflow_time": "Free flow time", "freeflow_speed": "Free flow speed", "capacity": "Capacity",
             "volumes": "Traffic volumes"}
+PROFILE_JOB_TITLES = (
+    "Engineer", "Data Analyst", "Researcher", "Student", "Manager", "Other",
+)
+PROFILE_PHOTO_MAX_BYTES = 5 * 1024 * 1024
+PROFILE_PHOTO_SIZE = (512, 512)
+ENGINEERING_SPECIALIZATIONS = (
+    "Civil Engineering", "Transportation Engineering", "Traffic Engineering",
+    "Highway Engineering", "Structural Engineering", "Other",
+)
 HIDDEN_SERVICES_BY_DEFAULT = {"capacity"}
 STATUSES = ["Pending", "Processing", "Completed", "Rejected"]
 APP_NAME = "TrafficLens"   # change the app name here (shown in the header, page title and landing page)
@@ -150,15 +162,15 @@ def _notify_admins_new_request(request_id, client_name):
     admins = db().execute("SELECT id FROM users WHERE role='admin'").fetchall()
     for admin_user in admins:
         _create_notification(
-            admin_user["id"], request_id, "new_request", "طلب جديد",
-            f"قدم {client_name} طلبًا جديدًا: REQ-{request_id}.",
+            admin_user["id"], request_id, "new_request", "New request",
+            f"{client_name} submitted a new request: REQ-{request_id}.",
         )
 
 def _notify_request_owner_reply(request_id, user_id, old_reply, new_reply):
     if new_reply and new_reply != (old_reply or ""):
         _create_notification(
-            user_id, request_id, "admin_reply", "رد جديد على طلبك",
-            f"أضاف المسؤول ردًا على الطلب REQ-{request_id}: {new_reply}",
+            user_id, request_id, "admin_reply", "New reply to your request",
+            f"The administrator replied to request REQ-{request_id}: {new_reply}",
         )
 
 @app.teardown_appcontext
@@ -166,8 +178,59 @@ def close(_):
     d = g.pop("db", None)
     if d: d.close()
 
+def _translate_legacy_notifications(c):
+    """Rewrite notifications stored in Arabic by earlier versions into English. Safe to run on every start."""
+    titles = {
+        "طلب جديد": "New request",
+        "رد جديد على طلبك": "New reply to your request",
+        "نتائج أحجام المرور جاهزة": "Traffic volume results are ready",
+        "نتائج الطلب جاهزة": "Request results are ready",
+    }
+    for arabic, english in titles.items():
+        c.execute("UPDATE notifications SET title=? WHERE title=?", (english, arabic))
+    patterns = (
+        (r"^قدم (.+) طلبًا جديدًا: (REQ-\d+)\.$", r"\1 submitted a new request: \2."),
+        (r"^أضاف المسؤول ردًا على الطلب (REQ-\d+): (.*)$", r"The administrator replied to request \1: \2"),
+        (r"^اعتمد المسؤول نتائج أحجام المرور للطلب (REQ-\d+)\.$", r"The administrator approved the traffic volume results for request \1."),
+        (r"^اعتمد المسؤول نتائج الاتجاهات للطلب (REQ-\d+)\.$", r"The administrator approved the directions results for request \1."),
+    )
+    rows = c.execute(
+        "SELECT id,message FROM notifications WHERE message LIKE 'قدم%' OR message LIKE 'أضاف%' OR message LIKE 'اعتمد%'"
+    ).fetchall()
+    for notification_id, message in rows:
+        for pattern, replacement in patterns:
+            translated, count = re.subn(pattern, replacement, message or "", flags=re.S)
+            if count:
+                c.execute("UPDATE notifications SET message=? WHERE id=?", (translated, notification_id))
+                break
+
+
+def _migrate_profile_columns(c):
+    user_cols = {column[1] for column in c.execute("PRAGMA table_info(users)")}
+    for column in (
+        "first_name", "last_name", "phone_number", "job_title",
+        "engineering_specialization", "company_name", "bio", "profile_image",
+    ):
+        if column not in user_cols:
+            c.execute(f"ALTER TABLE users ADD COLUMN {column} TEXT")
+    for user_id, name, first_name, last_name in c.execute(
+        "SELECT id,name,first_name,last_name FROM users"
+    ).fetchall():
+        if first_name and last_name:
+            continue
+        name_parts = (name or "").strip().split(None, 1)
+        migrated_first = name_parts[0] if name_parts else ""
+        migrated_last = name_parts[1] if len(name_parts) > 1 else ""
+        c.execute(
+            "UPDATE users SET first_name=COALESCE(NULLIF(first_name,''),?), "
+            "last_name=COALESCE(NULLIF(last_name,''),?) WHERE id=?",
+            (migrated_first, migrated_last, user_id),
+        )
+
+
 def init():
     c = sqlite3.connect(DB); c.executescript(SCHEMA)
+    _migrate_profile_columns(c)
     workflow_cols = {column[1] for column in c.execute("PRAGMA table_info(request_directions_workflows)")}
     if "interval_minutes" not in workflow_cols:
         c.execute("ALTER TABLE request_directions_workflows ADD COLUMN interval_minutes INTEGER")
@@ -200,6 +263,7 @@ def init():
                 "VALUES(?,'waiting_for_inputs',?,?)",
                 (request_id, workflow_now, workflow_now),
             )
+    _translate_legacy_notifications(c)
     if not c.execute("SELECT 1 FROM users").fetchone():
         c.execute("INSERT INTO users(name,email,pw,role) VALUES(?,?,?,?)",
                   ("Admin", "admin@demo.com", generate_password_hash("admin123"), "admin"))
@@ -1070,9 +1134,14 @@ def inject():
 def refresh_session():
     # keep name/role in sync with the database, so a promoted or demoted user is affected immediately
     if "uid" in session and not request.path.startswith("/static"):
-        u = db().execute("SELECT name, role FROM users WHERE id=?", (session["uid"],)).fetchone()
+        u = db().execute(
+            "SELECT name, role, profile_image FROM users WHERE id=?",
+            (session["uid"],),
+        ).fetchone()
         if not u: session.clear()
-        else: session["name"], session["role"] = u["name"], u["role"]
+        else:
+            session["name"], session["role"] = u["name"], u["role"]
+            session["profile_image"] = bool(u["profile_image"])
 
 @app.route("/")
 def index():
@@ -1136,7 +1205,10 @@ def login():
     if request.method == "POST":
         u = db().execute("SELECT * FROM users WHERE email=?", (request.form.get("email", "").strip().lower(),)).fetchone()
         if u and check_password_hash(u["pw"], request.form.get("password", "")):
-            session.clear(); session.update(uid=u["id"], name=u["name"], role=u["role"])
+            session.clear(); session.update(
+                uid=u["id"], name=u["name"], role=u["role"],
+                profile_image=bool(u["profile_image"]),
+            )
             nxt = request.args.get("next")
             return redirect(nxt if nxt and nxt.startswith("/") else url_for("admin" if u["role"] == "admin" else "dashboard"))
         flash("Wrong email or password.")
@@ -1148,53 +1220,261 @@ def logout(): session.clear(); return redirect(url_for("index"))
 def _profile_redirect():
     return redirect(url_for("admin_profile" if session.get("role") == "admin" else "profile"))
 
+
+def _profile_values(user):
+    values = dict(user)
+    if not values.get("first_name") or not values.get("last_name"):
+        parts = (values.get("name") or "").strip().split(None, 1)
+        values["first_name"] = values.get("first_name") or (parts[0] if parts else "")
+        values["last_name"] = values.get("last_name") or (parts[1] if len(parts) > 1 else "")
+    for field in (
+        "phone_number", "job_title", "engineering_specialization",
+        "company_name", "bio",
+    ):
+        values[field] = values.get(field) or ""
+    return values
+
+
+def _profile_photo_directory():
+    return Path(app.instance_path) / "profile_images"
+
+
+def _delete_profile_photo(filename, user_id):
+    if not filename or not re.fullmatch(rf"user-{user_id}-[a-f0-9]{{32}}\.jpg", filename):
+        return
+    try:
+        (_profile_photo_directory() / filename).unlink(missing_ok=True)
+    except OSError:
+        app.logger.warning(
+            "Could not remove superseded profile photo for user %s", user_id,
+            exc_info=True,
+        )
+
+
+def _process_profile_photo(upload):
+    if not upload or not upload.filename:
+        raise ValueError("Choose a JPG, PNG, or WebP image to upload.")
+    try:
+        raw = upload.stream.read(PROFILE_PHOTO_MAX_BYTES + 1)
+    finally:
+        upload.close()
+    if len(raw) > PROFILE_PHOTO_MAX_BYTES:
+        raise ValueError("Profile photos must be 5 MB or smaller.")
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(io.BytesIO(raw)) as source:
+                if source.format not in {"JPEG", "PNG", "WEBP"}:
+                    raise ValueError("Use a JPG, PNG, or WebP image.")
+                if source.width * source.height > 20_000_000:
+                    raise ValueError("Choose an image with 20 megapixels or fewer.")
+                source.verify()
+            with Image.open(io.BytesIO(raw)) as source:
+                image = ImageOps.exif_transpose(source).convert("RGB")
+                image.thumbnail(PROFILE_PHOTO_SIZE, Image.Resampling.LANCZOS)
+                output = io.BytesIO()
+                image.save(output, format="JPEG", quality=88, optimize=True)
+                return output.getvalue()
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        raise ValueError("The selected image could not be opened. Choose a valid JPG, PNG, or WebP image.") from exc
+
+
+def _render_profile(values, errors=None, status=200):
+    return render_template(
+        "profile.html",
+        profile_user=values,
+        profile_role="Admin" if session.get("role") == "admin" else "User",
+        job_titles=PROFILE_JOB_TITLES,
+        engineering_specializations=ENGINEERING_SPECIALIZATIONS,
+        profile_errors=errors or {},
+    ), status
+
+
 @app.get("/profile")
 @login_required
 def profile():
     if session.get("role") == "admin":
         return redirect(url_for("admin_profile"))
     user = db().execute(
-        "SELECT name,email FROM users WHERE id=? AND role='client'",
+        "SELECT * FROM users WHERE id=? AND role='client'",
         (session["uid"],),
     ).fetchone()
     if not user:
         abort(404)
-    return render_template("profile.html", profile_user=user, profile_role="User")
+    return _render_profile(_profile_values(user))
 
 @app.get("/admin/profile")
 @admin_required
 def admin_profile():
     user = db().execute(
-        "SELECT name,email FROM users WHERE id=? AND role='admin'",
+        "SELECT * FROM users WHERE id=? AND role='admin'",
         (session["uid"],),
     ).fetchone()
     if not user:
         abort(404)
-    return render_template("profile.html", profile_user=user, profile_role="Admin")
+    return _render_profile(_profile_values(user))
+
+
+@app.post("/profile/photo")
+@login_required
+def update_profile_photo():
+    user_id = session["uid"]
+    if (
+        request.content_length is not None
+        and request.content_length > PROFILE_PHOTO_MAX_BYTES + 128 * 1024
+    ):
+        flash("Profile photos must be 5 MB or smaller.", "error")
+        return _profile_redirect()
+    user = db().execute(
+        "SELECT profile_image FROM users WHERE id=? AND role=?",
+        (user_id, session.get("role")),
+    ).fetchone()
+    if not user:
+        abort(404)
+
+    if request.form.get("remove_photo") == "1":
+        old_filename = user["profile_image"]
+        db().execute("UPDATE users SET profile_image=NULL WHERE id=?", (user_id,))
+        db().commit()
+        session.pop("profile_image", None)
+        _delete_profile_photo(old_filename, user_id)
+        flash("Profile photo removed.", "success")
+        return _profile_redirect()
+
+    try:
+        image_data = _process_profile_photo(request.files.get("photo"))
+    except ValueError as exc:
+        flash(str(exc), "error")
+        return _profile_redirect()
+
+    photo_dir = _profile_photo_directory()
+    photo_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"user-{user_id}-{secrets.token_hex(16)}.jpg"
+    final_path = photo_dir / filename
+    temporary_path = photo_dir / f".{filename}.tmp"
+    old_filename = user["profile_image"]
+    try:
+        temporary_path.write_bytes(image_data)
+        os.replace(temporary_path, final_path)
+        db().execute(
+            "UPDATE users SET profile_image=? WHERE id=?",
+            (filename, user_id),
+        )
+        db().commit()
+    except OSError:
+        temporary_path.unlink(missing_ok=True)
+        final_path.unlink(missing_ok=True)
+        app.logger.exception("Unable to save profile photo for user %s", user_id)
+        flash("The profile photo could not be saved. Please try again.", "error")
+        return _profile_redirect()
+    except sqlite3.Error:
+        db().rollback()
+        temporary_path.unlink(missing_ok=True)
+        final_path.unlink(missing_ok=True)
+        app.logger.exception("Unable to update profile photo record for user %s", user_id)
+        flash("The profile photo could not be saved. Please try again.", "error")
+        return _profile_redirect()
+
+    session["profile_image"] = True
+    _delete_profile_photo(old_filename, user_id)
+    flash("Profile photo updated.", "success")
+    return _profile_redirect()
+
+
+@app.get("/profile/photo")
+@login_required
+def profile_photo():
+    user = db().execute(
+        "SELECT profile_image FROM users WHERE id=? AND role=?",
+        (session["uid"], session.get("role")),
+    ).fetchone()
+    if not user or not user["profile_image"]:
+        abort(404)
+    filename = user["profile_image"]
+    if not re.fullmatch(rf"user-{session['uid']}-[a-f0-9]{{32}}\.jpg", filename):
+        app.logger.error("Invalid profile image filename stored for user %s", session["uid"])
+        abort(404)
+    image_path = _profile_photo_directory() / filename
+    if not image_path.is_file():
+        abort(404)
+    response = send_file(image_path, mimetype="image/jpeg", conditional=True, max_age=0)
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
 
 @app.post("/profile")
 @login_required
 def update_profile():
-    name = request.form.get("name", "").strip()
+    first_name = request.form.get("first_name", "").strip()
+    last_name = request.form.get("last_name", "").strip()
+    if not first_name and not last_name and request.form.get("name"):
+        name_parts = request.form.get("name", "").strip().split(None, 1)
+        first_name = name_parts[0] if name_parts else ""
+        last_name = name_parts[1] if len(name_parts) > 1 else ""
     email = request.form.get("email", "").strip().lower()
-    domain = email.rsplit("@", 1)[-1] if "@" in email else ""
-    if not name or len(name) > 120:
-        flash("Enter a name of up to 120 characters.")
-        return _profile_redirect()
-    if len(email) > 254 or not domain or "." not in domain or any(char.isspace() for char in email):
-        flash("Enter a valid email address.")
-        return _profile_redirect()
+    phone_number = request.form.get("phone_number", "").strip()
+    job_title = request.form.get("job_title", "").strip()
+    specialization = request.form.get("engineering_specialization", "").strip()
+    company_name = request.form.get("company_name", "").strip()
+    bio = request.form.get("bio", "").strip()
+    values = {
+        "first_name": first_name,
+        "last_name": last_name,
+        "name": f"{first_name} {last_name}".strip(),
+        "email": email,
+        "phone_number": phone_number,
+        "job_title": job_title,
+        "engineering_specialization": specialization,
+        "company_name": company_name,
+        "bio": bio,
+    }
+    errors = {}
+    if not first_name or len(first_name) > 60:
+        errors["first_name"] = "Enter your first name (up to 60 characters)."
+    if not last_name or len(last_name) > 60:
+        errors["last_name"] = "Enter your last name (up to 60 characters)."
+    if (
+        len(email) > 254
+        or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email)
+    ):
+        errors["email"] = "Enter a valid email address."
+    phone_digits = "".join(char for char in phone_number if char.isdigit())
+    if (
+        not 7 <= len(phone_digits) <= 15
+        or not re.fullmatch(r"\+?[0-9().\s-]+", phone_number)
+    ):
+        errors["phone_number"] = "Enter a valid international phone number (7–15 digits)."
+    if job_title not in PROFILE_JOB_TITLES:
+        errors["job_title"] = "Choose a job title from the list."
+    if job_title == "Engineer":
+        if specialization not in ENGINEERING_SPECIALIZATIONS:
+            errors["engineering_specialization"] = "Choose an engineering specialization."
+    else:
+        values["engineering_specialization"] = ""
+    if len(company_name) > 120:
+        errors["company_name"] = "Company name must be 120 characters or fewer."
+    if len(bio) > 500:
+        errors["bio"] = "Description must be 500 characters or fewer."
+    if errors:
+        return _render_profile(values, errors, 400)
     try:
         db().execute(
-            "UPDATE users SET name=?,email=? WHERE id=?",
-            (name, email, session["uid"]),
+            "UPDATE users SET name=?,first_name=?,last_name=?,email=?,phone_number=?,"
+            "job_title=?,engineering_specialization=?,company_name=?,bio=? WHERE id=?",
+            (
+                values["name"], first_name, last_name, email, phone_number,
+                job_title, values["engineering_specialization"], company_name,
+                bio, session["uid"],
+            ),
         )
         db().commit()
     except sqlite3.IntegrityError:
-        flash("This email address is already in use.")
-        return _profile_redirect()
-    session["name"] = name
-    flash("Profile updated.")
+        db().rollback()
+        errors["email"] = "This email address is already in use."
+        return _render_profile(values, errors, 400)
+    session["name"] = values["name"]
+    flash("Profile updated.", "success")
     return _profile_redirect()
 
 @app.post("/profile/password")
@@ -1207,20 +1487,20 @@ def change_password():
     new_password = request.form.get("new_password", "")
     confirm_password = request.form.get("confirm_password", "")
     if not user or not check_password_hash(user["pw"], current_password):
-        flash("The current password is incorrect.")
+        flash("The current password is incorrect.", "error")
         return _profile_redirect()
     if len(new_password) < 6:
-        flash("The new password must be at least 6 characters.")
+        flash("The new password must be at least 6 characters.", "error")
         return _profile_redirect()
     if new_password != confirm_password:
-        flash("The new password and confirmation do not match.")
+        flash("The new password and confirmation do not match.", "error")
         return _profile_redirect()
     db().execute(
         "UPDATE users SET pw=? WHERE id=?",
         (generate_password_hash(new_password), session["uid"]),
     )
     db().commit()
-    flash("Password changed successfully.")
+    flash("Password changed successfully.", "success")
     return _profile_redirect()
 
 @app.route("/study")
@@ -2205,12 +2485,33 @@ def volumes_workflow_status(rid):
     ).fetchone()
     if not workflow:
         return jsonify(error="This request does not include Traffic volumes."), 404
+    if workflow["freeflow_speed"] is None and workflow["freeflow_job_id"]:
+        completed_job = db().execute(
+            "SELECT execution_status FROM outscraper_jobs WHERE id=?",
+            (workflow["freeflow_job_id"],),
+        ).fetchone()
+        if completed_job and completed_job["execution_status"] == "completed":
+            _persist_holiday_result_context(workflow["freeflow_job_id"])
+            workflow = db().execute(
+                "SELECT * FROM volumes_workflows WHERE request_id=?", (rid,)
+            ).fetchone()
     result = json.loads(workflow["result_json"]) if workflow["result_json"] else None
+    request_row = db().execute("SELECT data FROM requests WHERE id=?", (rid,)).fetchone()
+    request_data = json.loads(request_row["data"] or "{}") if request_row else {}
+    freeflow_job = None
+    if workflow["freeflow_job_id"]:
+        freeflow_job = db().execute(
+            "SELECT execution_status FROM outscraper_jobs WHERE id=?",
+            (workflow["freeflow_job_id"],),
+        ).fetchone()
     return jsonify(
         workflow={
             "status": workflow["status"],
             "lanes": workflow["lanes"],
             "freeflow_speed": workflow["freeflow_speed"],
+            "freeflow_context": (request_data.get("volumes") or {}).get("freeflow_context"),
+            "freeflow_job_id": workflow["freeflow_job_id"],
+            "freeflow_job_status": freeflow_job["execution_status"] if freeflow_job else None,
             "error": workflow["error"],
             "result": result,
         }
@@ -2292,8 +2593,8 @@ def confirm_volumes_result(rid):
     )
     _create_notification(
         row["user_id"], rid, "volume_result",
-        "نتائج أحجام المرور جاهزة",
-        f"اعتمد المسؤول نتائج أحجام المرور للطلب REQ-{rid}.",
+        "Traffic volume results are ready",
+        f"The administrator approved the traffic volume results for request REQ-{rid}.",
     )
     d.commit()
     return jsonify(ok=True, status="sent", result_url=url_for("result", rid=rid))
@@ -2400,8 +2701,8 @@ def confirm_request_directions(rid):
     )
     _create_notification(
         row["user_id"], rid, "directions_result",
-        "نتائج الطلب جاهزة",
-        f"اعتمد المسؤول نتائج الاتجاهات للطلب REQ-{rid}.",
+        "Request results are ready",
+        f"The administrator approved the directions results for request REQ-{rid}.",
     )
     d.commit()
     return jsonify(ok=True, status="confirmed", confirmed_at=now, result_url=url_for("result", rid=rid))

@@ -1,27 +1,126 @@
 {% extends "base.html" %}{% block body %}
-<div class="section-heading profile-heading">
-  <div><span class="eyebrow">{{profile_role|upper}} ACCOUNT</span><h1>{{profile_role}} profile</h1><p>Manage your account details and password.</p></div>
-  <a class="btn alt" href="{{url_for('logout')}}">Log out</a>
-</div>
-<div class="profile-grid">
-  <section class="card">
-    <h2>Basic information</h2>
-    <p class="hint">Update the name and email address associated with your account.</p>
-    <form method="post" action="{{url_for('update_profile')}}">
-      <label for="profileName">Name</label><input id="profileName" name="name" maxlength="120" value="{{profile_user.name}}" autocomplete="name" required>
-      <label for="profileEmail">Email</label><input id="profileEmail" name="email" type="email" maxlength="254" value="{{profile_user.email}}" autocomplete="email" required>
-      <p><button class="btn" type="submit">Save profile</button></p>
+<div class="profile-page">
+  <div class="profile-page-heading">
+    <div>
+      <span class="eyebrow">{{profile_role|upper}} ACCOUNT</span>
+      <h1>My Profile</h1>
+      <p>Manage your personal and professional information.</p>
+    </div>
+    <a class="btn alt profile-logout" href="{{url_for('logout')}}">Log out</a>
+  </div>
+
+  <section class="card profile-card profile-photo-card" aria-labelledby="profilePhotoHeading">
+    <div class="profile-photo-preview">
+      {% if profile_user.profile_image %}
+      <img class="profile-photo-image" src="{{url_for('profile_photo')}}" alt="Your profile photo">
+      {% else %}
+      <span class="profile-photo-placeholder" aria-hidden="true">{{profile_user.first_name[:1]|upper if profile_user.first_name else 'U'}}</span>
+      {% endif %}
+      <div><h2 id="profilePhotoHeading">Profile photo</h2><p>Choose a clear photo to personalize your account.</p><small>JPG, PNG, or WebP · up to 5 MB</small></div>
+    </div>
+    <div class="profile-photo-actions">
+      <form method="post" action="{{url_for('update_profile_photo')}}" enctype="multipart/form-data" class="profile-photo-upload">
+        <label class="profile-photo-file-label" for="profilePhoto">Choose photo</label>
+        <input id="profilePhoto" name="photo" type="file" accept="image/jpeg,image/png,image/webp" required>
+        <button class="btn profile-save" type="submit">Upload Photo</button>
+      </form>
+      {% if profile_user.profile_image %}
+      <form method="post" action="{{url_for('update_profile_photo')}}" onsubmit="return confirm('Remove your profile photo?')">
+        <input type="hidden" name="remove_photo" value="1">
+        <button class="btn alt profile-photo-remove" type="submit">Remove photo</button>
+      </form>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="card profile-card" aria-labelledby="profileInformationHeading">
+    <div class="profile-card-heading">
+      <div><h2 id="profileInformationHeading">Personal information</h2><p>Fields marked required must be completed.</p></div>
+    </div>
+    <form method="post" action="{{url_for('update_profile')}}" class="profile-form">
+      <div class="profile-fields">
+        <div class="profile-field">
+          <label for="profileFirstName">First Name <span>Required</span></label>
+          <input id="profileFirstName" name="first_name" value="{{profile_user.first_name}}" maxlength="60" autocomplete="given-name" required aria-invalid="{{'true' if profile_errors.first_name else 'false'}}" aria-describedby="profileFirstNameError">
+          <small class="profile-field-error" id="profileFirstNameError">{% if profile_errors.first_name %}{{profile_errors.first_name}}{% endif %}</small>
+        </div>
+        <div class="profile-field">
+          <label for="profileLastName">Last Name <span>Required</span></label>
+          <input id="profileLastName" name="last_name" value="{{profile_user.last_name}}" maxlength="60" autocomplete="family-name" required aria-invalid="{{'true' if profile_errors.last_name else 'false'}}" aria-describedby="profileLastNameError">
+          <small class="profile-field-error" id="profileLastNameError">{% if profile_errors.last_name %}{{profile_errors.last_name}}{% endif %}</small>
+        </div>
+        <div class="profile-field">
+          <label for="profileEmail">Email Address <span>Required</span></label>
+          <input id="profileEmail" name="email" type="email" value="{{profile_user.email}}" maxlength="254" autocomplete="email" required aria-invalid="{{'true' if profile_errors.email else 'false'}}" aria-describedby="profileEmailError">
+          <small class="profile-field-error" id="profileEmailError">{% if profile_errors.email %}{{profile_errors.email}}{% endif %}</small>
+        </div>
+        <div class="profile-field">
+          <label for="profilePhone">Phone Number <span>Required</span></label>
+          <input id="profilePhone" name="phone_number" type="tel" value="{{profile_user.phone_number}}" maxlength="32" autocomplete="tel" inputmode="tel" placeholder="+1 555 010 1234" required aria-invalid="{{'true' if profile_errors.phone_number else 'false'}}" aria-describedby="profilePhoneHint profilePhoneError">
+          <small class="profile-field-hint" id="profilePhoneHint">Include your country code; digits, +, spaces, hyphens and parentheses are accepted.</small>
+          <small class="profile-field-error" id="profilePhoneError">{% if profile_errors.phone_number %}{{profile_errors.phone_number}}{% endif %}</small>
+        </div>
+        <div class="profile-field">
+          <label for="profileJobTitle">Job Title <span>Required</span></label>
+          <select id="profileJobTitle" name="job_title" required aria-invalid="{{'true' if profile_errors.job_title else 'false'}}" aria-describedby="profileJobTitleError">
+            <option value="">Select your job title</option>
+            {% for title in job_titles %}<option value="{{title}}" {% if profile_user.job_title==title %}selected{% endif %}>{{title}}</option>{% endfor %}
+          </select>
+          <small class="profile-field-error" id="profileJobTitleError">{% if profile_errors.job_title %}{{profile_errors.job_title}}{% endif %}</small>
+        </div>
+        <div class="profile-field" id="engineeringSpecializationField" {% if profile_user.job_title!='Engineer' %}hidden{% endif %}>
+          <label for="profileSpecialization">Engineering Specialization <span>Optional</span></label>
+          <select id="profileSpecialization" name="engineering_specialization" aria-invalid="{{'true' if profile_errors.engineering_specialization else 'false'}}" aria-describedby="profileSpecializationError">
+            <option value="">Select specialization</option>
+            {% for specialization in engineering_specializations %}<option value="{{specialization}}" {% if profile_user.engineering_specialization==specialization %}selected{% endif %}>{{specialization}}</option>{% endfor %}
+          </select>
+          <small class="profile-field-error" id="profileSpecializationError">{% if profile_errors.engineering_specialization %}{{profile_errors.engineering_specialization}}{% endif %}</small>
+        </div>
+        <div class="profile-field">
+          <label for="profileCompany">Company Name <span>Optional</span></label>
+          <input id="profileCompany" name="company_name" value="{{profile_user.company_name}}" maxlength="120" autocomplete="organization" aria-invalid="{{'true' if profile_errors.company_name else 'false'}}" aria-describedby="profileCompanyError">
+          <small class="profile-field-error" id="profileCompanyError">{% if profile_errors.company_name %}{{profile_errors.company_name}}{% endif %}</small>
+        </div>
+        <div class="profile-field profile-field-wide">
+          <label for="profileBio">Bio / Description <span>Optional</span></label>
+          <textarea id="profileBio" name="bio" rows="4" maxlength="500" aria-describedby="profileBioCount profileBioError">{{profile_user.bio}}</textarea>
+          <div class="profile-field-meta"><small id="profileBioError" class="profile-field-error">{% if profile_errors.bio %}{{profile_errors.bio}}{% endif %}</small><small id="profileBioCount" class="profile-field-hint"><span id="profileBioLength">{{profile_user.bio|length}}</span>/500 characters</small></div>
+        </div>
+      </div>
+      <div class="profile-form-actions"><button class="btn profile-save" type="submit">Save Changes</button></div>
     </form>
   </section>
-  <section class="card">
-    <h2>Change password</h2>
-    <p class="hint">Enter your current password to set a new one. Passwords must contain at least 6 characters.</p>
-    <form method="post" action="{{url_for('change_password')}}">
-      <label for="currentPassword">Current password</label><input id="currentPassword" name="current_password" type="password" autocomplete="current-password" required>
-      <label for="newPassword">New password</label><input id="newPassword" name="new_password" type="password" minlength="6" autocomplete="new-password" required>
-      <label for="confirmPassword">Confirm new password</label><input id="confirmPassword" name="confirm_password" type="password" minlength="6" autocomplete="new-password" required>
-      <p><button class="btn" type="submit">Change password</button></p>
+
+  <section class="card profile-card profile-password-card" aria-labelledby="changePasswordHeading">
+    <div class="profile-card-heading">
+      <div><h2 id="changePasswordHeading">Change password</h2><p>Confirm your current password before choosing a new one.</p></div>
+    </div>
+    <form method="post" action="{{url_for('change_password')}}" class="profile-form profile-password-form">
+      <div class="profile-fields">
+        <div class="profile-field"><label for="currentPassword">Current password <span>Required</span></label><input id="currentPassword" name="current_password" type="password" autocomplete="current-password" required></div>
+        <div class="profile-field"><label for="newPassword">New password <span>Required</span></label><input id="newPassword" name="new_password" type="password" minlength="6" autocomplete="new-password" required><small class="profile-field-hint">At least 6 characters.</small></div>
+        <div class="profile-field"><label for="confirmPassword">Confirm new password <span>Required</span></label><input id="confirmPassword" name="confirm_password" type="password" minlength="6" autocomplete="new-password" required></div>
+      </div>
+      <div class="profile-form-actions"><button class="btn alt" type="submit">Update Password</button></div>
     </form>
   </section>
 </div>
+<script>
+(()=>{
+ const jobTitle=document.getElementById('profileJobTitle');
+ const specializationField=document.getElementById('engineeringSpecializationField');
+ const specialization=document.getElementById('profileSpecialization');
+ const updateSpecialization=()=>{
+  const show=jobTitle.value==='Engineer';
+  specializationField.hidden=!show;
+  specialization.disabled=!show;
+  if(!show)specialization.value='';
+ };
+ jobTitle.addEventListener('change',updateSpecialization);
+ updateSpecialization();
+ const bio=document.getElementById('profileBio');
+ const bioLength=document.getElementById('profileBioLength');
+ bio.addEventListener('input',()=>{bioLength.textContent=String(bio.value.length)});
+})();
+</script>
 {% endblock %}

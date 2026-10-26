@@ -93,7 +93,7 @@
     if (markerC) { rg.removeLayer(markerC); markerC = null }
     if (pts.length < 2) return;
     const a = pts[0].getLatLng(), b = pts[1].getLatLng(), road = route && route.path;
-    line = L.polyline(road ? route.path : [a, b], { color: '#f97316', weight: 5, dashArray: road ? null : '8 8' }).addTo(rg);
+    line = L.polyline(road ? route.path : [a, b], { color: '#0D9488', weight: 5, dashArray: road ? null : '8 8' }).addTo(rg);
     if (canPreviewPointC && route?.extensionPath?.length) extensionLine = L.polyline(route.extensionPath, { color: '#2563eb', weight: 4, dashArray: '6 6' }).addTo(rg);
     if (canPreviewPointC && route?.pointC) markerC = L.marker(route.pointC, { icon: L.divIcon({ className: 'point-c-marker', html: 'C', iconSize: [28, 28], iconAnchor: [14, 14] }) }).addTo(rg).bindTooltip('C · calculated', { permanent: true, direction: 'top' });
   }
@@ -192,8 +192,8 @@
     if (route.road) map.fitBounds(L.latLngBounds([...route.path, ...(canPreviewPointC ? route.extensionPath || [] : [])]), { padding: [25, 25], maxZoom: 16 });
     const A = fmt(pts[0].getLatLng()), B = fmt(pts[1].getLatLng());
     const pointCInfo = canPreviewPointC && route.pointC ? `<br>Delta (straight A–B): ${(a.distanceTo(b) / 1000).toFixed(3)} km<br>Ratio: ${route.ratio.toFixed(3)}<br>New Distance beyond B: ${(route.newDistance / 1000).toFixed(3)} km<br>Road distance A→C: ${(route.routeDistanceToC / 1000).toFixed(3)} km<br>Point C: ${fmt({lat:route.pointC[0],lng:route.pointC[1]}).join(', ')}` : '';
-    info.innerHTML = `A: ${A.join(', ')}<br>B: ${B.join(', ')}<br>` + (route.road ? `Road length: ~${route.km} km<br>` + (route.junctions ? `<b style="color:#9a3412">⚠ ${route.junctions} possible junction(s) along this road. Move A or B so the link has none.</b>` : '✅ No junctions found along this road.') + pointCInfo
-      : `${route.error || `Road not found, straight-line distance: ~${route.km} km`}<br><b style="color:#9a3412">The link could not be checked for intersections or point C, so it cannot be submitted.</b>`); check()
+    info.innerHTML = `A: ${A.join(', ')}<br>B: ${B.join(', ')}<br>` + (route.road ? `Road length: ~${route.km} km<br>` + (route.junctions ? `<b style="color:#92400E">⚠ ${route.junctions} possible junction(s) along this road. Move A or B so the link has none.</b>` : '✅ No junctions found along this road.') + pointCInfo
+      : `${route.error || `Road not found, straight-line distance: ~${route.km} km`}<br><b style="color:#92400E">The link could not be checked for intersections or point C, so it cannot be submitted.</b>`); check()
   }
   map.on('click', e => { if (pts.length >= 2) return; const m = L.marker(e.latlng, { draggable: true }).addTo(rg).bindTooltip(pts.length ? 'B' : 'A', { permanent: true, direction: 'top' }); m.on('dragend', solve); pts.push(m); updateCoordinates(); solve() });
   reset.onclick = () => {   rg.clearLayers(); pts = []; line = null; extensionLine = null; markerC = null; route = null; seq++; nj.checked = false; msg.innerHTML = ''; updateCoordinates(); solve() };

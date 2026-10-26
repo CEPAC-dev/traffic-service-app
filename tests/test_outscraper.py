@@ -11,6 +11,7 @@ from unittest import mock
 import urllib.error
 from zoneinfo import ZoneInfo
 from openpyxl import Workbook, load_workbook
+from PIL import Image
 
 
 _database_dir = tempfile.TemporaryDirectory()
@@ -157,7 +158,7 @@ class DashboardAndProfileTests(unittest.TestCase):
         dashboard = user_client.get("/dashboard")
         self.assertEqual(dashboard.status_code, 200)
         navigation = dashboard.data.split(b'<nav class="sidebar-nav">', 1)[1].split(b"</nav>", 1)[0]
-        for expected in (b"Dashboard", b"Services", b"My requests", b"Profile"):
+        for expected in (b"Home", b"Services", b"My requests", b"Profile"):
             self.assertIn(expected, navigation)
         self.assertIn(b"/study?service=volumes", dashboard.data)
         selected_service_page = user_client.get("/study?service=volumes")
@@ -211,16 +212,31 @@ class DashboardAndProfileTests(unittest.TestCase):
         self.assertEqual(profile_page.status_code, 200)
         self.assertIn(b"Change password", profile_page.data)
         update = user_client.post("/profile", data={
-            "name": "Updated Client",
+            "first_name": "Updated",
+            "last_name": "Client",
             "email": f"updated-{time.time_ns()}@example.test",
+            "phone_number": "+20 01001234567",
+            "job_title": "Researcher",
+            "engineering_specialization": "Traffic Engineering",
+            "company_name": "Traffic Research Lab",
+            "bio": "Researching transport systems.",
         })
         self.assertEqual(update.status_code, 302)
         with traffic.app.app_context():
             user = traffic.db().execute(
-                "SELECT name,email,pw FROM users WHERE id=?", (self.client_id,)
+                "SELECT name,first_name,last_name,email,phone_number,job_title,"
+                "engineering_specialization,company_name,bio,pw FROM users WHERE id=?",
+                (self.client_id,),
             ).fetchone()
         self.assertEqual(user["name"], "Updated Client")
+        self.assertEqual(user["first_name"], "Updated")
+        self.assertEqual(user["last_name"], "Client")
         self.assertTrue(user["email"].startswith("updated-"))
+        self.assertEqual(user["phone_number"], "+20 01001234567")
+        self.assertEqual(user["job_title"], "Researcher")
+        self.assertEqual(user["engineering_specialization"], "")
+        self.assertEqual(user["company_name"], "Traffic Research Lab")
+        self.assertEqual(user["bio"], "Researching transport systems.")
         self.assertEqual(user_client.get("/dashboard").status_code, 200)
         with user_client.session_transaction() as session:
             self.assertEqual(session["name"], "Updated Client")
@@ -260,6 +276,8 @@ class DashboardAndProfileTests(unittest.TestCase):
         update = admin_client.post("/profile", data={
             "name": "Updated Administrator",
             "email": f"admin-updated-{time.time_ns()}@example.test",
+            "phone_number": "+1 202 555 0134",
+            "job_title": "Manager",
         })
         self.assertEqual(update.status_code, 302)
         with traffic.app.app_context():
@@ -273,6 +291,205 @@ class DashboardAndProfileTests(unittest.TestCase):
         logout = admin_client.get("/logout")
         self.assertEqual(logout.status_code, 302)
         self.assertEqual(admin_client.get("/admin").status_code, 302)
+
+    def test_profile_validates_fields_and_preserves_submitted_values(self):
+        user_client = self.logged_client(self.client_id, "client", "Dashboard client")
+        duplicate_email = f"duplicate-{time.time_ns()}@example.test"
+        with traffic.app.app_context():
+            traffic.db().execute(
+                "UPDATE users SET email=? WHERE id=?",
+                (duplicate_email, self.admin_id),
+            )
+            traffic.db().commit()
+
+        invalid = user_client.post("/profile", data={
+            "first_name": "  Given  ",
+            "last_name": "Family",
+            "email": duplicate_email,
+            "phone_number": "+1 (202) 555-0134",
+            "job_title": "Engineer",
+            "engineering_specialization": "Transportation Engineering",
+            "company_name": "Road Lab",
+            "bio": "Keep this text after an error.",
+        })
+        self.assertEqual(invalid.status_code, 400)
+        self.assertIn(b"This email address is already in use.", invalid.data)
+        self.assertIn(b"Keep this text after an error.", invalid.data)
+        with traffic.app.app_context():
+            user = traffic.db().execute(
+                "SELECT email,phone_number,company_name,bio FROM users WHERE id=?",
+                (self.client_id,),
+            ).fetchone()
+        self.assertFalse(user["email"] == duplicate_email)
+        self.assertIsNone(user["phone_number"])
+        self.assertIsNone(user["company_name"])
+        self.assertIsNone(user["bio"])
+
+        invalid_phone = user_client.post("/profile", data={
+            "first_name": "Given",
+            "last_name": "Family",
+            "email": f"valid-{time.time_ns()}@example.test",
+            "phone_number": "555-12",
+            "job_title": "Researcher",
+        })
+        self.assertEqual(invalid_phone.status_code, 400)
+        self.assertIn(b"Enter a valid international phone number", invalid_phone.data)
+        self.assertIn(b'value="555-12"', invalid_phone.data)
+
+    def test_profile_engineering_specialization_is_only_saved_for_engineers(self):
+        user_client = self.logged_client(self.client_id, "client", "Dashboard client")
+        saved = user_client.post("/profile", data={
+            "first_name": "Engineer",
+            "last_name": "User",
+            "email": f"engineer-{time.time_ns()}@example.test",
+            "phone_number": "00123456789",
+            "job_title": "Engineer",
+            "engineering_specialization": "Transportation Engineering",
+            "company_name": "",
+            "bio": "",
+        })
+        self.assertEqual(saved.status_code, 302)
+        with traffic.app.app_context():
+            engineer = traffic.db().execute(
+                "SELECT phone_number,job_title,engineering_specialization FROM users WHERE id=?",
+                (self.client_id,),
+            ).fetchone()
+        self.assertEqual(engineer["phone_number"], "00123456789")
+        self.assertEqual(engineer["engineering_specialization"], "Transportation Engineering")
+
+        changed = user_client.post("/profile", data={
+            "first_name": "Engineer",
+            "last_name": "User",
+            "email": f"engineer-{time.time_ns()}@example.test",
+            "phone_number": "00123456789",
+            "job_title": "Student",
+            "engineering_specialization": "Transportation Engineering",
+            "company_name": "",
+            "bio": "",
+        })
+        self.assertEqual(changed.status_code, 302)
+        with traffic.app.app_context():
+            student = traffic.db().execute(
+                "SELECT job_title,engineering_specialization FROM users WHERE id=?",
+                (self.client_id,),
+            ).fetchone()
+        self.assertEqual(student["job_title"], "Student")
+        self.assertEqual(student["engineering_specialization"], "")
+
+    def test_profile_database_migration_preserves_and_splits_legacy_names(self):
+        connection = sqlite3.connect(":memory:")
+        try:
+            connection.execute(
+                "CREATE TABLE users(id INTEGER PRIMARY KEY,name TEXT,email TEXT,pw TEXT,role TEXT)"
+            )
+            connection.execute(
+                "INSERT INTO users(id,name,email,pw,role) VALUES(1,?,?,?,?)",
+                ("Ada Lovelace", "ada@example.test", "hashed-password", "client"),
+            )
+            traffic._migrate_profile_columns(connection)
+            traffic._migrate_profile_columns(connection)
+            migrated = connection.execute(
+                "SELECT name,first_name,last_name,email,pw,role,phone_number FROM users WHERE id=1"
+            ).fetchone()
+        finally:
+            connection.close()
+
+        self.assertEqual(
+            migrated,
+            ("Ada Lovelace", "Ada", "Lovelace", "ada@example.test", "hashed-password", "client", None),
+        )
+
+    def test_profile_photo_upload_is_normalized_and_only_available_to_owner(self):
+        client = self.logged_client(self.client_id, "client", "Dashboard client")
+        image_stream = BytesIO()
+        Image.new("RGBA", (120, 80), (13, 148, 136, 180)).save(image_stream, format="PNG")
+        image_stream.seek(0)
+
+        uploaded = client.post(
+            "/profile/photo",
+            data={"photo": (image_stream, "portrait.png")},
+            content_type="multipart/form-data",
+        )
+        image_stream.close()
+        self.assertEqual(uploaded.status_code, 302)
+        uploaded.close()
+        with traffic.app.app_context():
+            user = traffic.db().execute(
+                "SELECT profile_image FROM users WHERE id=?", (self.client_id,)
+            ).fetchone()
+        self.assertRegex(
+            user["profile_image"],
+            rf"user-{self.client_id}-[a-f0-9]{{32}}\.jpg",
+        )
+
+        photo_response = client.get("/profile/photo")
+        self.assertEqual(photo_response.status_code, 200)
+        self.assertEqual(photo_response.mimetype, "image/jpeg")
+        self.assertEqual(photo_response.headers["X-Content-Type-Options"], "nosniff")
+        with Image.open(BytesIO(photo_response.data)) as stored_image:
+            self.assertEqual(stored_image.format, "JPEG")
+            self.assertEqual(stored_image.size, (120, 80))
+        photo_response.close()
+
+        profile_page = client.get("/profile")
+        self.assertIn(b"Your profile photo", profile_page.data)
+        self.assertIn(b"Remove photo", profile_page.data)
+        profile_page.close()
+        other_user = self.logged_client(self.admin_id, "admin", "Profile admin")
+        other_photo = other_user.get("/profile/photo")
+        self.assertEqual(other_photo.status_code, 404)
+        other_photo.close()
+
+        removed = client.post("/profile/photo", data={"remove_photo": "1"})
+        self.assertEqual(removed.status_code, 302)
+        removed.close()
+        missing_photo = client.get("/profile/photo")
+        self.assertEqual(missing_photo.status_code, 404)
+        missing_photo.close()
+        with traffic.app.app_context():
+            user = traffic.db().execute(
+                "SELECT profile_image FROM users WHERE id=?", (self.client_id,)
+            ).fetchone()
+        self.assertIsNone(user["profile_image"])
+
+    def test_profile_photo_rejects_invalid_images_and_oversized_uploads(self):
+        client = self.logged_client(self.client_id, "client", "Dashboard client")
+        invalid_stream = BytesIO(b"<svg onload='alert(1)'></svg>")
+        invalid = client.post(
+            "/profile/photo",
+            data={"photo": (invalid_stream, "avatar.svg")},
+            content_type="multipart/form-data",
+        )
+        invalid_stream.close()
+        self.assertEqual(invalid.status_code, 302)
+        invalid.close()
+        page = client.get("/profile")
+        self.assertIn(b"selected image could not be opened", page.data)
+        page.close()
+        missing_photo = client.get("/profile/photo")
+        self.assertEqual(missing_photo.status_code, 404)
+        missing_photo.close()
+
+        oversized_stream = BytesIO(b"x" * (traffic.PROFILE_PHOTO_MAX_BYTES + 1))
+        oversized = client.post(
+            "/profile/photo",
+            data={
+                "photo": (
+                    oversized_stream,
+                    "large.jpg",
+                )
+            },
+            content_type="multipart/form-data",
+        )
+        oversized_stream.close()
+        self.assertEqual(oversized.status_code, 302)
+        oversized.close()
+        page = client.get("/profile")
+        self.assertIn(
+            b"Profile photos must be 5 MB or smaller.",
+            page.data,
+        )
+        page.close()
 
 
 class OutscraperValidationTests(unittest.TestCase):
@@ -856,6 +1073,9 @@ class OutscraperWorkflowTests(unittest.TestCase):
         self.assertIn(b"Save Actual Speed for MATLAB", response.data)
         self.assertIn(b"Free flow speed for Volumes", response.data)
         self.assertIn(b'id="freeflowSpeedDialog"', response.data)
+        self.assertIn(b'id="volumeFreeflowSpeed"', response.data)
+        self.assertIn(b"state.freeflow_speed", response.data)
+        self.assertIn(b"/api/outscraper/${encodeURIComponent(state.freeflow_job_id)}/refresh", response.data)
         self.assertNotIn(b'/admin/outscraper?source_request_id=', response.data)
         self.assertIn(b"Number of lanes", response.data)
         self.assertNotIn(b"Confirm &amp; Send Results", response.data)
@@ -934,6 +1154,58 @@ class OutscraperWorkflowTests(unittest.TestCase):
         saved_context = __import__("json").loads(request_data)["volumes"]["freeflow_context"]
         self.assertEqual(saved_context["weekend_date"], weekend_date.isoformat())
         self.assertEqual(saved_context["weekend_day"], weekend_day)
+
+    def test_volumes_status_recovers_a_completed_linked_freeflow_job(self):
+        request_id = self.insert_volume_request()
+        job_id = f"completed-freeflow-{request_id}"
+        weekend_date, weekend_day = traffic._latest_previous_weekly_weekend("EG", "Africa/Cairo")
+        context = {
+            "source_request_id": request_id,
+            "service": "freeflow_speed",
+            "study_date": "2025-12-18",
+            "country_code": "EG",
+            "country_name": "Egypt",
+            "timezone": "Africa/Cairo",
+            "reference_type": "weekly_weekend",
+            "weekend_date": weekend_date.isoformat(),
+            "weekend_day": weekend_day,
+        }
+        response_data = {
+            "status": "Success",
+            "data": [[{
+                "road_distance_timing(meters:seconds)": {"0": 0, "100": 10, "200": 30},
+            }]],
+        }
+        with traffic.app.app_context():
+            now = traffic._timestamp_now()
+            traffic.db().execute(
+                "INSERT INTO outscraper_jobs(id,created_at,updated_at,config_json,config_hash,approval_token_hash,execution_status) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (
+                    job_id, now, now,
+                    __import__("json").dumps({"trafficlens_context": context}),
+                    "hash", "token", "completed",
+                ),
+            )
+            traffic.db().execute(
+                "INSERT INTO outscraper_job_routes(job_id,route_index,origin,destination,execution_status,raw_response_json) "
+                "VALUES(?,1,'A','B','completed',?)",
+                (job_id, __import__("json").dumps(response_data)),
+            )
+            traffic.db().execute(
+                "UPDATE volumes_workflows SET freeflow_job_id=? WHERE request_id=?",
+                (job_id, request_id),
+            )
+            traffic.db().commit()
+            with mock.patch.object(traffic, "_start_volume_calculation") as start_model:
+                response = self.client.get(f"/api/requests/{request_id}/volumes")
+            start_model.assert_called_once_with(request_id)
+        self.assertEqual(response.status_code, 200, response.get_json())
+        workflow = response.get_json()["workflow"]
+        self.assertAlmostEqual(workflow["freeflow_speed"], 190 / 28 * 3.6)
+        self.assertEqual(workflow["freeflow_job_id"], job_id)
+        self.assertEqual(workflow["freeflow_job_status"], "completed")
+        self.assertEqual(workflow["freeflow_context"]["weekend_date"], weekend_date.isoformat())
 
     def test_actual_speed_confirmation_is_internal_for_volumes_only_request(self):
         request_id = self.insert_volume_request()
@@ -1454,6 +1726,39 @@ class OutscraperWorkflowTests(unittest.TestCase):
         self.assertIn(b'"coords": [[29.31, 47.91], [29.32, 47.92]]', repeat_page.data)
         self.assertEqual(self.client.get(f"/study?repeat_request_id={request_id + 9999}").status_code, 404)
 
+    def test_legacy_arabic_notifications_are_converted_to_english(self):
+        with traffic.app.app_context():
+            db = traffic.db()
+            user_id = db.execute(
+                "INSERT INTO users(name,email,pw,role) VALUES('Legacy client','legacy-client@example.test','x','client')"
+            ).lastrowid
+            legacy = (
+                ("new_request", "\u0637\u0644\u0628 \u062c\u062f\u064a\u062f",
+                 "\u0642\u062f\u0645 Sara \u0637\u0644\u0628\u064b\u0627 \u062c\u062f\u064a\u062f\u064b\u0627: REQ-7."),
+                ("volume_result", "\u0646\u062a\u0627\u0626\u062c \u0623\u062d\u062c\u0627\u0645 \u0627\u0644\u0645\u0631\u0648\u0631 \u062c\u0627\u0647\u0632\u0629",
+                 "\u0627\u0639\u062a\u0645\u062f \u0627\u0644\u0645\u0633\u0624\u0648\u0644 \u0646\u062a\u0627\u0626\u062c \u0623\u062d\u062c\u0627\u0645 \u0627\u0644\u0645\u0631\u0648\u0631 \u0644\u0644\u0637\u0644\u0628 REQ-1."),
+            )
+            for kind, title, message in legacy:
+                db.execute(
+                    "INSERT INTO notifications(user_id,request_id,kind,title,message,created_at) VALUES(?,?,?,?,?,'2026-01-01')",
+                    (user_id, 1, kind, title, message),
+                )
+            db.commit()
+            raw = sqlite3.connect(traffic.DB)
+            try:
+                traffic._translate_legacy_notifications(raw)
+                raw.commit()
+                rows = raw.execute(
+                    "SELECT title,message FROM notifications WHERE user_id=? ORDER BY id", (user_id,)
+                ).fetchall()
+            finally:
+                raw.close()
+        self.assertEqual(rows[0], ("New request", "Sara submitted a new request: REQ-7."))
+        self.assertEqual(rows[1], (
+            "Traffic volume results are ready",
+            "The administrator approved the traffic volume results for request REQ-1.",
+        ))
+
     def test_new_request_notifies_admin_and_admin_reply_notifies_only_request_owner(self):
         with traffic.app.app_context():
             client_user_id = traffic.db().execute(
@@ -1483,7 +1788,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
             session.update(uid=1, name="Admin", role="admin")
         admin_notifications = admin_client.get("/notifications")
         self.assertEqual(admin_notifications.status_code, 200)
-        self.assertIn(b"\xd8\xb7\xd9\x84\xd8\xa8 \xd8\xac\xd8\xaf\xd9\x8a\xd8\xaf", admin_notifications.data)
+        self.assertIn(b"New request", admin_notifications.data)
         self.assertIn(f"REQ-{request_id}".encode(), admin_notifications.data)
         admin_count = admin_client.get("/api/notifications/unread-count").get_json()
         self.assertEqual(admin_count["count"], 1)
@@ -1816,3 +2121,4 @@ class OutscraperWorkflowTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+    

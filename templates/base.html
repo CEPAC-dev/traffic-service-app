@@ -9,7 +9,7 @@
 <div class="app-shell" id="appShell">
 <aside class="app-sidebar" id="appSidebar" aria-label="Main navigation">
   <a class="sidebar-brand" href="{{dashboard_url}}"><span class="sidebar-brand-icon">T</span><span>{{APP_NAME}}</span></a>
-  <div class="sidebar-account"><span class="account-avatar">{{me.get('name','U')[:1]|upper}}</span><span><b>{{me.get('name')}}</b><small>{{'Administrator' if me.get('role')=='admin' else 'Client account'}}</small></span></div>
+  <div class="sidebar-account"><span class="account-avatar">{% if me.get('profile_image') %}<img src="{{url_for('profile_photo')}}" alt="">{% else %}{{me.get('name','U')[:1]|upper}}{% endif %}</span><span><b>{{me.get('name')}}</b><small>{{'Administrator' if me.get('role')=='admin' else 'Client account'}}</small></span></div>
   <nav class="sidebar-nav">
     <span class="sidebar-label">WORKSPACE</span>
     {% if me.get('role')=='admin' %}
@@ -29,7 +29,7 @@
     <a class="side-link" href="{{url_for('admin')}}#network" data-section="network"><span class="side-icon">⌖</span>Road network</a>
     <a class="side-link" href="{{url_for('admin_profile')}}"><span class="side-icon">◎</span>Profile</a>
     {% else %}
-    <a class="side-link" href="{{url_for('dashboard')}}"><span class="side-icon">▦</span>Dashboard</a>
+    <a class="side-link" href="{{url_for('dashboard')}}"><span class="side-icon">▦</span>Home</a>
     <a class="side-link" href="{{url_for('study')}}"><span class="side-icon">◇</span>Services</a>
     <a class="side-link" href="{{url_for('my_requests')}}"><span class="side-icon">▤</span>My requests</a>
     <a class="side-link" href="{{url_for('profile')}}"><span class="side-icon">◎</span>Profile</a>
@@ -44,14 +44,14 @@
     <div class="topbar-context"><b>{% if me.get('role')=='admin' %}Admin workspace{% else %}Traffic services{% endif %}</b><small>{% if me.get('role')=='admin' %}Requests · Processing · Review{% else %}Services · Requests · Results{% endif %}</small></div>
     <div class="topbar-actions">
       <a class="topbar-notifications" href="{{url_for('notifications')}}" aria-label="Notifications">♧<span id="notificationBadge" class="notification-badge" {% if not unread_notifications %}hidden{% endif %}>{{unread_notifications}}</span></a>
-      <details class="profile-menu"><summary><span class="account-avatar">{{me.get('name','U')[:1]|upper}}</span><span class="profile-menu-name">{{me.get('name')}}</span><span class="profile-menu-caret">⌄</span></summary><div class="profile-menu-popover"><small>Signed in as</small><b>{{me.get('name')}}</b><a href="{{url_for('admin_profile') if me.get('role')=='admin' else url_for('profile')}}">View profile</a></div></details>
+      <details class="profile-menu"><summary><span class="account-avatar">{% if me.get('profile_image') %}<img src="{{url_for('profile_photo')}}" alt="">{% else %}{{me.get('name','U')[:1]|upper}}{% endif %}</span><span class="profile-menu-name">{{me.get('name')}}</span><span class="profile-menu-caret">⌄</span></summary><div class="profile-menu-popover"><small>Signed in as</small><b>{{me.get('name')}}</b><a href="{{url_for('admin_profile') if me.get('role')=='admin' else url_for('profile')}}">View profile</a></div></details>
     </div>
   </header>
   <main class="app-content">
 {% else %}
 <div class="public-shell"><header class="public-topbar"><a class="brand" href="{{url_for('index')}}">🚦 {{APP_NAME}}</a><nav><a href="{{url_for('index')}}">Home</a><a href="{{url_for('login')}}">Sign in</a><a href="{{url_for('register')}}">Create account</a></nav></header><main class="public-content">
 {% endif %}
-{% for m in get_flashed_messages() %}<div class="flash">{{ m }}</div>{% endfor %}
+{% for category, m in get_flashed_messages(with_categories=true) %}<div class="flash flash-{{category}}" role="status">{{ m }}</div>{% endfor %}
 {% block body %}{% endblock %}
 {% if me.get('uid') %}</main></div></div>{% else %}</main></div>{% endif %}
 <script>

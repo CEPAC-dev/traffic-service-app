@@ -10,7 +10,7 @@
 {% if 'travel' in r.services or 'speed' in r.services or 'freeflow_time' in r.services or 'freeflow_speed' in r.services or 'volumes' in r.services %}<div class="row-actions directions-actions">
 {% if 'travel' in r.services or 'speed' in r.services or 'volumes' in r.services %}{% if r.point_c %}<button class="btn" id="openDirectionsReview" type="button">API Directions · Review A → C</button>{% endif %}{% endif %}
 {% if 'freeflow_time' in r.services %}<a class="btn alt" href="{{url_for('admin_outscraper',source_request_id=r.id,service='freeflow_time')}}">API Directions · Free flow time</a>{% endif %}
-{% if 'volumes' in r.services %}{% if volumes_workflow and volumes_workflow.freeflow_speed %}<span class="pill">Free-flow speed received{% if volumes_workflow.freeflow_context %} · {{volumes_workflow.freeflow_context.weekend_day}} {{volumes_workflow.freeflow_context.weekend_date}}{% endif %}</span>{% elif volumes_workflow and volumes_workflow.freeflow_job_status in ('submitting','running','unknown') %}<span class="pill">Free-flow speed request {{volumes_workflow.freeflow_job_status}}</span>{% else %}<button class="btn alt" id="openFreeflowSpeedDialog" type="button">API Directions · Free flow speed for Volumes</button>{% endif %}{% elif 'freeflow_speed' in r.services %}<a class="btn alt" href="{{url_for('admin_outscraper',source_request_id=r.id,service='freeflow_speed')}}">API Directions · Free flow speed</a>{% endif %}
+{% if 'volumes' in r.services %}{% set freeflow_received=volumes_workflow and volumes_workflow.freeflow_speed is not none %}{% set freeflow_active=volumes_workflow and volumes_workflow.freeflow_job_status in ('submitting','running','unknown') %}<span class="pill" id="freeflowReceivedPill" {% if not freeflow_received and not freeflow_active %}hidden{% endif %}>{% if freeflow_received %}Free-flow speed received{% if volumes_workflow.freeflow_context %} · {{volumes_workflow.freeflow_context.weekend_day}} {{volumes_workflow.freeflow_context.weekend_date}}{% endif %}{% elif freeflow_active %}Free-flow speed request {{volumes_workflow.freeflow_job_status|replace('_',' ')}}{% endif %}</span><button class="btn alt" id="openFreeflowSpeedDialog" type="button" {% if freeflow_received or freeflow_active %}hidden{% endif %}>API Directions · Free flow speed for Volumes</button>{% elif 'freeflow_speed' in r.services %}<a class="btn alt" href="{{url_for('admin_outscraper',source_request_id=r.id,service='freeflow_speed')}}">API Directions · Free flow speed</a>{% endif %}
 </div>{% endif %}
 {% if 'volumes' in r.services %}
 <dialog id="freeflowSpeedDialog" class="directions-review-dialog freeflow-speed-dialog" data-prepare-url="{{url_for('prepare_volumes_freeflow_preview',rid=r.id)}}">
@@ -75,7 +75,7 @@
 <p id="volumesWorkflowMessage" class="hint" aria-live="polite">{% if volumes_workflow.error %}{{volumes_workflow.error}}{% elif volumes_workflow.status=='ready_for_review' %}MATLAB finished. Review the hourly volumes and RMSE tolerance before sending them to the client.{% elif volumes_workflow.status=='sent' %}Approved volume results have been sent to the client.{% else %}Provide lane count and complete both API steps. MATLAB starts automatically when all inputs are ready.{% endif %}</p>
 <div class="grid2">
 <div><label for="volumeLaneCount">Number of lanes</label><input id="volumeLaneCount" type="number" min="0.01" step="any" value="{{volumes_workflow.lanes or ''}}" {% if volumes_workflow.status in ('running','ready_for_review','sent') %}disabled{% endif %}></div>
-<div><label>Free-flow speed · weekly weekend reference</label><input readonly value="{{'%.2f'|format(volumes_workflow.freeflow_speed) if volumes_workflow.freeflow_speed else 'Waiting for API result'}}">{% if volumes_workflow.freeflow_context %}<small class="hint">{{volumes_workflow.freeflow_context.weekend_day}} {{volumes_workflow.freeflow_context.weekend_date}} · 07:00 {{volumes_workflow.freeflow_context.timezone}}</small>{% endif %}</div>
+<div><label for="volumeFreeflowSpeed">Free-flow speed · weekly weekend reference</label><input id="volumeFreeflowSpeed" readonly value="{{'%.2f'|format(volumes_workflow.freeflow_speed) if volumes_workflow.freeflow_speed is not none else 'Waiting for API result'}}"><small id="volumeFreeflowContext" class="hint">{% if volumes_workflow.freeflow_context %}{{volumes_workflow.freeflow_context.weekend_day}} {{volumes_workflow.freeflow_context.weekend_date}} · 07:00 {{volumes_workflow.freeflow_context.timezone}}{% endif %}</small></div>
 </div>
 <p><button class="btn alt" id="saveVolumeLanes" type="button" {% if volumes_workflow.status in ('running','ready_for_review','sent') %}hidden{% endif %}>Save lanes &amp; run MATLAB when ready</button>
 <button class="btn alt" id="retryVolumeModel" type="button" {% if volumes_workflow.status!='failed' %}hidden{% endif %}>Retry MATLAB</button>
@@ -106,7 +106,7 @@ const REQ={{ r|tojson }},FORMS={{ forms|tojson }},SV={{ SERVICES|tojson }},SVI={
 const esc=s=>String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'),pad=n=>String(n).padStart(2,'0');
 const coordinate=p=>p.map(value=>Number(value).toFixed(6)).join(', ');
 requestPointA.textContent=coordinate(REQ.coords[0]);requestPointB.textContent=coordinate(REQ.coords[1]);
-const map=L.map('rmap');tiles(map);const pg=L.polyline(REQ.path,{color:'#f97316',weight:5}).addTo(map);
+const map=L.map('rmap');tiles(map);const pg=L.polyline(REQ.path,{color:'#0D9488',weight:5}).addTo(map);
 REQ.coords.forEach((p,i)=>L.marker(p).addTo(map).bindTooltip(i?'B':'A',{permanent:true,direction:'top'}));
 if(REQ.point_c){L.marker(REQ.point_c,{icon:L.divIcon({className:'point-c-marker',html:'C',iconSize:[28,28],iconAnchor:[14,14]})}).addTo(map).bindTooltip('C · calculated',{permanent:true,direction:'top'});map.fitBounds(L.latLngBounds([...REQ.path,REQ.point_c]),{padding:[40,40]})}else map.fitBounds(pg.getBounds(),{padding:[40,40]});
 const post=(u,b)=>fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(r=>r.json());
@@ -319,23 +319,49 @@ if(directionsDialog){
   const volumeBadge=document.getElementById('volumesWorkflowBadge');
   const volumeAction=document.getElementById('volumeWorkflowAction');
   const renderedStatus=volumesPanel.dataset.renderedStatus;
+  let lastFreeflowRefresh=0,freeflowRefreshBusy=false;
   const refreshVolumes=async()=>{
    try{
-    const response=await fetch(volumesPanel.dataset.statusUrl);
+    const response=await fetch(volumesPanel.dataset.statusUrl,{cache:'no-store'});
     const payload=await response.json();
     if(!response.ok)throw new Error(payload.error||'Could not load the Volumes workflow.');
     const state=payload.workflow;
     volumeBadge.textContent=state.status.replaceAll('_',' ').replace(/\b\w/g,c=>c.toUpperCase());
     volumeBadge.className=`b ${state.status}`;
+    const speedInput=document.getElementById('volumeFreeflowSpeed');
+    const referenceLabel=document.getElementById('volumeFreeflowContext');
+    const receivedPill=document.getElementById('freeflowReceivedPill');
+    const freeflowButton=document.getElementById('openFreeflowSpeedDialog');
+    const hasFreeflowSpeed=state.freeflow_speed!==null&&state.freeflow_speed!==undefined;
+    const freeflowActive=['submitting','running','unknown'].includes(state.freeflow_job_status);
+    if(speedInput)speedInput.value=hasFreeflowSpeed?Number(state.freeflow_speed).toFixed(2):'Waiting for API result';
+    if(referenceLabel){
+     const context=state.freeflow_context;
+     referenceLabel.textContent=context?`${context.weekend_day} ${context.weekend_date} · 07:00 ${context.timezone}`:'';
+    }
+    if(receivedPill){
+     receivedPill.hidden=!hasFreeflowSpeed&&!freeflowActive;
+     receivedPill.textContent=hasFreeflowSpeed
+      ?`Free-flow speed received${state.freeflow_context?` · ${state.freeflow_context.weekend_day} ${state.freeflow_context.weekend_date}`:''}`
+      :freeflowActive?`Free-flow speed request ${state.freeflow_job_status.replaceAll('_',' ')}`:'';
+    }
+    if(freeflowButton)freeflowButton.hidden=hasFreeflowSpeed||freeflowActive;
     const volumeLocked=['running','ready_for_review','sent'].includes(state.status);
     document.getElementById('volumeLaneCount').disabled=volumeLocked;
     document.getElementById('saveVolumeLanes').hidden=volumeLocked;
     document.getElementById('retryVolumeModel').hidden=state.status!=='failed';
     if(state.error)volumeMessage.textContent=state.error;
-    else if(state.status==='waiting_for_inputs')volumeMessage.textContent='Waiting for lane count and both approved API results. MATLAB starts automatically when all inputs are ready.';
+    else if(state.status==='waiting_for_inputs')volumeMessage.textContent='Waiting for the missing inputs. MATLAB starts automatically when all required values are ready.';
     else if(state.status==='running')volumeMessage.textContent='MATLAB is calculating the hourly volume estimates...';
     else if((state.status==='ready_for_review'||state.status==='sent')&&state.status!==renderedStatus)location.reload();
     else if(state.status==='failed')volumeMessage.textContent='MATLAB calculation failed. Review the error and retry.';
+    if(state.freeflow_job_id&&['running','unknown'].includes(state.freeflow_job_status)&&Date.now()-lastFreeflowRefresh>15000&&!freeflowRefreshBusy){
+     lastFreeflowRefresh=Date.now();freeflowRefreshBusy=true;
+     try{
+      const refresh=await post(`/api/outscraper/${encodeURIComponent(state.freeflow_job_id)}/refresh`,{});
+      if(!refresh.ok)throw new Error(refresh.error||'Could not refresh the linked free-flow request.');
+     }finally{freeflowRefreshBusy=false}
+    }
    }catch(error){volumeAction.textContent=error.message||'Could not refresh the workflow.'}
   };
   const saveLanes=document.getElementById('saveVolumeLanes');
