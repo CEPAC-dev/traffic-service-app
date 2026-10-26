@@ -268,6 +268,13 @@ label.cf{display:flex;gap:8px;align-items:flex-start;color:var(--txt);margin-top
 .directions-review-dialog .grid2{gap:8px 14px}
 .directions-review-dialog .hint{margin:4px 0}
 .directions-review-dialog[open]{animation:directions-dialog-in .16s ease-out}
+.freeflow-valid{border-color:#86CDBB;background:#E8F5F2;color:#145B50}
+.freeflow-invalid{border-color:#F2CC86;background:#FFF8E8;color:#805516}
+.freeflow-valid .tw,.freeflow-invalid .tw{margin-top:10px}
+.freeflow-valid th,.freeflow-invalid th{color:var(--navy)}
+#freeflowAttempts{margin:12px 0}
+#freeflowAttempts summary{color:var(--navy);font-weight:700;cursor:pointer}
+#freeflowAttemptList a{color:var(--blue);overflow-wrap:anywhere}
 @keyframes directions-dialog-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
 @media(max-width:760px){.directions-review-dialog{padding:18px}.directions-review-dialog .outscraper-actions{align-items:stretch;flex-direction:column}}
 .api-params-table{margin-top:8px}

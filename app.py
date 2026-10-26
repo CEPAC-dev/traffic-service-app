@@ -135,6 +135,11 @@ CREATE TABLE IF NOT EXISTS volumes_workflows(
   lanes REAL,
   actual_result_json TEXT,
   freeflow_speed REAL,
+  freeflow_accepted INTEGER NOT NULL DEFAULT 0,
+  freeflow_result_json TEXT,
+  freeflow_validation_json TEXT,
+  freeflow_override INTEGER NOT NULL DEFAULT 0,
+  freeflow_accepted_at TEXT,
   freeflow_job_id TEXT,
   result_json TEXT,
   workbook_path TEXT,
@@ -145,6 +150,20 @@ CREATE TABLE IF NOT EXISTS volumes_workflows(
   reviewed_at TEXT,
   sent_at TEXT
 );
+CREATE TABLE IF NOT EXISTS volume_freeflow_attempts(
+  job_id TEXT PRIMARY KEY REFERENCES outscraper_jobs(id),
+  request_id INTEGER NOT NULL REFERENCES requests(id),
+  submitted_at TEXT NOT NULL,
+  status TEXT NOT NULL,
+  result_json TEXT,
+  validation_json TEXT,
+  error TEXT,
+  accepted INTEGER NOT NULL DEFAULT 0,
+  override INTEGER NOT NULL DEFAULT 0,
+  accepted_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_volume_freeflow_attempts_request
+  ON volume_freeflow_attempts(request_id,submitted_at);
 """
 
 def db():
@@ -172,6 +191,23 @@ def _notify_request_owner_reply(request_id, user_id, old_reply, new_reply):
             user_id, request_id, "admin_reply", "New reply to your request",
             f"The administrator replied to request REQ-{request_id}: {new_reply}",
         )
+
+def _all_requested_services_ready(requested_services, data):
+    return bool(requested_services) and all(
+        bool((data.get(service) or {}).get("rows"))
+        if service == "volumes"
+        else bool((data.get(service) or {}).get("rows") or (data.get(service) or {}).get("note"))
+        for service in requested_services
+    )
+
+def _save_volume_lanes_service(request_data, requested_services, lanes):
+    if "lanes" in requested_services and lanes is not None:
+        request_data["lanes"] = {
+            "rows": [{"value": lanes}],
+            "note": "Number of lanes used for the Traffic volumes calculation.",
+            "source": "admin",
+            "updated": dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
+        }
 
 @app.teardown_appcontext
 def close(_):
@@ -239,6 +275,38 @@ def init():
     for column in ("last_polled_at", "request_details_json"):
         if column not in route_cols:
             c.execute(f"ALTER TABLE outscraper_job_routes ADD COLUMN {column} TEXT")
+    volume_cols = {column[1] for column in c.execute("PRAGMA table_info(volumes_workflows)")}
+    for column, definition in (
+        ("freeflow_accepted", "INTEGER NOT NULL DEFAULT 0"),
+        ("freeflow_result_json", "TEXT"),
+        ("freeflow_validation_json", "TEXT"),
+        ("freeflow_override", "INTEGER NOT NULL DEFAULT 0"),
+        ("freeflow_accepted_at", "TEXT"),
+    ):
+        if column not in volume_cols:
+            c.execute(f"ALTER TABLE volumes_workflows ADD COLUMN {column} {definition}")
+    c.execute(
+        "UPDATE volumes_workflows SET freeflow_accepted=1 "
+        "WHERE freeflow_speed IS NOT NULL AND freeflow_accepted=0 AND freeflow_result_json IS NULL"
+    )
+    for job_id, created_at, execution_status, config_json in c.execute(
+        "SELECT id,created_at,execution_status,config_json FROM outscraper_jobs"
+    ).fetchall():
+        try:
+            context = json.loads(config_json or "{}").get("trafficlens_context") or {}
+            if not context.get("volume_input"):
+                continue
+            if not c.execute(
+                "SELECT 1 FROM requests WHERE id=?", (context["source_request_id"],)
+            ).fetchone():
+                continue
+            c.execute(
+                "INSERT OR IGNORE INTO volume_freeflow_attempts"
+                "(job_id,request_id,submitted_at,status) VALUES(?,?,?,?)",
+                (job_id, context["source_request_id"], created_at, execution_status),
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            app.logger.warning("Could not backfill free-flow attempt history for job %s.", job_id)
     if app.config["EPHEMERAL_SECRET_KEY"]:
         c.execute(
             "UPDATE outscraper_jobs SET approval_status='invalidated', execution_status='invalidated', updated_at=? "
@@ -345,6 +413,11 @@ def _refresh_job_status(job_id):
         "UPDATE outscraper_jobs SET execution_status=?, provider_ids=?, result_count=?, error=?, completed_at=COALESCE(?,completed_at), updated_at=? WHERE id=?",
         (status, json.dumps(ids), count, "; ".join(errors) or None, completed, _timestamp_now(), job_id))
     db().commit()
+    db().execute(
+        "UPDATE volume_freeflow_attempts SET status=?,error=? WHERE job_id=?",
+        (status, "; ".join(errors) or None, job_id),
+    )
+    db().commit()
     if status == "completed":
         _persist_holiday_result_context(job_id)
         workflow = db().execute(
@@ -359,6 +432,188 @@ def _refresh_job_status(job_id):
         _update_request_directions_workflow(job_id, status, "Scraper execution ended with status: " + status)
     return status
 
+def _sync_volume_actual_speeds(request_id):
+    workflow = db().execute(
+        "SELECT actual_result_json FROM volumes_workflows WHERE request_id=?",
+        (request_id,),
+    ).fetchone()
+    request_row = db().execute(
+        "SELECT services,hours,data FROM requests WHERE id=?", (request_id,)
+    ).fetchone()
+    if not workflow or not request_row:
+        return False
+
+    actual_result = json.loads(workflow["actual_result_json"] or "{}")
+    actual_hourly = {
+        int(item["hour"]): item
+        for item in actual_result.get("hourly", [])
+        if isinstance(item, dict) and str(item.get("hour", "")).isdigit()
+    }
+    directions_row = db().execute(
+        "SELECT result_json FROM request_directions_workflows "
+        "WHERE request_id=? AND status IN ('ready','confirmed') AND result_json IS NOT NULL "
+        "ORDER BY updated_at DESC,created_at DESC LIMIT 1",
+        (request_id,),
+    ).fetchone()
+    directions_result = json.loads(directions_row["result_json"] or "{}") if directions_row else {}
+    changed = False
+    for item in directions_result.get("hourly", []):
+        if not isinstance(item, dict) or not str(item.get("hour", "")).isdigit():
+            continue
+        hour = int(item["hour"])
+        target = actual_hourly.setdefault(hour, {"hour": hour})
+        for key in ("speed_kmh", "distance_m", "time_seconds", "travel_minutes", "reused_observation"):
+            if item.get(key) is not None and target.get(key) != item[key]:
+                target[key] = item[key]
+                changed = True
+
+    services = set(json.loads(request_row["services"] or "[]"))
+    request_data = json.loads(request_row["data"] or "{}")
+    if "speed" in services:
+        for item in (request_data.get("speed") or {}).get("rows", []):
+            if not isinstance(item, dict) or item.get("hour") is None or item.get("value") is None:
+                continue
+            hour = int(item["hour"])
+            target = actual_hourly.setdefault(hour, {"hour": hour})
+            if target.get("speed_kmh") != item["value"]:
+                target["speed_kmh"] = item["value"]
+                changed = True
+
+    requested_hours = sorted(set(json.loads(request_row["hours"] or "[]")))
+    actual_result["hourly"] = [
+        actual_hourly[hour] for hour in sorted(actual_hourly)
+    ]
+    complete = bool(requested_hours) and all(
+        hour in actual_hourly and actual_hourly[hour].get("speed_kmh") is not None
+        for hour in requested_hours
+    )
+    if (changed or not workflow["actual_result_json"]) and actual_result["hourly"]:
+        db().execute(
+            "UPDATE volumes_workflows SET actual_result_json=?,updated_at=? WHERE request_id=?",
+            (json.dumps(actual_result, ensure_ascii=False), _timestamp_now(), request_id),
+        )
+    return complete
+
+
+def _evaluate_volume_freeflow(request_id):
+    _sync_volume_actual_speeds(request_id)
+    workflow = db().execute(
+        "SELECT * FROM volumes_workflows WHERE request_id=?", (request_id,)
+    ).fetchone()
+    request_row = db().execute(
+        "SELECT services,hours,data,user_id FROM requests WHERE id=?", (request_id,)
+    ).fetchone()
+    if not workflow or not request_row or not workflow["freeflow_result_json"]:
+        return False
+    source_result = json.loads(workflow["freeflow_result_json"])
+    candidate_speed = source_result.get("selected_speed_kmh")
+    actual_result = json.loads(workflow["actual_result_json"] or "{}")
+    request_data = json.loads(request_row["data"] or "{}")
+    requested_services = set(json.loads(request_row["services"] or "[]"))
+    actual_by_hour = {
+        item.get("hour"): item for item in actual_result.get("hourly", [])
+        if isinstance(item, dict)
+    }
+    requested_hours = sorted(set(json.loads(request_row["hours"] or "[]")))
+    comparison = []
+    missing = []
+    for hour in requested_hours:
+        actual_item = actual_by_hour.get(hour)
+        actual_speed = actual_item.get("speed_kmh") if actual_item else None
+        try:
+            valid = (
+                math.isfinite(float(candidate_speed))
+                and math.isfinite(float(actual_speed))
+                and float(candidate_speed) > float(actual_speed)
+            )
+        except (TypeError, ValueError):
+            valid = False
+        if actual_speed is None:
+            missing.append(f"{hour:02d}:00")
+        comparison.append({
+            "hour": hour,
+            "actual_speed_kmh": actual_speed,
+            "freeflow_speed_kmh": candidate_speed,
+            "valid": valid if actual_speed is not None else None,
+        })
+    validation = {
+        "rows": comparison,
+        "missing_hours": missing,
+        "mismatched_hours": [
+            f"{item['hour']:02d}:00" for item in comparison
+            if item["valid"] is False
+        ],
+        "is_valid": bool(comparison) and not missing and all(
+            item["valid"] is True for item in comparison
+        ),
+    }
+    if validation["missing_hours"]:
+        validation_error = "Waiting for actual speed for selected hour(s): " + ", ".join(validation["missing_hours"]) + "."
+    elif validation["mismatched_hours"]:
+        validation_error = "Needs re-send: actual speed exceeds free-flow at " + ", ".join(validation["mismatched_hours"]) + "."
+    else:
+        validation_error = None
+    db().execute(
+        "UPDATE volumes_workflows SET freeflow_speed=?, freeflow_validation_json=?, "
+        "freeflow_accepted=?, freeflow_override=0, freeflow_accepted_at=?, error=?, updated_at=? "
+        "WHERE request_id=?",
+        (
+            candidate_speed,
+            json.dumps(validation, ensure_ascii=False),
+            int(validation["is_valid"]),
+            _timestamp_now() if validation["is_valid"] else None,
+            validation_error,
+            _timestamp_now(),
+            request_id,
+        ),
+    )
+    attempt_status = "accepted" if validation["is_valid"] else (
+        "waiting_for_actual_speed" if validation["missing_hours"] else "needs_resend"
+    )
+    db().execute(
+        "UPDATE volume_freeflow_attempts SET validation_json=?,status=?,accepted=?,"
+        "override=0,accepted_at=?,error=? WHERE job_id=?",
+        (
+            json.dumps(validation, ensure_ascii=False),
+            attempt_status,
+            int(validation["is_valid"]),
+            _timestamp_now() if validation["is_valid"] else None,
+            validation_error,
+            workflow["freeflow_job_id"],
+        ),
+    )
+    volume_data = request_data.get("volumes") or {}
+    volume_data["freeflow_context"] = source_result.get("context")
+    request_data["volumes"] = volume_data
+    if validation["is_valid"] and "freeflow_speed" in requested_services:
+        request_data["freeflow_speed"] = {
+            "rows": [{"value": candidate_speed}],
+            "note": "Selected as the highest speed returned for the reviewed A→C weekly-weekend window.",
+            "source": "outscraper",
+            "updated": dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "outscraper_job_id": workflow["freeflow_job_id"],
+            "reference_context": source_result.get("context"),
+        }
+        _create_notification(
+            request_row["user_id"], request_id, "directions_result",
+            "Free-flow speed results are ready",
+            f"The administrator approved free-flow speed for request REQ-{request_id}. Traffic volumes remain under review.",
+        )
+    status = "ready_for_review" if workflow["status"] == "ready_for_review" else (
+        "sent" if workflow["status"] == "sent" else "waiting_for_inputs"
+    )
+    db().execute(
+        "UPDATE requests SET data=?, status=CASE WHEN status NOT IN ('Rejected','Completed') "
+        "THEN 'Processing' ELSE status END WHERE id=?",
+        (json.dumps(request_data, ensure_ascii=False), request_id),
+    )
+    db().execute(
+        "UPDATE volumes_workflows SET status=?, error=?, updated_at=? WHERE request_id=?",
+        (status, validation_error, _timestamp_now(), request_id),
+    )
+    db().commit()
+    return validation["is_valid"]
+
 def _persist_holiday_result_context(job_id):
     job_row = db().execute("SELECT config_json FROM outscraper_jobs WHERE id=?", (job_id,)).fetchone()
     if not job_row:
@@ -372,6 +627,105 @@ def _persist_holiday_result_context(job_id):
         app.logger.warning("Completed reference-date Directions job %s has no matching source request.", job_id)
         return
     requested_services = set(json.loads(request_row["services"] or "[]"))
+    if (
+        service == "freeflow_speed"
+        and "volumes" in requested_services
+        and context.get("volume_input")
+    ):
+        try:
+            route_row = db().execute(
+                "SELECT raw_response_json FROM outscraper_job_routes WHERE job_id=? ORDER BY route_index LIMIT 1",
+                (job_id,),
+            ).fetchone()
+            response = json.loads(route_row["raw_response_json"] or "{}") if route_row else {}
+            timezone = ZoneInfo(context["timezone"])
+            departure = int(context["departure_time"])
+            finish = int(context["finish_time"])
+            distance_meters = float(context["road_ab_meters"])
+            values_by_hour = {}
+            for record in _flatten_provider_records(response.get("data")):
+                try:
+                    timestamp = int(record["timestamp"])
+                    if not departure <= timestamp <= finish:
+                        continue
+                    seconds = _interpolate_route_seconds(
+                        record.get("road_distance_timing(meters:seconds)"), distance_meters
+                    )
+                    if seconds <= 0:
+                        continue
+                    hour = dt.datetime.fromtimestamp(timestamp, timezone).hour
+                    values_by_hour.setdefault(hour, []).append(distance_meters / seconds * 3.6)
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    continue
+            if not values_by_hour:
+                raise ValueError("The completed A→C response contains no usable time-stamped free-flow observations.")
+            hourly = [
+                {
+                    "hour": hour,
+                    "speed_kmh": max(speeds),
+                    "sample_count": len(speeds),
+                }
+                for hour, speeds in sorted(values_by_hour.items())
+            ]
+            selected_speed = max(item["speed_kmh"] for item in hourly)
+            result = {
+                "hourly": hourly,
+                "selected_speed_kmh": selected_speed,
+                "selection_rule": "highest_speed_in_reviewed_window",
+                "context": context,
+                "outscraper_job_id": job_id,
+            }
+        except (KeyError, TypeError, ValueError, OverflowError, sqlite3.Error, ZoneInfoNotFoundError) as exc:
+            db().execute(
+                "UPDATE volumes_workflows SET freeflow_result_json=NULL, freeflow_accepted=0, "
+                "status='waiting_for_inputs', error=?, updated_at=? WHERE request_id=?",
+                (str(exc)[:1000], _timestamp_now(), request_id),
+            )
+            db().execute(
+                "UPDATE volume_freeflow_attempts SET status='failed',error=? WHERE job_id=?",
+                (str(exc)[:1000], job_id),
+            )
+            db().commit()
+            app.logger.error("Could not extract A-to-C weekly-weekend free-flow speed for volume request %s: %s", request_id, exc)
+            return
+        request_data = json.loads(request_row["data"] or "{}")
+        volume_data = request_data.get("volumes") or {}
+        volume_data["freeflow_context"] = {
+            key: context[key]
+            for key in (
+                "study_date", "country_code", "country_name", "timezone",
+                "reference_type", "weekend_date", "weekend_day", "departure_time",
+                "finish_time", "interval_minutes",
+            )
+            if key in context
+        }
+        request_data["volumes"] = volume_data
+        db().execute(
+            "UPDATE volumes_workflows SET freeflow_speed=?, freeflow_job_id=?, "
+            "freeflow_result_json=?, freeflow_accepted=0, freeflow_validation_json=NULL, "
+            "freeflow_override=0, freeflow_accepted_at=NULL, status='waiting_for_inputs', "
+            "error=NULL, updated_at=? WHERE request_id=?",
+            (
+                selected_speed,
+                job_id,
+                json.dumps(result, ensure_ascii=False),
+                _timestamp_now(),
+                request_id,
+            ),
+        )
+        db().execute(
+            "UPDATE volume_freeflow_attempts SET status='waiting_for_actual_speed',result_json=?,error=NULL "
+            "WHERE job_id=?",
+            (json.dumps(result, ensure_ascii=False), job_id),
+        )
+        db().execute(
+            "UPDATE requests SET data=? WHERE id=?",
+            (json.dumps(request_data, ensure_ascii=False), request_id),
+        )
+        db().commit()
+        if _evaluate_volume_freeflow(request_id):
+            _start_volume_calculation(request_id)
+        return
     if service == "freeflow_speed" and "volumes" in requested_services and service not in requested_services:
         try:
             route_row = db().execute(
@@ -397,9 +751,10 @@ def _persist_holiday_result_context(job_id):
             app.logger.error("Could not extract weekly-weekend free-flow speed for volume request %s: %s", request_id, exc)
             return
         db().execute(
-            "UPDATE volumes_workflows SET freeflow_speed=?, freeflow_job_id=?, status='waiting_for_inputs', "
+            "UPDATE volumes_workflows SET freeflow_speed=?, freeflow_job_id=?, freeflow_accepted=1, "
+            "freeflow_accepted_at=?, status='waiting_for_inputs', "
             "error=NULL, updated_at=? WHERE request_id=?",
-            (freeflow_speed, job_id, _timestamp_now(), request_id),
+            (freeflow_speed, job_id, _timestamp_now(), _timestamp_now(), request_id),
         )
         context = json.loads(job_row["config_json"]).get("trafficlens_context") or {}
         request_data = json.loads(request_row["data"] or "{}")
@@ -592,8 +947,23 @@ def _extract_request_directions_result(job_id):
         (json.dumps(result, ensure_ascii=False), _timestamp_now(), job_id),
     )
     db().commit()
+    requested_services = set(source["services"])
+    if "volumes" in requested_services:
+        db().execute(
+            "UPDATE volumes_workflows SET actual_result_json=?, status='waiting_for_inputs', "
+            "error=NULL, updated_at=? WHERE request_id=? AND status NOT IN ('ready_for_review','sent')",
+            (json.dumps(result, ensure_ascii=False), _timestamp_now(), workflow["request_id"]),
+        )
+        db().commit()
+        if db().execute(
+            "SELECT freeflow_result_json FROM volumes_workflows WHERE request_id=?",
+            (workflow["request_id"],),
+        ).fetchone()["freeflow_result_json"]:
+            _evaluate_volume_freeflow(workflow["request_id"])
+        _start_volume_calculation(workflow["request_id"])
 
 def _start_volume_calculation(request_id):
+    _sync_volume_actual_speeds(request_id)
     workflow = db().execute(
         "SELECT * FROM volumes_workflows WHERE request_id=?", (request_id,)
     ).fetchone()
@@ -601,11 +971,13 @@ def _start_volume_calculation(request_id):
         return False
     missing_inputs = []
     if not workflow["actual_result_json"]:
-        missing_inputs.append("confirmed actual speeds")
+        missing_inputs.append("completed actual Directions speeds")
     if workflow["lanes"] is None:
         missing_inputs.append("lane count")
     if workflow["freeflow_speed"] is None:
         missing_inputs.append("free-flow speed")
+    elif not workflow["freeflow_accepted"]:
+        missing_inputs.append("accepted free-flow speed")
     if missing_inputs:
         error = "Waiting for inputs: " + ", ".join(missing_inputs) + "."
         db().execute(
@@ -1594,8 +1966,6 @@ def create_request():
     if len(coords) != 2: return jsonify(error="Select the start and the end of the link"), 400
     if not j.get("no_junctions"): return jsonify(error="Confirm that the link has no intersections, entrances or exits"), 400
     if not sv: return jsonify(error="Choose at least one service"), 400
-    if "volumes" in sv and len(sv) > 1:
-        return jsonify(error="Traffic volumes must be requested by itself; supporting data is gathered internally."), 400
     if not hours: return jsonify(error="Choose at least one hour"), 400
     lats, lngs = [c[0] for c in coords], [c[1] for c in coords]
     try:
@@ -1796,6 +2166,7 @@ def _delete_requests(request_ids=None):
         return 0
     placeholders = ",".join("?" for _ in ids)
     d.execute(f"DELETE FROM notifications WHERE request_id IN ({placeholders})", ids)
+    d.execute(f"DELETE FROM volume_freeflow_attempts WHERE request_id IN ({placeholders})", ids)
     d.execute(f"DELETE FROM volumes_workflows WHERE request_id IN ({placeholders})", ids)
     d.execute(f"DELETE FROM request_directions_workflows WHERE request_id IN ({placeholders})", ids)
     d.execute(f"DELETE FROM requests WHERE id IN ({placeholders})", ids)
@@ -1830,12 +2201,27 @@ def admin_request(rid):
     volumes_workflow = dict(volumes_row) if volumes_row else None
     if volumes_workflow and volumes_workflow.get("result_json"):
         volumes_workflow["result"] = json.loads(volumes_workflow["result_json"])
+    if volumes_workflow and volumes_workflow.get("freeflow_result_json"):
+        volumes_workflow["freeflow_result"] = json.loads(volumes_workflow["freeflow_result_json"])
+    if volumes_workflow and volumes_workflow.get("freeflow_validation_json"):
+        volumes_workflow["freeflow_validation"] = json.loads(volumes_workflow["freeflow_validation_json"])
     if volumes_workflow and volumes_workflow.get("freeflow_job_id"):
         job_row = db().execute(
             "SELECT execution_status FROM outscraper_jobs WHERE id=?",
             (volumes_workflow["freeflow_job_id"],),
         ).fetchone()
         volumes_workflow["freeflow_job_status"] = job_row["execution_status"] if job_row else None
+    if volumes_workflow:
+        volumes_workflow["freeflow_attempts"] = []
+        for attempt_row in db().execute(
+            "SELECT job_id AS id,submitted_at,status,result_json,validation_json,error,accepted,override,accepted_at "
+            "FROM volume_freeflow_attempts WHERE request_id=? ORDER BY submitted_at DESC LIMIT 100",
+            (rid,),
+        ).fetchall():
+            attempt = dict(attempt_row)
+            attempt["result"] = json.loads(attempt.pop("result_json") or "null")
+            attempt["validation"] = json.loads(attempt.pop("validation_json") or "null")
+            volumes_workflow["freeflow_attempts"].append(attempt)
     if volumes_workflow:
         request_data = json.loads(r["data"] or "{}")
         volumes_workflow["freeflow_context"] = (
@@ -1900,6 +2286,41 @@ def _latest_previous_weekly_weekend(country_code, timezone_name, now=None):
     weekday_names = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
     return candidate, weekday_names[candidate.weekday()]
 
+def _nearest_previous_weekly_weekend(country_code, timezone_name, study_date, now=None):
+    try:
+        timezone = ZoneInfo(timezone_name)
+        study_day = dt.date.fromisoformat(study_date) if isinstance(study_date, str) else study_date
+    except (TypeError, ValueError, ZoneInfoNotFoundError) as exc:
+        raise ValueError("The study date or route time zone is not valid.") from exc
+    current = now or dt.datetime.now(dt.timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone)
+    else:
+        current = current.astimezone(timezone)
+    try:
+        calendar = holidays.country_holidays(
+            country_code,
+            years=(study_day.year - 1, study_day.year, current.year),
+            observed=True,
+            language="en",
+        )
+    except (NotImplementedError, ValueError) as exc:
+        raise ValueError(f"No weekly weekend calendar is available for country code {country_code}.") from exc
+    weekend_days = set(calendar.weekend or ())
+    if not weekend_days:
+        raise ValueError(f"No weekly weekend calendar is available for country code {country_code}.")
+    candidates = [
+        study_day + dt.timedelta(days=offset)
+        for offset in range(-7, 8)
+        if (study_day + dt.timedelta(days=offset)).weekday() in weekend_days
+        and (study_day + dt.timedelta(days=offset)) < current.date()
+    ]
+    if not candidates:
+        return _latest_previous_weekly_weekend(country_code, timezone_name, now=current)
+    selected = min(candidates, key=lambda day: (abs((day - study_day).days), day))
+    weekday_names = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+    return selected, weekday_names[selected.weekday()]
+
 def _validate_holiday_source_request(configuration):
     context = configuration.get("trafficlens_context")
     if not context:
@@ -1910,12 +2331,33 @@ def _validate_holiday_source_request(configuration):
     source = to_dict(row)
     try:
         expected_origin = ", ".join(f"{float(value):.6f}" for value in source["coords"][0])
-        expected_destination = ", ".join(f"{float(value):.6f}" for value in source["coords"][1])
+        expected_destination = ", ".join(
+            f"{float(value):.6f}" for value in (
+                source["point_c"] if context.get("volume_input") else source["coords"][1]
+            )
+        )
         study_date = dt.date.fromisoformat(source["d1"])
         if context["service"] == "freeflow_speed":
-            reference_date, reference_label = _latest_previous_weekly_weekend(
-                context["country_code"], context["timezone"]
-            )
+            if context.get("volume_input"):
+                configured_date = dt.date.fromisoformat(context.get("weekend_date", ""))
+                today = dt.datetime.now(ZoneInfo(context["timezone"])).date()
+                try:
+                    calendar = holidays.country_holidays(
+                        context["country_code"],
+                        years=(configured_date.year, today.year),
+                        observed=True,
+                        language="en",
+                    )
+                except (NotImplementedError, ValueError) as exc:
+                    raise ValueError("The route's weekly weekend calendar is unavailable.") from exc
+                if configured_date >= today or configured_date.weekday() not in set(calendar.weekend or ()):
+                    raise ValueError("Choose a weekly weekend date strictly before today.")
+                reference_date = configured_date
+                reference_label = configured_date.strftime("%A")
+            else:
+                reference_date, reference_label = _latest_previous_weekly_weekend(
+                    context["country_code"], context["timezone"]
+                )
             configured_date = context.get("weekend_date")
             configured_label = context.get("weekend_day")
         else:
@@ -1940,6 +2382,23 @@ def _validate_holiday_source_request(configuration):
     ):
         reference_name = "weekly weekend date" if context["service"] == "freeflow_speed" else "public holiday"
         raise ValueError(f"The source route, study date, {reference_name}, or region changed. Prepare a new preview.")
+    if context.get("volume_input"):
+        try:
+            timezone = ZoneInfo(context["timezone"])
+            departure = dt.datetime.fromtimestamp(configuration["departure_time"], timezone)
+            finish = dt.datetime.fromtimestamp(configuration["finish_time"], timezone)
+            if (
+                departure.date() != reference_date
+                or finish.date() != reference_date
+                or departure >= finish
+                or configuration["routes"][0].get("departure_time") != configuration["departure_time"]
+                or configuration["interval"] != context.get("interval_minutes")
+                or context.get("departure_time") != configuration["departure_time"]
+                or context.get("finish_time") != configuration["finish_time"]
+            ):
+                raise ValueError
+        except (TypeError, ValueError, OverflowError, OSError, ZoneInfoNotFoundError) as exc:
+            raise ValueError("The free-flow A→C date, time range, or interval no longer matches the reviewed request.") from exc
 
 def _route_holiday_location(coordinate):
     latitude, longitude = coordinate
@@ -2004,13 +2463,17 @@ def _outscraper_prefill_from_request(request_row, service="travel"):
     source = to_dict(request_row)
     service_requested = service in source["services"]
     service_for_volumes = service in {"travel", "freeflow_speed"} and "volumes" in source["services"]
+    volume_freeflow = service == "freeflow_speed" and "volumes" in source["services"]
     if service not in {"travel", "freeflow_time", "freeflow_speed"} or not (service_requested or service_for_volumes):
         abort(400, "This request did not include the selected Directions service.")
     if len(source["coords"]) != 2:
         abort(400, "This request does not contain valid start and end coordinates.")
     try:
         origin = ", ".join(f"{float(value):.6f}" for value in source["coords"][0])
-        destination = ", ".join(f"{float(value):.6f}" for value in source["coords"][1])
+        destination_point = source["point_c"] if volume_freeflow else source["coords"][1]
+        if volume_freeflow and not destination_point:
+            abort(400, "This request has no calculated Point C for a free-flow A→C request.")
+        destination = ", ".join(f"{float(value):.6f}" for value in destination_point)
         study_day = dt.date.fromisoformat(source["d1"])
         route = {"origin": origin, "destination": destination}
         region = "KW"
@@ -2036,12 +2499,18 @@ def _outscraper_prefill_from_request(request_row, service="travel"):
             timezone = ZoneInfo(timezone_name)
             if service == "freeflow_speed":
                 try:
-                    reference_date, reference_label = _latest_previous_weekly_weekend(
-                        country_code, timezone_name
-                    )
+                    if volume_freeflow:
+                        reference_date, reference_label = _nearest_previous_weekly_weekend(
+                            country_code, timezone_name, study_day
+                        )
+                    else:
+                        reference_date, reference_label = _latest_previous_weekly_weekend(
+                            country_code, timezone_name
+                        )
                 except ValueError as exc:
                     abort(400, str(exc))
                 departure = dt.datetime.combine(reference_date, dt.time(7), tzinfo=timezone)
+                finish = dt.datetime.combine(reference_date, dt.time(8), tzinfo=timezone)
                 reference_context = {
                     "reference_type": "weekly_weekend",
                     "weekend_date": reference_date.isoformat(),
@@ -2069,13 +2538,20 @@ def _outscraper_prefill_from_request(request_row, service="travel"):
                 "origin": origin, "destination": destination,
                 **reference_context,
             }
+            if volume_freeflow:
+                trafficlens_context.update({
+                    "volume_input": True,
+                    "road_ab_meters": float(source["road_km"]) * 1000,
+                    "finish_time": int(finish.timestamp()),
+                    "interval_minutes": 60,
+                })
     except (TypeError, ValueError, IndexError, ZoneInfoNotFoundError):
         abort(400, "This request's route, date, or selected hours cannot be used to prepare directions.")
     prefill_config = {
         "routes": [route],
-        "departure_time": int(departure.timestamp()) if service == "travel" else None,
-        "finish_time": int(finish.timestamp()) if service == "travel" else None,
-        "interval": 1 if service == "travel" else None,
+        "departure_time": int(departure.timestamp()) if service == "travel" or volume_freeflow else None,
+        "finish_time": int(finish.timestamp()) if service == "travel" or volume_freeflow else None,
+        "interval": 1 if service == "travel" else 60 if volume_freeflow else None,
         "travel_mode": "car",
         "language": "en",
         "region": region,
@@ -2106,31 +2582,40 @@ def prepare_volumes_freeflow_preview(rid):
     if "volumes" not in json.loads(source_row["services"] or "[]"):
         return jsonify(error="This request does not include Traffic volumes."), 404
     workflow = db().execute(
-        "SELECT freeflow_speed,freeflow_job_id FROM volumes_workflows WHERE request_id=?",
+        "SELECT freeflow_accepted,freeflow_job_id FROM volumes_workflows WHERE request_id=?",
         (rid,),
     ).fetchone()
     if not workflow:
         return jsonify(error="The Traffic volumes workflow is not available."), 404
-    if workflow["freeflow_speed"] is not None:
-        return jsonify(error="A free-flow speed has already been received for this request."), 409
+    if workflow["freeflow_accepted"]:
+        return jsonify(error="A free-flow speed has already been accepted for this request."), 409
+    previous_configuration = None
     if workflow["freeflow_job_id"]:
         active_job = db().execute(
-            "SELECT execution_status FROM outscraper_jobs WHERE id=?",
+            "SELECT execution_status,config_json FROM outscraper_jobs WHERE id=?",
             (workflow["freeflow_job_id"],),
         ).fetchone()
         if active_job and active_job["execution_status"] in {
             "submitting", "running", "unknown",
         }:
             return jsonify(error="A free-flow speed request is already in progress."), 409
+        if active_job:
+            previous_configuration = json.loads(active_job["config_json"])
     if not outscraper.api_key_configured():
         return jsonify(error="OUTSCRAPER_API_KEY is not configured on this server."), 503
     try:
         prepared = _outscraper_prefill_from_request(source_row, "freeflow_speed")
     except (ValueError, TypeError) as exc:
         return jsonify(error=str(exc)), 400
+    configuration = prepared["prefill_config"]
+    if (
+        previous_configuration
+        and previous_configuration.get("trafficlens_context", {}).get("volume_input")
+    ):
+        configuration = previous_configuration
     return jsonify(
         source_request=prepared["source_request"],
-        configuration=prepared["prefill_config"],
+        configuration=configuration,
     )
 
 @app.route("/admin/outscraper")
@@ -2217,13 +2702,13 @@ def outscraper_preview():
     holiday_context = config.get("trafficlens_context") or {}
     if holiday_context.get("service") == "freeflow_speed":
         volume_workflow = db().execute(
-            "SELECT freeflow_speed,freeflow_job_id FROM volumes_workflows WHERE request_id=?",
+            "SELECT freeflow_accepted,freeflow_job_id FROM volumes_workflows WHERE request_id=?",
             (holiday_context["source_request_id"],),
         ).fetchone()
         if not volume_workflow:
             return jsonify(error="The Traffic volumes workflow is not available."), 404
-        if volume_workflow["freeflow_speed"] is not None:
-            return jsonify(error="A free-flow speed has already been received for this request."), 409
+        if holiday_context.get("volume_input") and volume_workflow["freeflow_accepted"]:
+            return jsonify(error="The free-flow speed has already been accepted for this request."), 409
         if volume_workflow["freeflow_job_id"]:
             active_job = db().execute(
                 "SELECT execution_status FROM outscraper_jobs WHERE id=?",
@@ -2281,9 +2766,17 @@ def outscraper_preview():
         )
     holiday_context = config.get("trafficlens_context") or {}
     if holiday_context.get("service") == "freeflow_speed":
+        if holiday_context.get("volume_input"):
+            d.execute(
+                "INSERT INTO volume_freeflow_attempts(job_id,request_id,submitted_at,status) "
+                "VALUES(?,?,?,'awaiting_approval')",
+                (job_id, holiday_context["source_request_id"], now),
+            )
         d.execute(
-            "UPDATE volumes_workflows SET freeflow_job_id=?, status='waiting_for_inputs', error=NULL, updated_at=? "
-            "WHERE request_id=? AND status NOT IN ('ready_for_review','sent')",
+            "UPDATE volumes_workflows SET freeflow_job_id=?, freeflow_speed=NULL, "
+            "freeflow_result_json=NULL, freeflow_validation_json=NULL, freeflow_accepted=0, "
+            "freeflow_override=0, freeflow_accepted_at=NULL, status='waiting_for_inputs', "
+            "error=NULL, updated_at=? WHERE request_id=? AND freeflow_accepted=0",
             (job_id, now, holiday_context["source_request_id"]),
         )
     d.commit()
@@ -2363,6 +2856,10 @@ def approve_outscraper_job(job_id):
     d.execute(
         "UPDATE outscraper_jobs SET approval_status='approved', execution_status='submitting', approved_at=?, started_at=?, updated_at=? WHERE id=?",
         (now, now, now, job_id))
+    d.execute(
+        "UPDATE volume_freeflow_attempts SET status='submitting',error=NULL WHERE job_id=?",
+        (job_id,),
+    )
     d.execute("UPDATE outscraper_job_routes SET execution_status='queued' WHERE job_id=?", (job_id,))
     d.execute(
         "UPDATE request_directions_workflows SET status='running',error=NULL,updated_at=? WHERE job_id=?",
@@ -2469,10 +2966,21 @@ def save_volumes_lanes(rid):
         return jsonify(error="This request does not include Traffic volumes."), 404
     if workflow["status"] in {"running", "ready_for_review", "sent"}:
         return jsonify(error="Lane count cannot be changed while MATLAB is running or after a result is ready for review."), 409
+    request_row = db().execute(
+        "SELECT services,data FROM requests WHERE id=?", (rid,)
+    ).fetchone()
+    if not request_row:
+        return jsonify(error="Source request not found."), 404
+    requested_services = set(json.loads(request_row["services"] or "[]"))
+    request_data = json.loads(request_row["data"] or "{}")
+    _save_volume_lanes_service(request_data, requested_services, lanes)
+    db().execute("BEGIN IMMEDIATE")
     db().execute(
         "UPDATE volumes_workflows SET lanes=?, status='waiting_for_inputs', error=NULL, updated_at=? WHERE request_id=?",
         (lanes, _timestamp_now(), rid),
     )
+    if "lanes" in requested_services:
+        db().execute("UPDATE requests SET data=? WHERE id=?", (json.dumps(request_data, ensure_ascii=False), rid))
     db().commit()
     _start_volume_calculation(rid)
     return jsonify(ok=True)
@@ -2485,6 +2993,18 @@ def volumes_workflow_status(rid):
     ).fetchone()
     if not workflow:
         return jsonify(error="This request does not include Traffic volumes."), 404
+    actual_hours_complete = _sync_volume_actual_speeds(rid)
+    validation = json.loads(workflow["freeflow_validation_json"] or "{}")
+    if (
+        workflow["freeflow_result_json"]
+        and validation.get("missing_hours")
+        and actual_hours_complete
+    ):
+        if _evaluate_volume_freeflow(rid):
+            _start_volume_calculation(rid)
+        workflow = db().execute(
+            "SELECT * FROM volumes_workflows WHERE request_id=?", (rid,)
+        ).fetchone()
     if workflow["freeflow_speed"] is None and workflow["freeflow_job_id"]:
         completed_job = db().execute(
             "SELECT execution_status FROM outscraper_jobs WHERE id=?",
@@ -2504,6 +3024,16 @@ def volumes_workflow_status(rid):
             "SELECT execution_status FROM outscraper_jobs WHERE id=?",
             (workflow["freeflow_job_id"],),
         ).fetchone()
+    attempts = []
+    for attempt_row in db().execute(
+        "SELECT job_id AS id,submitted_at,status,result_json,validation_json,error,accepted,override,accepted_at "
+        "FROM volume_freeflow_attempts WHERE request_id=? ORDER BY submitted_at DESC LIMIT 100",
+        (rid,),
+    ).fetchall():
+        attempt = dict(attempt_row)
+        attempt["result"] = json.loads(attempt.pop("result_json") or "null")
+        attempt["validation"] = json.loads(attempt.pop("validation_json") or "null")
+        attempts.append(attempt)
     return jsonify(
         workflow={
             "status": workflow["status"],
@@ -2512,9 +3042,115 @@ def volumes_workflow_status(rid):
             "freeflow_context": (request_data.get("volumes") or {}).get("freeflow_context"),
             "freeflow_job_id": workflow["freeflow_job_id"],
             "freeflow_job_status": freeflow_job["execution_status"] if freeflow_job else None,
+            "freeflow_accepted": bool(workflow["freeflow_accepted"]),
+            "freeflow_override": bool(workflow["freeflow_override"]),
+            "freeflow_validation": json.loads(workflow["freeflow_validation_json"] or "null"),
+            "freeflow_result": json.loads(workflow["freeflow_result_json"] or "null"),
+            "freeflow_attempts": attempts,
             "error": workflow["error"],
             "result": result,
         }
+    )
+
+@app.post("/api/requests/<int:rid>/volumes/freeflow/accept")
+@admin_required
+def accept_volume_freeflow(rid):
+    payload = request.get_json(silent=True) or {}
+    use_anyway = payload.get("use_anyway") is True
+    workflow = db().execute(
+        "SELECT * FROM volumes_workflows WHERE request_id=?", (rid,)
+    ).fetchone()
+    if not workflow:
+        return jsonify(error="This request does not include Traffic volumes."), 404
+    if workflow["freeflow_accepted"]:
+        return jsonify(error="The free-flow speed has already been accepted."), 409
+    actual_hours_complete = _sync_volume_actual_speeds(rid)
+    validation = json.loads(workflow["freeflow_validation_json"] or "{}")
+    if (
+        workflow["freeflow_result_json"]
+        and validation.get("missing_hours")
+        and actual_hours_complete
+        and _evaluate_volume_freeflow(rid)
+    ):
+        started = _start_volume_calculation(rid)
+        current = db().execute(
+            "SELECT status FROM volumes_workflows WHERE request_id=?", (rid,)
+        ).fetchone()
+        return jsonify(
+            ok=True,
+            accepted=True,
+            overridden=False,
+            status=current["status"] if current else "waiting_for_inputs",
+            matlab_started=started,
+        )
+    workflow = db().execute(
+        "SELECT * FROM volumes_workflows WHERE request_id=?", (rid,)
+    ).fetchone()
+    if not workflow["freeflow_result_json"] or not workflow["freeflow_validation_json"]:
+        return jsonify(error="A complete free-flow response and comparison are required before acceptance."), 409
+    validation = json.loads(workflow["freeflow_validation_json"])
+    if validation.get("missing_hours"):
+        return jsonify(error="Actual Directions speeds are missing for selected hours. Complete and confirm every requested hour before accepting free-flow speed."), 409
+    if not validation.get("is_valid") and not use_anyway:
+        return jsonify(error="The free-flow speed is not higher than actual speed for every selected hour. Explicitly confirm Use anyway to continue."), 409
+    if use_anyway and not validation.get("mismatched_hours"):
+        return jsonify(error="Use anyway is available only when the comparison has mismatched hours."), 409
+    now = _timestamp_now()
+    source_result = json.loads(workflow["freeflow_result_json"])
+    request_row = db().execute(
+        "SELECT services,data,user_id FROM requests WHERE id=?", (rid,)
+    ).fetchone()
+    if not request_row:
+        return jsonify(error="Source request not found."), 404
+    request_data = json.loads(request_row["data"] or "{}")
+    requested_services = set(json.loads(request_row["services"] or "[]"))
+    if "freeflow_speed" in requested_services:
+        request_data["freeflow_speed"] = {
+            "rows": [{"value": source_result["selected_speed_kmh"]}],
+            "note": "Selected as the highest speed returned for the reviewed A→C weekly-weekend window; accepted with an explicit administrator override.",
+            "source": "outscraper",
+            "updated": dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "outscraper_job_id": workflow["freeflow_job_id"],
+            "reference_context": source_result.get("context"),
+        }
+        _create_notification(
+            request_row["user_id"], rid, "directions_result",
+            "Free-flow speed results are ready",
+            f"The administrator approved free-flow speed for request REQ-{rid}. Traffic volumes remain under review.",
+        )
+        db().execute(
+            "UPDATE requests SET data=?,status=CASE WHEN status NOT IN ('Rejected','Completed') "
+            "THEN 'Processing' ELSE status END WHERE id=?",
+            (json.dumps(request_data, ensure_ascii=False), rid),
+        )
+    db().execute(
+        "UPDATE volumes_workflows SET freeflow_accepted=1,freeflow_override=?,"
+        "freeflow_accepted_at=?,error=NULL,updated_at=? WHERE request_id=? AND freeflow_accepted=0",
+        (int(use_anyway), now, now, rid),
+    )
+    if db().execute("SELECT changes()").fetchone()[0] != 1:
+        db().rollback()
+        return jsonify(error="The free-flow workflow changed before acceptance. Reload and review the latest response."), 409
+    db().execute(
+        "UPDATE volume_freeflow_attempts SET status='accepted',accepted=1,override=?,"
+        "accepted_at=?,validation_json=? WHERE job_id=?",
+        (
+            int(use_anyway),
+            now,
+            json.dumps(validation, ensure_ascii=False),
+            workflow["freeflow_job_id"],
+        ),
+    )
+    db().commit()
+    started = _start_volume_calculation(rid)
+    return jsonify(
+        ok=True,
+        accepted=True,
+        overridden=use_anyway,
+        status=db().execute(
+            "SELECT status FROM volumes_workflows WHERE request_id=?", (rid,)
+        ).fetchone()["status"],
+        matlab_started=started,
     )
 
 @app.post("/api/requests/<int:rid>/volumes/run")
@@ -2573,6 +3209,9 @@ def confirm_volumes_result(rid):
     if freeflow_context:
         volume_data["freeflow_context"] = freeflow_context
     data["volumes"] = volume_data
+    requested_services = set(json.loads(row["services"] or "[]"))
+    _save_volume_lanes_service(data, requested_services, workflow["lanes"])
+    all_services_ready = _all_requested_services_ready(requested_services, data)
     now = _timestamp_now()
     d = db()
     d.execute("BEGIN IMMEDIATE")
@@ -2583,8 +3222,9 @@ def confirm_volumes_result(rid):
         d.rollback()
         return jsonify(error="The volume workflow changed before confirmation. Reload and review the current status."), 409
     d.execute(
-        "UPDATE requests SET data=?, status='Completed' WHERE id=? AND status!='Rejected'",
-        (json.dumps(data, ensure_ascii=False), rid),
+        "UPDATE requests SET data=?, status=CASE WHEN status='Rejected' THEN status "
+        "WHEN ? THEN 'Completed' ELSE 'Processing' END WHERE id=?",
+        (json.dumps(data, ensure_ascii=False), int(all_services_ready), rid),
     )
     d.execute(
         "UPDATE volumes_workflows SET status='sent', reviewed_by=?, reviewed_at=?, sent_at=?, updated_at=? "
@@ -2597,7 +3237,12 @@ def confirm_volumes_result(rid):
         f"The administrator approved the traffic volume results for request REQ-{rid}.",
     )
     d.commit()
-    return jsonify(ok=True, status="sent", result_url=url_for("result", rid=rid))
+    return jsonify(
+        ok=True,
+        status="sent",
+        request_status="Completed" if all_services_ready else "Processing",
+        result_url=url_for("result", rid=rid),
+    )
 
 @app.post("/api/requests/<int:rid>/directions/confirm")
 @admin_required
@@ -2621,7 +3266,7 @@ def confirm_request_directions(rid):
     requested_services = set(json.loads(row["services"] or "[]"))
     hourly = result["hourly"]
     data = json.loads(row["data"] or "{}")
-    if "volumes" in requested_services and not {"travel", "speed"}.intersection(requested_services):
+    if "volumes" in requested_services:
         now = _timestamp_now()
         d = db()
         d.execute("BEGIN IMMEDIATE")
@@ -2630,25 +3275,72 @@ def confirm_request_directions(rid):
             (rid, job_id),
         ).fetchone()
         volume_workflow = d.execute(
-            "SELECT status FROM volumes_workflows WHERE request_id=?", (rid,)
+            "SELECT status,lanes,freeflow_result_json,freeflow_accepted FROM volumes_workflows WHERE request_id=?", (rid,)
         ).fetchone()
-        if not current or current["status"] != "ready" or not volume_workflow or volume_workflow["status"] == "sent":
+        if not current or current["status"] != "ready" or not volume_workflow:
             d.rollback()
             return jsonify(error="The volume or Directions workflow changed before confirmation. Reload and review the current status."), 409
+        if volume_workflow["status"] not in {"running", "ready_for_review", "sent"}:
+            d.execute(
+                "UPDATE volumes_workflows SET actual_result_json=?, status='waiting_for_inputs', "
+                "error=NULL, updated_at=? WHERE request_id=?",
+                (json.dumps(result, ensure_ascii=False), now, rid),
+            )
+        updated = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+        if "travel" in requested_services:
+            data["travel"] = {
+                "rows": [{"hour": item["hour"], "value": item["travel_minutes"]} for item in hourly],
+                "note": "Automatically extracted from the A→C Scraper response at the saved A→B road distance.",
+                "source": "outscraper",
+                "updated": updated,
+                "outscraper_job_id": job_id,
+                "directions_result": result,
+            }
+        if "speed" in requested_services:
+            data["speed"] = {
+                "rows": [{"hour": item["hour"], "value": item["speed_kmh"]} for item in hourly],
+                "note": "Automatically calculated as A→B distance / time and converted to km/h.",
+                "source": "outscraper",
+                "updated": updated,
+                "outscraper_job_id": job_id,
+                "directions_result": result,
+            }
+        _save_volume_lanes_service(data, requested_services, volume_workflow["lanes"])
+        all_services_ready = _all_requested_services_ready(requested_services, data)
         d.execute(
-            "UPDATE volumes_workflows SET actual_result_json=?, status='waiting_for_inputs', error=NULL, updated_at=? WHERE request_id=?",
-            (json.dumps(result, ensure_ascii=False), now, rid),
+            "UPDATE requests SET data=?, status=CASE WHEN status='Rejected' THEN status "
+            "WHEN ? THEN 'Completed' WHEN status!='Completed' THEN 'Processing' ELSE status END WHERE id=?",
+            (json.dumps(data, ensure_ascii=False), int(all_services_ready), rid),
         )
         d.execute(
             "UPDATE request_directions_workflows SET status='confirmed', confirmed_by=?, confirmed_at=?, updated_at=? "
             "WHERE request_id=? AND job_id=? AND status='ready'",
             (session["uid"], now, now, rid, job_id),
         )
+        if {"travel", "speed"}.intersection(requested_services):
+            visible_services = [
+                SERVICES[service] for service in ("travel", "speed")
+                if service in requested_services
+            ]
+            _create_notification(
+                row["user_id"], rid, "directions_result",
+                "Request results are ready",
+                f"The administrator approved {', '.join(visible_services)} for request REQ-{rid}. Traffic volumes are still being prepared.",
+            )
         d.commit()
-        _start_volume_calculation(rid)
+        if volume_workflow["status"] != "sent":
+            if volume_workflow["freeflow_result_json"]:
+                if _evaluate_volume_freeflow(rid):
+                    _start_volume_calculation(rid)
+            elif volume_workflow["freeflow_accepted"]:
+                _start_volume_calculation(rid)
         return jsonify(
             ok=True, status="confirmed", confirmed_at=now,
-            message="Actual speed was saved for the Traffic volumes workflow; it was not sent to the client.",
+            message=(
+                "The approved directions results are available to the client; actual speeds were also saved internally for Traffic volumes."
+                if {"travel", "speed"}.intersection(requested_services)
+                else "Actual speed was saved internally for Traffic volumes; no unrequested service data was sent to the client."
+            ),
         )
     updated = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
     reuse_note = (
@@ -2675,10 +3367,7 @@ def confirm_request_directions(rid):
             "outscraper_job_id": job_id,
             "directions_result": result,
         }
-    all_services_ready = all(
-        (data.get(service) or {}).get("rows") or (data.get(service) or {}).get("note")
-        for service in requested_services
-    )
+    all_services_ready = _all_requested_services_ready(requested_services, data)
     now = _timestamp_now()
     d = db()
     d.execute("BEGIN IMMEDIATE")
@@ -2852,6 +3541,8 @@ def save_request_changes(rid):
                 values[context_key] = existing_context
                 values["outscraper_job_id"] = data[service].get("outscraper_job_id")
     data.update(clean_services)
+    if status == "Completed" and not _all_requested_services_ready(requested_services, data):
+        return jsonify(error="A request cannot be marked Completed until every selected service has a result ready for the client."), 409
     updates, params = [], []
     if clean_services:
         updates.append("data=?")
@@ -2877,7 +3568,12 @@ def save_request_changes(rid):
 @admin_required
 def set_status(rid):
     s = (request.get_json(force=True) or {}).get("status")
-    if not db().execute("SELECT 1 FROM requests WHERE id=?", (rid,)).fetchone() or s not in STATUSES: return jsonify(error="Invalid"), 400
+    row = db().execute(    "SELECT services,data,user_id FROM requests WHERE id=?", (rid,)).fetchone()
+    if not row or s not in STATUSES: return jsonify(error="Invalid"), 400
+    if s == "Completed" and not _all_requested_services_ready(
+        json.loads(row["services"] or "[]"), json.loads(row["data"] or "{}")
+    ):
+        return jsonify(error="A request cannot be marked Completed until every selected service has a result ready for the client."), 409
     db().execute("UPDATE requests SET status=? WHERE id=?", (s, rid)); db().commit()
     return jsonify(ok=True, status=s)
 

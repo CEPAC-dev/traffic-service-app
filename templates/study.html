@@ -36,13 +36,14 @@
     <div class="card">
       <h3>Services</h3>
       <div class="chk svl" id="svl">
-        {% for k,v in ACTIVE_SERVICES.items() %}<label><input type="checkbox" value="{{k}}" {{ 'checked' if (selected_service==k if selected_service else k in ('speed','travel')) }}><span><b>{{ SVINFO[k].icon }} {{v}}</b>{% if k in ('freeflow_time','freeflow_speed') %}<span class="pill"
-              style="margin-left:6px">Public holiday · 07:00</span>{% endif %}{% if k in NET_SERVICES %}<span class="pill"
+        {% for k,v in ACTIVE_SERVICES.items() %}<label><input type="checkbox" value="{{k}}" {{ 'checked' if (selected_service==k if selected_service else k in ('speed','travel')) }}><span><b>{{ SVINFO[k].icon }} {{v}}</b>{% if k=='freeflow_time' %}<span class="pill"
+              style="margin-left:6px">Public holiday · 07:00</span>{% elif k=='freeflow_speed' %}<span class="pill"
+              style="margin-left:6px">Weekly weekend</span>{% endif %}{% if k in NET_SERVICES %}<span class="pill"
               style="margin-left:6px">⚡ Instant</span>{% endif %}</span></label>{%
         endfor %}</div>
       {% if 'freeflow_time' in ACTIVE_SERVICES %}<p class="hint">Free flow time uses Directions API at 7:00 AM on the nearest public holiday to your study date in the route's country.</p>{% endif %}
-      {% if 'freeflow_speed' in ACTIVE_SERVICES %}<p class="hint">Free flow speed uses the latest weekly weekend date strictly before today in the route's country, at 7:00 AM local time. The date used will appear in the result.</p>{% endif %}
-      {% if 'volumes' in ACTIVE_SERVICES %}<p class="hint">Select Traffic volumes by itself. The administrator calculates it using lane count, actual speed, and free-flow speed from the latest previous weekly weekend date at 7:00 AM. Supporting data is handled internally; only the reviewed volume result is sent to you.</p>{% endif %}
+      {% if 'freeflow_speed' in ACTIVE_SERVICES %}<p class="hint">Free flow speed uses the nearest weekly weekend date to the study date that is before today. With Traffic volumes, the administrator reviews an editable A→C time window and the highest returned speed is used for the model.</p>{% endif %}
+      {% if 'volumes' in ACTIVE_SERVICES %}<p class="hint">Traffic volumes can be requested with other services. The administrator calculates volumes using lane count, actual speed, and a reviewed free-flow speed. Supporting inputs stay internal; only the services you selected and their approved results are shared.</p>{% endif %}
       {% if NET_SERVICES %}<p class="hint">⚡ Instant services are answered right away from our road network when your
         link is covered by it.</p>{% endif %}
       <div class="order-actions">
@@ -210,19 +211,8 @@
   document.querySelectorAll('.q').forEach(b => b.onclick = () => {
     startTime.value = b.dataset.start; endTime.value = b.dataset.end; check()
   });
-  const enforceVolumeOnly = changed => {
-    const volume = document.querySelector('#svl input[value="volumes"]');
-    if (!volume) return;
-    if (changed?.value === 'volumes' && volume.checked) {
-      document.querySelectorAll('#svl input[type="checkbox"]').forEach(input => {
-        if (input !== volume) input.checked = false;
-      });
-    } else if (changed?.checked) {
-      volume.checked = false;
-    }
-  };
   nj.onchange = check; d1.onchange = check; startTime.oninput = check; endTime.oninput = check;
-  svl.onchange = event => { enforceVolumeOnly(event.target); solve() };
+  svl.onchange = solve;
   if (repeatRequest) {
     d1.value = repeatRequest.date;
     startTime.value = repeatRequest.start_time;
@@ -230,7 +220,6 @@
     document.querySelectorAll('#svl input[type="checkbox"]').forEach(input => {
       input.checked = repeatRequest.services.includes(input.value);
     });
-    enforceVolumeOnly(document.querySelector('#svl input:checked'));
     repeatRequest.coords.forEach((coordinate, index) => {
       const marker = L.marker(coordinate, { draggable: true }).addTo(rg)
         .bindTooltip(index ? 'B' : 'A', { permanent: true, direction: 'top' });
