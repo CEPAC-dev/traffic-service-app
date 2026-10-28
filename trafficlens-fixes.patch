@@ -1,0 +1,77 @@
+diff --git a/app.py b/app.py
+index c9951c7..0aaaa9f 100644
+--- a/app.py
++++ b/app.py
+@@ -192,12 +192,20 @@ def _notify_request_owner_reply(request_id, user_id, old_reply, new_reply):
+             f"The administrator replied to request REQ-{request_id}: {new_reply}",
+         )
+ 
++def _service_ready(service, entry):
++    entry = entry or {}
++    if entry.get("rows"):
++        return True
++    if service == "volumes":
++        return False
++    # A Directions API placeholder note ("awaiting administrator review") is not a result.
++    if entry.get("source") == "outscraper":
++        return False
++    return bool(entry.get("note"))
++
+ def _all_requested_services_ready(requested_services, data):
+     return bool(requested_services) and all(
+-        bool((data.get(service) or {}).get("rows"))
+-        if service == "volumes"
+-        else bool((data.get(service) or {}).get("rows") or (data.get(service) or {}).get("note"))
+-        for service in requested_services
++        _service_ready(service, data.get(service)) for service in requested_services
+     )
+ 
+ def _save_volume_lanes_service(request_data, requested_services, lanes):
+@@ -3198,7 +3206,7 @@ def confirm_volumes_result(rid):
+     data = json.loads(row["data"] or "{}")
+     volume_data = {
+         "rows": [
+-            {"hour": item["hour"], "value": item["value"], "tolerance": item["tolerance"]}
++            {"hour": item["hour"], "value": int(math.floor(item["value"] + 0.5)), "tolerance": round(item["tolerance"], 1)}
+             for item in outputs
+         ],
+         "note": "Estimated by the MATLAB traffic model using the saved lanes, actual hourly speed, and weekly-weekend free-flow speed.",
+diff --git a/templates/result.html b/templates/result.html
+index 30c598f..46e3764 100644
+--- a/templates/result.html
++++ b/templates/result.html
+@@ -31,7 +31,7 @@ R.coords.forEach((p,i)=>L.marker(p).addTo(map).bindTooltip(i?'B':'A',{permanent:
+ if(R.point_c){L.marker(R.point_c,{icon:L.divIcon({className:'point-c-marker',html:'C',iconSize:[28,28],iconAnchor:[14,14]})}).addTo(map).bindTooltip('C · calculated',{permanent:true,direction:'top'});map.fitBounds(L.latLngBounds([...R.path,R.point_c]),{padding:[40,40]})}
+ const rowsOf=s=>(D[s]||{}).rows||[],avg=a=>a.reduce((x,y)=>x+Number(y.value),0)/a.length;
+ const kps=[],charts=[];
+-R.services.forEach(s=>{const F=FORMS[s],d=D[s]||{},rows=rowsOf(s),has=rows.length||(d.note||'').trim(),hourly=F.kind==='hourly';
++R.services.forEach(s=>{const F=FORMS[s],d=D[s]||{},rows=rowsOf(s),has=rows.length||((d.note||'').trim()&&d.source!=='outscraper'),hourly=F.kind==='hourly';
+  const numeric=rows.length>0&&rows.every(r=>Number.isFinite(Number(r.value)));
+  let main='';
+  if(rows.length&&numeric){const v=hourly?avg(rows):Number(rows[0].value),t=+v.toFixed(2);
+diff --git a/tests/test_outscraper.py b/tests/test_outscraper.py
+index c2949de..3964413 100644
+--- a/tests/test_outscraper.py
++++ b/tests/test_outscraper.py
+@@ -1772,7 +1772,11 @@ class OutscraperWorkflowTests(unittest.TestCase):
+         self.assertEqual(client_result.status_code, 200)
+         self.assertIn(b"RMSE tolerance", client_result.data)
+         self.assertIn(b"43.2", client_result.data)
+-        self.assertIn(b"812.5", client_result.data)
++        self.assertIn(b"813", client_result.data)
++        self.assertNotIn(b"812.5", client_result.data)
++        self.assertEqual(
++            [row["value"] for row in request_data["volumes"]["rows"]], [813, 790]
++        )
+         self.assertIn(b"2026-09-26", client_result.data)
+         self.assertIn(b"Saturday", client_result.data)
+         self.assertIn(b"Number of lanes", client_result.data)
+@@ -1780,7 +1784,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
+         workbook = load_workbook(BytesIO(export_response.data), data_only=True)
+         details = list(workbook["Service Details"].values)
+         self.assertIn("Tolerance", details[0])
+-        self.assertTrue(any(row[2] == 812.5 and row[3] == 43.2 and row[5] == "MATLAB" for row in details[1:]))
++        self.assertTrue(any(row[2] == 813 and row[3] == 43.2 and row[5] == "MATLAB" for row in details[1:]))
+         summary = list(workbook["Request Summary"].values)
+         self.assertTrue(any("weekly weekend used" in str(row[0]) and "Saturday · 2026-09-26" in str(row[1]) for row in summary))
+ 

@@ -31,7 +31,7 @@ R.coords.forEach((p,i)=>L.marker(p).addTo(map).bindTooltip(i?'B':'A',{permanent:
 if(R.point_c){L.marker(R.point_c,{icon:L.divIcon({className:'point-c-marker',html:'C',iconSize:[28,28],iconAnchor:[14,14]})}).addTo(map).bindTooltip('C · calculated',{permanent:true,direction:'top'});map.fitBounds(L.latLngBounds([...R.path,R.point_c]),{padding:[40,40]})}
 const rowsOf=s=>(D[s]||{}).rows||[],avg=a=>a.reduce((x,y)=>x+Number(y.value),0)/a.length;
 const kps=[],charts=[];
-R.services.forEach(s=>{const F=FORMS[s],d=D[s]||{},rows=rowsOf(s),has=rows.length||(d.note||'').trim(),hourly=F.kind==='hourly';
+R.services.forEach(s=>{const F=FORMS[s],d=D[s]||{},rows=rowsOf(s),has=rows.length||((d.note||'').trim()&&d.source!=='outscraper'),hourly=F.kind==='hourly';
  const numeric=rows.length>0&&rows.every(r=>Number.isFinite(Number(r.value)));
  let main='';
  if(rows.length&&numeric){const v=hourly?avg(rows):Number(rows[0].value),t=+v.toFixed(2);
