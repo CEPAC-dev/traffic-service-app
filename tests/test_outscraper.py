@@ -1772,7 +1772,11 @@ class OutscraperWorkflowTests(unittest.TestCase):
         self.assertEqual(client_result.status_code, 200)
         self.assertIn(b"RMSE tolerance", client_result.data)
         self.assertIn(b"43.2", client_result.data)
-        self.assertIn(b"812.5", client_result.data)
+        self.assertIn(b"813", client_result.data)
+        self.assertNotIn(b"812.5", client_result.data)
+        self.assertEqual(
+            [row["value"] for row in request_data["volumes"]["rows"]], [813, 790]
+        )
         self.assertIn(b"2026-09-26", client_result.data)
         self.assertIn(b"Saturday", client_result.data)
         self.assertIn(b"Number of lanes", client_result.data)
@@ -1780,7 +1784,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
         workbook = load_workbook(BytesIO(export_response.data), data_only=True)
         details = list(workbook["Service Details"].values)
         self.assertIn("Tolerance", details[0])
-        self.assertTrue(any(row[2] == 812.5 and row[3] == 43.2 and row[5] == "MATLAB" for row in details[1:]))
+        self.assertTrue(any(row[2] == 813 and row[3] == 43.2 and row[5] == "MATLAB" for row in details[1:]))
         summary = list(workbook["Request Summary"].values)
         self.assertTrue(any("weekly weekend used" in str(row[0]) and "Saturday · 2026-09-26" in str(row[1]) for row in summary))
 

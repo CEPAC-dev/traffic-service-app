@@ -192,12 +192,20 @@ def _notify_request_owner_reply(request_id, user_id, old_reply, new_reply):
             f"The administrator replied to request REQ-{request_id}: {new_reply}",
         )
 
+def _service_ready(service, entry):
+    entry = entry or {}
+    if entry.get("rows"):
+        return True
+    if service == "volumes":
+        return False
+    # A Directions API placeholder note ("awaiting administrator review") is not a result.
+    if entry.get("source") == "outscraper":
+        return False
+    return bool(entry.get("note"))
+
 def _all_requested_services_ready(requested_services, data):
     return bool(requested_services) and all(
-        bool((data.get(service) or {}).get("rows"))
-        if service == "volumes"
-        else bool((data.get(service) or {}).get("rows") or (data.get(service) or {}).get("note"))
-        for service in requested_services
+        _service_ready(service, data.get(service)) for service in requested_services
     )
 
 def _save_volume_lanes_service(request_data, requested_services, lanes):
@@ -3198,7 +3206,7 @@ def confirm_volumes_result(rid):
     data = json.loads(row["data"] or "{}")
     volume_data = {
         "rows": [
-            {"hour": item["hour"], "value": item["value"], "tolerance": item["tolerance"]}
+            {"hour": item["hour"], "value": int(math.floor(item["value"] + 0.5)), "tolerance": round(item["tolerance"], 1)}
             for item in outputs
         ],
         "note": "Estimated by the MATLAB traffic model using the saved lanes, actual hourly speed, and weekly-weekend free-flow speed.",
