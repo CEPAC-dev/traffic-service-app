@@ -28,7 +28,7 @@
   <div class="dashboard-request-list">
     {% for r in reqs %}
     <article class="card dashboard-request">
-      <div class="dashboard-request-main"><div><span class="eyebrow">REQ-{{r.id}}</span><h3>{{r.area}}</h3><p>{{r.d1}} · {{r.time_range_label}}</p></div><span class="b {{r.status}}">{{r.status}}</span></div>
+      <div class="dashboard-request-main"><div><span class="eyebrow">REQ-{{r.id}}{% if r.title %} · {{r.title}}{% endif %}</span><h3>{{r.area}}</h3><p>{{r.d1}} · {{r.time_range_label}}</p></div><span class="b {{r.status}}">{{r.status}}</span></div>
       <div class="dashboard-request-services">{% for s in r.services %}<span class="pill">{{SVINFO[s].icon}} {{SERVICES[s]}}</span>{% endfor %}</div>
       <div class="row-actions">
         {% if r.status=='Completed' or (r.status=='Processing' and r.progress[0]>0) %}<a class="btn" href="{{url_for('result',rid=r.id)}}">{{'View results' if r.status=='Completed' else 'View available results'}}</a>{% endif %}

@@ -42,7 +42,7 @@
   <div class="section-heading"><div><h2>Request history</h2><p>Provider API submissions are shown separately from provider billable units.</p></div></div>
   <form class="request-toolbar" method="get">
     <div class="bar"><input type="search" name="q" placeholder="Filter by origin or destination" value="{{filters.q}}"><input type="date" name="from" aria-label="From date" value="{{filters.from}}"><input type="date" name="to" aria-label="To date" value="{{filters.to}}">
-      <select name="status"><option value="">All statuses</option>{% for value in ('pending','approved','rejected','invalidated','awaiting_approval','submitting','running','completed','failed','unknown') %}<option value="{{value}}" {{ 'selected' if filters.status==value }}>{{value|replace('_',' ')|title}}</option>{% endfor %}</select><button class="btn" type="submit">Filter</button><a class="btn alt" href="{{url_for('admin_outscraper')}}">Clear</a></div>
+      <select name="status"><option value="">All statuses</option>{% for value in ('pending','approved','rejected','invalidated','awaiting_approval','submitting','running','completed','failed','unknown','abandoned') %}<option value="{{value}}" {{ 'selected' if filters.status==value }}>{{value|replace('_',' ')|title}}</option>{% endfor %}</select><button class="btn" type="submit">Filter</button><a class="btn alt" href="{{url_for('admin_outscraper')}}">Clear</a></div>
   </form>
   <div class="tw"><table><thead><tr><th>Internal ID</th><th>Created</th><th>Routes</th><th>Approval</th><th>Execution</th><th>Provider ID(s)</th><th>Results</th><th>Estimated cost / currency</th><th>Actual cost / currency</th><th></th></tr></thead><tbody>
   {% for job in jobs %}<tr>

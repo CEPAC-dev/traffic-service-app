@@ -17,7 +17,7 @@
 <div class="dashboard-section">
 <div class="section-heading"><div><h2>Recent requests</h2><p>Latest client submissions requiring attention.</p></div><a class="btn alt" href="{{url_for('admin')}}#requests">All requests</a></div>
 <div class="card table-card"><div class="tw"><table class="recent-table"><thead><tr><th>Request ID</th><th>User</th><th>Service</th><th>A</th><th>B</th><th>Status</th><th>Created at</th><th>Action</th></tr></thead><tbody>
-{% for r in reqs[:8] %}<tr><td><b>REQ-{{r.id}}</b></td><td>{{r.client}}</td><td>{% for service in r.services %}<span class="pill">{{SVINFO[service].icon}} {{SERVICES[service]}}</span>{% endfor %}</td>
+{% for r in reqs[:8] %}<tr><td><b>REQ-{{r.id}}</b>{% if r.title %}<small class="request-subtext">{{r.title}}</small>{% endif %}</td><td>{{r.client}}</td><td>{% for service in r.services %}<span class="pill">{{SVINFO[service].icon}} {{SERVICES[service]}}</span>{% endfor %}</td>
 <td class="request-data-cell">{{'%.5f, %.5f'|format(r.coords[0][0],r.coords[0][1]) if r.coords else '-'}}</td><td class="request-data-cell">{{'%.5f, %.5f'|format(r.coords[-1][0],r.coords[-1][1]) if r.coords else '-'}}</td>
 <td><span class="b {{'waiting_review' if r.waiting_for_review else r.status}}">{{r.dashboard_status}}</span></td><td>{{r.created}}</td><td><a class="btn btn-small" href="{{url_for('admin_request',rid=r.id)}}">View</a></td></tr>
 {% else %}<tr><td colspan="8"><div class="table-empty"><b>No requests yet</b><span>New client requests will appear here.</span></div></td></tr>{% endfor %}
@@ -35,7 +35,7 @@
 <button class="btn alt" id="clr" type="button">Clear filters</button>
 </div>
 <div class="card table-card"><div class="tw"><table id="rt" class="request-table"><thead><tr><th>Request ID</th><th>User</th><th>Service</th><th>A</th><th>B</th><th>Status</th><th>Created at</th><th>Action</th></tr></thead><tbody>
-{% for r in reqs %}<tr class="dr" data-status="{{r.status}}" data-review="{{'true' if r.waiting_for_review else 'false'}}" data-service="{{r.services|join(',')}}" data-created="{{r.created[:10]}}"><td><b>REQ-{{r.id}}</b></td><td>{{r.client}}</td><td>{% for service in r.services %}<span class="pill">{{SVINFO[service].icon}} {{SERVICES[service]}}</span>{% endfor %}</td>
+{% for r in reqs %}<tr class="dr" data-status="{{r.status}}" data-review="{{'true' if r.waiting_for_review else 'false'}}" data-service="{{r.services|join(',')}}" data-created="{{r.created[:10]}}"><td><b>REQ-{{r.id}}</b>{% if r.title %}<small class="request-subtext">{{r.title}}</small>{% endif %}</td><td>{{r.client}}</td><td>{% for service in r.services %}<span class="pill">{{SVINFO[service].icon}} {{SERVICES[service]}}</span>{% endfor %}</td>
 <td class="request-data-cell">{{'%.5f, %.5f'|format(r.coords[0][0],r.coords[0][1]) if r.coords else '-'}}</td><td class="request-data-cell">{{'%.5f, %.5f'|format(r.coords[-1][0],r.coords[-1][1]) if r.coords else '-'}}</td>
 <td><span class="b {{'waiting_review' if r.waiting_for_review else r.status}}">{{r.dashboard_status}}</span></td><td>{{r.created}}</td><td><div class="row-actions"><a class="btn btn-small" href="{{url_for('admin_request',rid=r.id)}}">View</a>{% if r.status not in ('Completed','Rejected') %}<button class="btn alt btn-small reject-request" data-id="{{r.id}}">Reject</button>{% endif %}<button class="btn alt delete-request" data-id="{{r.id}}">Delete</button></div></td></tr>
 {% else %}<tr class="empty-row"><td colspan="8"><div class="table-empty"><b>No requests yet</b><span>New client requests will appear here.</span></div></td></tr>{% endfor %}

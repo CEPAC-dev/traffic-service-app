@@ -1,5 +1,5 @@
 {% extends "base.html" %}{% block body %}<a href="{{ url_for('my_requests') }}" style="color:var(--blue)">My requests</a>
-<h2 class="t">REQ-{{r.id}} · {{r.area}}</h2>
+<h2 class="t">REQ-{{r.id}}{% if r.title %} · {{r.title}}{% endif %} · {{r.area}}</h2>
 <p style="color:var(--mut);margin-top:-8px">{{r.client}} · Study date: <b>{{r.d1}}</b> · Time: <b>{{r.time_range_label}}</b> · Hourly periods: <b>{{r.hours_label}}</b><br>{% for s in r.services %}<span class="pill">{{SERVICES[s]}}</span>{% endfor %}</p>
 {% if session.get('role') == 'admin' and ('travel' in r.services or 'freeflow_time' in r.services or 'freeflow_speed' in r.services) %}<div class="row-actions directions-actions">
 {% for service in ('travel','freeflow_time','freeflow_speed') %}{% if service in r.services %}<a class="btn alt" href="{{url_for('admin_request',rid=r.id) if service=='travel' else url_for('admin_outscraper',source_request_id=r.id,service=service)}}">API Directions · {{SERVICES[service]}}</a>{% endif %}{% endfor %}

@@ -44,7 +44,7 @@
   <div class="tw"><table><thead><tr><th>Route</th><th>Origin</th><th>Destination</th><th>Execution</th><th>Provider ID</th><th>Result count</th><th>Details</th></tr></thead><tbody>
     {% for route in job.routes %}<tr><td>{{route.route_index}}</td><td>{{route.origin}}</td><td>{{route.destination}}</td><td>{{route.execution_status|replace('_',' ')|title}}</td><td><code>{{route.provider_request_id or '—'}}</code></td><td>{{route.result_count}}</td><td>{% if route.result_pretty %}<details><summary>View response</summary><pre class="outscraper-json">{{route.result_pretty}}</pre></details>{% else %}No result yet{% endif %}</td></tr>{% endfor %}
   </tbody></table></div>
-  {% if job.execution_status in ('running','unknown') %}<p><button class="btn alt" id="refreshStatus" type="button">Refresh provider status</button> <span id="refreshMessage" class="msg" aria-live="polite"></span></p>{% endif %}
+  {% if job.execution_status in ('running','unknown') %}<p><button class="btn alt" id="refreshStatus" type="button">Refresh provider status</button> <button class="btn warn" id="abandonJob" type="button">Stop waiting &amp; allow re-send</button> <span id="refreshMessage" class="msg" aria-live="polite"></span></p>{% endif %}
   {% if job.execution_status=='unknown' %}<p class="tip">Submission status is uncertain. Do not submit again. This page will only check a provider request ID when one is available.</p>{% endif %}
 </section>
 {% endblock %}
@@ -87,6 +87,16 @@ async function refreshProviderStatus(){
  if(pollCount<8)pollTimer=setTimeout(refreshProviderStatus,15000);
 }
 if(refreshButton)refreshButton.onclick=refreshProviderStatus;
+const abandonButton=document.getElementById('abandonJob');
+if(abandonButton)abandonButton.onclick=async()=>{
+ if(!window.confirm('Stop waiting for this Scraper request and allow a new one?\n\nNothing is sent automatically. The provider may still bill the original request, and a new request needs its own approval.'))return;
+ abandonButton.disabled=true;
+ try{
+  const response=await fetch('/api/outscraper/{{job.id}}/abandon',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({acknowledge_possible_charge:true})}),data=await response.json();
+  if(!response.ok){refreshMessage.textContent=data.error||'Could not stop waiting.';abandonButton.disabled=false;return}
+  location.reload();
+ }catch(error){refreshMessage.textContent='Could not stop waiting. Nothing was re-sent.';abandonButton.disabled=false}
+};
 if('{{job.execution_status}}'==='running'&&{{ 'true' if job.routes|selectattr('provider_request_id')|list else 'false' }})pollTimer=setTimeout(refreshProviderStatus,15000);
 </script>
 {% endif %}
