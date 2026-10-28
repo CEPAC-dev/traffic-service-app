@@ -1,77 +1,901 @@
+diff --git a/.env.example b/.env.example
+index e7cbbf6..e0f755d 100644
+--- a/.env.example
++++ b/.env.example
+@@ -1,3 +1,5 @@
+ # Copy this file to .env and replace the placeholders locally. Never commit .env.
+ SECRET_KEY=generate-a-random-secret-for-local-use
+ OUTSCRAPER_API_KEY=your-outscraper-api-key
++# Password for the first-run admin account (admin@demo.com). If empty, a random one is printed once at first start.
++TRAFFICLENS_ADMIN_PASSWORD=
+diff --git a/README.md b/README.md
+index 1d407e0..68a9b32 100644
+--- a/README.md
++++ b/README.md
+@@ -10,7 +10,7 @@
+ 
+ Open http://127.0.0.1:5000
+ If you do not activate the virtual environment, start the app with `.\.venv\Scripts\python.exe app.py` so it uses the project's installed dependencies instead of a different system Python.
+-Default admin: admin@demo.com / admin123. Change this password before use outside a local development environment.
++On the first start (empty database) the app creates the admin account `admin@demo.com`. Its password is the value of `TRAFFICLENS_ADMIN_PASSWORD` in `.env`; if that is empty, a random password is printed once in the console. Existing databases are not changed, so replace any account that still uses an old default password.
+ Edit `.env` locally and replace both placeholders. Generate a strong `SECRET_KEY` locally (for example, run `python -c "import secrets; print(secrets.token_hex(32))"`); set `OUTSCRAPER_API_KEY` to your own key. Never paste the API key into chat or commit `.env`. Without a configured `SECRET_KEY`, the app creates an ephemeral one and existing sessions will expire when the process restarts.
+ Needs an internet connection (map tiles, place search and road routing).
+ 
+@@ -31,8 +31,11 @@ This optional procedure sends a real, potentially billable request. First config
+ ## Services (Admin > Services)
+ Enable or disable the built-in services clients can request, or add a custom service.
+ Custom services can be recorded once per road link or once per selected hour, with optional units and numeric or text values (for example, LOS grades).
+-**Free flow time** and **Free flow speed** are enabled by default. Their Directions API requests use 7:00 AM in the route's local time zone on the nearest national public holiday to the study date (ties use the earlier date). The country is identified from the route midpoint using OpenStreetMap Nominatim; holiday dates come from the `holidays` package. The selected holiday and time zone are bound to the approval and recorded in the result page, Excel report, and Directions API result export. If the country or time zone cannot be identified, the request is not prepared.
+-After the provider job completes, its raw response is retained for admin review and the client report shows the exact date used. An administrator must review and enter the numeric service value; the integration does not infer a speed or travel-time field from undocumented provider response shapes.
++**Free flow time** and **Free flow speed** are enabled by default. **Free flow time** uses Directions API at 7:00 AM in the route's local time zone on the nearest national public holiday to the study date (ties use the earlier date). **Free flow speed** uses 7:00 AM on the latest weekly weekend date before today in the route's country. The country is identified from the route midpoint using OpenStreetMap Nominatim; holiday dates come from the `holidays` package. The selected date and time zone are bound to the approval and recorded in the result page, Excel report, and Directions API result export. If the country or time zone cannot be identified, the request is not prepared.
++After the provider job completes, its raw response is retained for admin review and the client report shows the exact date used. For Free flow time the app suggests an A-to-B value (the average over the response) in the request note, but the administrator must still enter or confirm the numeric value; the request is not marked Completed until they do. The integration does not infer a speed or travel-time field from undocumented provider response shapes.
++
++## Traffic volumes: files per client
++Each request that includes Volumes gets its own folder, `instance/volume_runs/client-<client id>/REQ-<request id>/`, holding that request's MATLAB input workbook and result workbook. `Inquiries_12-10-2026.xlsx` is only a read-only template (headers); no request is ever written back to it, so no workbook mixes clients. Volumes are rounded to whole vehicles per hour and the lane count must be a whole number from 1 to 12. The admin can download a request's result workbook from the request page; the client gets a **Download Volumes workbook** link on their result page after the admin approves the volumes. Before approving, the admin sees warnings for negative, zero, or implausibly high per-lane volumes.
+ 
+ ## Road-link search and requests
+ On the study page, search road links by partial text from any network attribute. Results are paginated and can be selected directly on the map.
 diff --git a/app.py b/app.py
-index c9951c7..0aaaa9f 100644
+index 0aaaa9f..6a10bd2 100644
 --- a/app.py
 +++ b/app.py
-@@ -192,12 +192,20 @@ def _notify_request_owner_reply(request_id, user_id, old_reply, new_reply):
-             f"The administrator replied to request REQ-{request_id}: {new_reply}",
-         )
+@@ -341,8 +341,15 @@ def init():
+             )
+     _translate_legacy_notifications(c)
+     if not c.execute("SELECT 1 FROM users").fetchone():
++        admin_password = os.environ.get("TRAFFICLENS_ADMIN_PASSWORD", "").strip()
++        generated_password = not admin_password
++        if generated_password:
++            admin_password = secrets.token_urlsafe(12)
+         c.execute("INSERT INTO users(name,email,pw,role) VALUES(?,?,?,?)",
+-                  ("Admin", "admin@demo.com", generate_password_hash("admin123"), "admin"))
++                  ("Admin", "admin@demo.com", generate_password_hash(admin_password), "admin"))
++        if generated_password:
++            print(f"[TrafficLens] First-run admin created: admin@demo.com / {admin_password}  "
++                  "(shown once; set TRAFFICLENS_ADMIN_PASSWORD to choose your own)", flush=True)
+     bundled_network = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Kwait Links.zip")
+     setup_done = c.execute("SELECT 1 FROM settings WHERE key='bundled_network_setup_v2'").fetchone()
+     network_row = c.execute("SELECT value FROM settings WHERE key='network'").fetchone()
+@@ -794,6 +801,11 @@ def _persist_holiday_result_context(job_id):
+     if not saved.get("rows"):
+         saved["note"] = "Directions API response is complete and awaiting administrator review of the service value."
+         saved["source"] = "outscraper"
++        if service == "freeflow_time":
++            suggested = _suggest_freeflow_minutes(job_id, request_row["road_km"])
++            if suggested is not None:
++                saved["suggested_minutes"] = suggested
++                saved["note"] += f" Suggested A-to-B free flow time: {suggested:.2f} min (average of the holiday Directions response). Confirm or correct it."
+     reference_context = {
+         key: context[key] for key in (
+             "study_date", "country_code", "country_name", "timezone",
+@@ -874,6 +886,32 @@ def _interpolate_route_seconds(profile, target_meters):
+             return before_seconds + ratio * (seconds - before_seconds)
+     raise ValueError("The road timing profile does not contain the A-to-B distance.")
  
-+def _service_ready(service, entry):
-+    entry = entry or {}
-+    if entry.get("rows"):
-+        return True
-+    if service == "volumes":
-+        return False
-+    # A Directions API placeholder note ("awaiting administrator review") is not a result.
-+    if entry.get("source") == "outscraper":
-+        return False
-+    return bool(entry.get("note"))
++def _mean_route_minutes(response, target_meters):
++    """Average A-to-B travel time, in minutes, across every record of a Directions response."""
++    seconds = []
++    for record in _flatten_provider_records((response or {}).get("data")):
++        try:
++            value = _interpolate_route_seconds(
++                record.get("road_distance_timing(meters:seconds)"), target_meters
++            )
++        except ValueError:
++            continue
++        if value > 0:
++            seconds.append(value)
++    return sum(seconds) / len(seconds) / 60 if seconds else None
 +
- def _all_requested_services_ready(requested_services, data):
-     return bool(requested_services) and all(
--        bool((data.get(service) or {}).get("rows"))
--        if service == "volumes"
--        else bool((data.get(service) or {}).get("rows") or (data.get(service) or {}).get("note"))
--        for service in requested_services
-+        _service_ready(service, data.get(service)) for service in requested_services
-     )
++def _suggest_freeflow_minutes(job_id, road_km):
++    try:
++        target_meters = float(road_km) * 1000
++        route_row = db().execute(
++            "SELECT raw_response_json FROM outscraper_job_routes WHERE job_id=? ORDER BY route_index LIMIT 1",
++            (job_id,),
++        ).fetchone()
++        response = json.loads(route_row["raw_response_json"] or "{}") if route_row else {}
++        return _mean_route_minutes(response, target_meters) if target_meters > 0 else None
++    except (TypeError, ValueError, KeyError, sqlite3.Error):
++        return None
++
+ def _extract_request_directions_result(job_id):
+     workflow = db().execute(
+         "SELECT request_id FROM request_directions_workflows WHERE job_id=?", (job_id,)
+@@ -970,6 +1008,29 @@ def _extract_request_directions_result(job_id):
+             _evaluate_volume_freeflow(workflow["request_id"])
+         _start_volume_calculation(workflow["request_id"])
  
- def _save_volume_lanes_service(request_data, requested_services, lanes):
-@@ -3198,7 +3206,7 @@ def confirm_volumes_result(rid):
++def _volume_result_warnings(result):
++    """Plain-language checks the admin sees before approving MATLAB output."""
++    lanes = ((result.get("inputs") or {}).get("lanes")) or None
++    warnings = []
++    for item in result.get("hourly", []):
++        label = f"{int(item['hour']):02d}:00"
++        value, tolerance = item["value"], item.get("tolerance")
++        if value < 0:
++            warnings.append(f"{label}: the estimated volume is negative.")
++        elif value == 0:
++            warnings.append(f"{label}: the estimated volume is zero.")
++        elif lanes and value / lanes > MAX_VOLUME_PER_LANE:
++            warnings.append(
++                f"{label}: {value / lanes:.0f} veh/h per lane is above {MAX_VOLUME_PER_LANE}, "
++                "which is higher than a lane normally carries."
++            )
++        if tolerance is not None and value > 0 and tolerance > value:
++            warnings.append(f"{label}: the RMSE tolerance is larger than the estimated volume.")
++    return warnings
++
++MAX_VOLUME_LANES = 12
++MAX_VOLUME_PER_LANE = 2400  # veh/h/lane, above typical saturation flow
++
+ def _start_volume_calculation(request_id):
+     _sync_volume_actual_speeds(request_id)
+     workflow = db().execute(
+@@ -1002,7 +1063,7 @@ def _start_volume_calculation(request_id):
+             if isinstance(item, dict)
+         }
+         request_row = db().execute(
+-            "SELECT hours,data FROM requests WHERE id=?", (request_id,)
++            "SELECT hours,data,user_id FROM requests WHERE id=?", (request_id,)
+         ).fetchone()
+         if not request_row:
+             raise ValueError("The source request no longer exists.")
+@@ -1042,7 +1103,7 @@ def _start_volume_calculation(request_id):
+         db().commit()
+         return False
+ 
+-    existing_result = volumes_runner.find_existing_volume_result(request_id, rows)
++    existing_result = volumes_runner.find_existing_volume_result(request_id, rows, request_row["user_id"])
+     if existing_result:
+         request_data = json.loads(request_row["data"] or "{}")
+         existing_result["inputs"] = {
+@@ -1054,6 +1115,7 @@ def _start_volume_calculation(request_id):
+         ],
+         "freeflow_context": (request_data.get("volumes") or {}).get("freeflow_context"),
+         }
++        existing_result["warnings"] = _volume_result_warnings(existing_result)
+         db().execute(
+         "UPDATE volumes_workflows SET status='ready_for_review', result_json=?, "
+         "workbook_path=?, error=NULL, updated_at=? "
+@@ -1075,7 +1137,7 @@ def _start_volume_calculation(request_id):
+         _outscraper_workers.add(worker_key)
+ 
+     try:
+-        prepared_run = volumes_runner.prepare_volume_run(request_id, rows)
++        prepared_run = volumes_runner.prepare_volume_run(request_id, rows, request_row["user_id"])
+     except ValueError as exc:
+         with _outscraper_workers_lock:
+             _outscraper_workers.discard(worker_key)
+@@ -1146,6 +1208,7 @@ def _run_volume_calculation(request_id, prepared_run):
+                 ],
+                 "freeflow_context": freeflow_context,
+             }
++            result["warnings"] = _volume_result_warnings(result)
+             db().execute(
+                 "UPDATE volumes_workflows SET status='ready_for_review', result_json=?, workbook_path=?, "
+                 "error=NULL, updated_at=? WHERE request_id=? AND status='running'",
+@@ -2965,8 +3028,9 @@ def save_volumes_lanes(rid):
+         lanes = float(payload.get("lanes"))
+     except (TypeError, ValueError):
+         return jsonify(error="Enter a valid lane count."), 400
+-    if not math.isfinite(lanes) or lanes <= 0:
+-        return jsonify(error="Lane count must be greater than zero."), 400
++    if not math.isfinite(lanes) or not lanes.is_integer() or not 1 <= lanes <= MAX_VOLUME_LANES:
++        return jsonify(error=f"Lane count must be a whole number from 1 to {MAX_VOLUME_LANES}."), 400
++    lanes = int(lanes)
+     workflow = db().execute(
+         "SELECT status FROM volumes_workflows WHERE request_id=?", (rid,)
+     ).fetchone()
+@@ -3183,6 +3247,34 @@ def retry_volumes_calculation(rid):
+     status = current["status"] if current else "waiting_for_inputs"
+     return jsonify(ok=started, status=status)
+ 
++@app.get("/api/requests/<int:rid>/volumes/workbook")
++@login_required
++def download_volumes_workbook(rid):
++    """Serve this request's own MATLAB result workbook: its client after approval, or an admin."""
++    row = db().execute(
++        "SELECT r.user_id, w.status, w.workbook_path FROM requests r "
++        "JOIN volumes_workflows w ON w.request_id=r.id WHERE r.id=?",
++        (rid,),
++    ).fetchone()
++    is_admin = session.get("role") == "admin"
++    if not row or (row["user_id"] != session["uid"] and not is_admin):
++        abort(404)
++    if not is_admin and row["status"] != "sent":
++        abort(404)
++    try:
++        resolved = Path(row["workbook_path"] or "").resolve(strict=True)
++        resolved.relative_to(volumes_runner.volume_runs_root().resolve())
++    except (OSError, ValueError):
++        abort(404)
++    if not resolved.is_file() or not resolved.name.endswith("-results.xlsx"):
++        abort(404)
++    return send_file(
++        resolved,
++        as_attachment=True,
++        download_name=f"REQ-{rid}-volumes.xlsx",
++        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
++    )
++
+ @app.post("/api/requests/<int:rid>/volumes/confirm")
+ @admin_required
+ def confirm_volumes_result(rid):
+@@ -3203,6 +3295,8 @@ def confirm_volumes_result(rid):
+     requested_hours = sorted(set(json.loads(row["hours"] or "[]")))
+     if [item.get("hour") for item in outputs] != requested_hours:
+         return jsonify(error="The MATLAB result does not match the requested hours. Recalculate before sending."), 409
++    if any(item.get("value") is None or item["value"] < 0 for item in outputs):
++        return jsonify(error="The MATLAB result contains a negative volume. Check the inputs and recalculate before sending."), 409
      data = json.loads(row["data"] or "{}")
      volume_data = {
          "rows": [
--            {"hour": item["hour"], "value": item["value"], "tolerance": item["tolerance"]}
-+            {"hour": item["hour"], "value": int(math.floor(item["value"] + 0.5)), "tolerance": round(item["tolerance"], 1)}
-             for item in outputs
-         ],
-         "note": "Estimated by the MATLAB traffic model using the saved lanes, actual hourly speed, and weekly-weekend free-flow speed.",
+diff --git a/templates/admin_request.html b/templates/admin_request.html
+index 4c535e4..3c91972 100644
+--- a/templates/admin_request.html
++++ b/templates/admin_request.html
+@@ -76,7 +76,7 @@
+ <div class="svc-h"><h3>Traffic volumes · MATLAB workflow</h3><span id="volumesWorkflowBadge" class="b {{volumes_workflow.status}}">{{volumes_workflow.status|replace('_',' ')|title}}</span></div>
+ <p id="volumesWorkflowMessage" class="hint" aria-live="polite">{% if volumes_workflow.error %}{{volumes_workflow.error}}{% elif volumes_workflow.status=='ready_for_review' %}MATLAB finished. Review the hourly volumes and RMSE tolerance before sending them to the client.{% elif volumes_workflow.status=='sent' %}Approved volume results have been sent to the client.{% else %}Provide lane count, confirm actual speeds, and accept a valid free-flow speed. MATLAB starts only after all required inputs are ready.{% endif %}</p>
+ <div class="grid2">
+-<div><label for="volumeLaneCount">Number of lanes</label><input id="volumeLaneCount" type="number" min="0.01" step="any" value="{{volumes_workflow.lanes or ''}}" {% if volumes_workflow.status in ('running','ready_for_review','sent') %}disabled{% endif %}></div>
++<div><label for="volumeLaneCount">Number of lanes</label><input id="volumeLaneCount" type="number" min="1" max="12" step="1" value="{{volumes_workflow.lanes or ''}}" {% if volumes_workflow.status in ('running','ready_for_review','sent') %}disabled{% endif %}></div>
+ <div><label for="volumeFreeflowSpeed">Free-flow speed · weekly weekend reference</label><input id="volumeFreeflowSpeed" readonly value="{{'%.2f'|format(volumes_workflow.freeflow_speed) if volumes_workflow.freeflow_speed is not none else 'Waiting for API result'}}"><small id="volumeFreeflowContext" class="hint">{% if volumes_workflow.freeflow_context %}{{volumes_workflow.freeflow_context.weekend_day}} {{volumes_workflow.freeflow_context.weekend_date}} · selected local time window {{volumes_workflow.freeflow_context.timezone}}{% endif %}</small></div>
+ </div>
+ <div id="freeflowValidationPanel" class="note-box" {% if not volumes_workflow.freeflow_validation %}hidden{% endif %}>
+@@ -89,8 +89,10 @@
+ <button class="btn alt" id="retryVolumeModel" type="button" {% if volumes_workflow.status!='failed' %}hidden{% endif %}>Retry MATLAB</button>
+ <span class="msg" id="volumeWorkflowAction" aria-live="polite"></span></p>
+ {% if volumes_workflow.result %}<div class="tw"><table><thead><tr><th>Hour</th><th>Lanes</th><th>Free-flow speed (km/h)</th><th>Actual speed (km/h)</th><th>Estimated volume (veh/h)</th><th>RMSE tolerance</th></tr></thead><tbody>
+-{% for item in volumes_workflow.result.hourly %}{% set actual=volumes_workflow.result.inputs.actual_speed_by_hour[loop.index0] %}<tr><td>{{'%02d:00'|format(item.hour)}}</td><td>{{volumes_workflow.result.inputs.lanes}}</td><td>{{'%.2f'|format(volumes_workflow.result.inputs.freeflow_speed)}}</td><td>{{'%.2f'|format(actual.speed_kmh)}}</td><td>{{'%.2f'|format(item.value)}}</td><td>{{'%.2f'|format(item.tolerance)}}</td></tr>{% endfor %}
++{% for item in volumes_workflow.result.hourly %}{% set actual=volumes_workflow.result.inputs.actual_speed_by_hour[loop.index0] %}<tr><td>{{'%02d:00'|format(item.hour)}}</td><td>{{volumes_workflow.result.inputs.lanes}}</td><td>{{'%.2f'|format(volumes_workflow.result.inputs.freeflow_speed)}}</td><td>{{'%.2f'|format(actual.speed_kmh)}}</td><td>{{(item.value + 0.5)|int}}</td><td>{{'%.1f'|format(item.tolerance)}}</td></tr>{% endfor %}
+ </tbody></table></div>{% endif %}
++{% if volumes_workflow.status=='ready_for_review' and volumes_workflow.result and volumes_workflow.result.warnings %}<div class="hint" role="alert"><strong>Check before approving:</strong><ul>{% for warning in volumes_workflow.result.warnings %}<li>{{warning}}</li>{% endfor %}</ul></div>{% endif %}
++{% if volumes_workflow.status in ('ready_for_review','sent') %}<p><a class="btn alt" href="{{url_for('download_volumes_workbook',rid=r.id)}}">Download this request's volumes workbook</a></p>{% endif %}
+ {% if volumes_workflow.status=='ready_for_review' %}<p><button class="btn" id="confirmVolumesResult" type="button">Approve &amp; Send Volumes to Client</button></p>{% endif %}
+ </section>
+ {% endif %}
 diff --git a/templates/result.html b/templates/result.html
-index 30c598f..46e3764 100644
+index 46e3764..2cad264 100644
 --- a/templates/result.html
 +++ b/templates/result.html
-@@ -31,7 +31,7 @@ R.coords.forEach((p,i)=>L.marker(p).addTo(map).bindTooltip(i?'B':'A',{permanent:
- if(R.point_c){L.marker(R.point_c,{icon:L.divIcon({className:'point-c-marker',html:'C',iconSize:[28,28],iconAnchor:[14,14]})}).addTo(map).bindTooltip('C · calculated',{permanent:true,direction:'top'});map.fitBounds(L.latLngBounds([...R.path,R.point_c]),{padding:[40,40]})}
- const rowsOf=s=>(D[s]||{}).rows||[],avg=a=>a.reduce((x,y)=>x+Number(y.value),0)/a.length;
- const kps=[],charts=[];
--R.services.forEach(s=>{const F=FORMS[s],d=D[s]||{},rows=rowsOf(s),has=rows.length||(d.note||'').trim(),hourly=F.kind==='hourly';
-+R.services.forEach(s=>{const F=FORMS[s],d=D[s]||{},rows=rowsOf(s),has=rows.length||((d.note||'').trim()&&d.source!=='outscraper'),hourly=F.kind==='hourly';
+@@ -21,7 +21,7 @@
+   <div class="section-heading"><div><span class="eyebrow">FULL REPORT</span><h2>Service details</h2><p>Hourly values, source information and notes for each requested service.</p></div></div>
+   <div id="secs"></div>
+ </section>
+-<div class="result-export"><a class="btn" href="{{url_for('export_result_excel',rid=r.id)}}">Download Excel report</a></div>
++<div class="result-export"><a class="btn" href="{{url_for('export_result_excel',rid=r.id)}}">Download Excel report</a>{% if r.data and r.data.get('volumes') and r.data.volumes.get('rows') %} <a class="btn alt" href="{{url_for('download_volumes_workbook',rid=r.id)}}">Download Volumes workbook</a>{% endif %}</div>
+ {% endblock %}
+ {% block js %}<script>
+ const R={{ r|tojson }},FORMS={{ forms|tojson }},SV={{ SERVICES|tojson }},SVI={{ SVINFO|tojson }},D=R.data||{};
+@@ -34,7 +34,7 @@ const kps=[],charts=[];
+ R.services.forEach(s=>{const F=FORMS[s],d=D[s]||{},rows=rowsOf(s),has=rows.length||((d.note||'').trim()&&d.source!=='outscraper'),hourly=F.kind==='hourly';
   const numeric=rows.length>0&&rows.every(r=>Number.isFinite(Number(r.value)));
   let main='';
-  if(rows.length&&numeric){const v=hourly?avg(rows):Number(rows[0].value),t=+v.toFixed(2);
+- if(rows.length&&numeric){const v=hourly?avg(rows):Number(rows[0].value),t=+v.toFixed(2);
++ if(rows.length&&numeric){const v=hourly?avg(rows):Number(rows[0].value),t=+v.toFixed(s==='volumes'?0:2);
+   main=`<p style="margin:8px 0"><span class="big-v">${t}</span> <span style="color:var(--mut)">${esc(F.unit)}${hourly?' (average of the selected hours)':''}</span></p>`;
+   kps.push(`<div class="card kpi k${kps.length%6+1}"><i class="ic">${SVI[s].icon}</i><b>${t}</b><span>${esc(SV[s])} · ${esc(F.unit)}${hourly?' (avg)':''}</span></div>`)}
+  else if(rows.length&&!hourly){main=`<p style="margin:8px 0"><span class="big-v">${esc(rows[0].value)}</span> <span style="color:var(--mut)">${esc(F.unit)}</span></p>`}
 diff --git a/tests/test_outscraper.py b/tests/test_outscraper.py
-index c2949de..3964413 100644
+index 3964413..d1079b7 100644
 --- a/tests/test_outscraper.py
 +++ b/tests/test_outscraper.py
-@@ -1772,7 +1772,11 @@ class OutscraperWorkflowTests(unittest.TestCase):
-         self.assertEqual(client_result.status_code, 200)
-         self.assertIn(b"RMSE tolerance", client_result.data)
-         self.assertIn(b"43.2", client_result.data)
--        self.assertIn(b"812.5", client_result.data)
-+        self.assertIn(b"813", client_result.data)
-+        self.assertNotIn(b"812.5", client_result.data)
-+        self.assertEqual(
-+            [row["value"] for row in request_data["volumes"]["rows"]], [813, 790]
-+        )
-         self.assertIn(b"2026-09-26", client_result.data)
-         self.assertIn(b"Saturday", client_result.data)
-         self.assertIn(b"Number of lanes", client_result.data)
-@@ -1780,7 +1784,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
-         workbook = load_workbook(BytesIO(export_response.data), data_only=True)
-         details = list(workbook["Service Details"].values)
-         self.assertIn("Tolerance", details[0])
--        self.assertTrue(any(row[2] == 812.5 and row[3] == 43.2 and row[5] == "MATLAB" for row in details[1:]))
-+        self.assertTrue(any(row[2] == 813 and row[3] == 43.2 and row[5] == "MATLAB" for row in details[1:]))
-         summary = list(workbook["Request Summary"].values)
-         self.assertTrue(any("weekly weekend used" in str(row[0]) and "Saturday · 2026-09-26" in str(row[1]) for row in summary))
+@@ -962,7 +962,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
+                         "freeflow_speed": 30,
+                         "actual_speed": 29.0,
+                     },
+-                ])
++                ], self.client_id)
+                 result_book = Workbook()
+                 result_sheet = result_book.active
+                 result_sheet.title = "Volumes"
+@@ -991,8 +991,9 @@ class OutscraperWorkflowTests(unittest.TestCase):
  
+         self.assertEqual(detail.status_code, 200)
+         self.assertIn(b"ready_for_review", detail.data)
+-        self.assertIn(b"898.61", detail.data)
+-        self.assertIn(b"923.03", detail.data)
++        self.assertIn(b"<td>899</td>", detail.data)
++        self.assertIn(b"<td>923</td>", detail.data)
++        self.assertNotIn(b"898.61", detail.data)
+         self.assertIn(b"Approve &amp; Send Volumes to Client", detail.data)
+         with traffic.app.app_context():
+             request = traffic.db().execute(
+@@ -1054,7 +1055,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
+             )
+             traffic.db().commit()
+ 
+-            def prepare_inputs(saved_request_id, rows):
++            def prepare_inputs(saved_request_id, rows, client_id):
+                 self.assertEqual(saved_request_id, request_id)
+                 self.assertEqual(
+                     [row["hour"] for row in rows],
+@@ -1091,6 +1092,125 @@ class OutscraperWorkflowTests(unittest.TestCase):
+         thread.assert_called_once()
+         self.assertEqual(thread.call_args.kwargs["args"], (request_id, prepared_run))
+ 
++    def test_volume_lanes_must_be_a_whole_number_from_1_to_12(self):
++        request_id = self.insert_volume_request(services=["lanes", "volumes"])
++        for bad in (2.5, 0, -1, 13, "x", None):
++            response = self.client.post(f"/api/requests/{request_id}/volumes/lanes", json={"lanes": bad})
++            self.assertEqual(response.status_code, 400, bad)
++        accepted = self.client.post(f"/api/requests/{request_id}/volumes/lanes", json={"lanes": 2})
++        self.assertEqual(accepted.status_code, 200, accepted.get_json())
++        with traffic.app.app_context():
++            lanes = traffic.db().execute(
++                "SELECT lanes FROM volumes_workflows WHERE request_id=?", (request_id,)
++            ).fetchone()["lanes"]
++        self.assertEqual(lanes, 2)
++
++    def test_volume_warnings_flag_implausible_results(self):
++        result = {
++            "inputs": {"lanes": 1},
++            "hourly": [
++                {"hour": 7, "value": 900.0, "tolerance": 50.0},
++                {"hour": 8, "value": 3000.0, "tolerance": 50.0},
++                {"hour": 9, "value": -5.0, "tolerance": 1.0},
++                {"hour": 10, "value": 100.0, "tolerance": 150.0},
++                {"hour": 11, "value": 0.0, "tolerance": 0.0},
++            ],
++        }
++        warnings = traffic._volume_result_warnings(result)
++        self.assertEqual(len(warnings), 4)
++        self.assertFalse(any(text.startswith("07:00") for text in warnings))
++        for hour in ("08:00", "09:00", "10:00", "11:00"):
++            self.assertEqual(sum(text.startswith(hour) for text in warnings), 1, hour)
++
++    def test_negative_volume_cannot_be_approved(self):
++        request_id = self.insert_volume_request(services=["volumes"])
++        result = {
++            "hourly": [
++                {"hour": 7, "value": -5.0, "tolerance": 1.0},
++                {"hour": 8, "value": 790.0, "tolerance": 38.6},
++            ],
++            "inputs": {"lanes": 2, "freeflow_speed": 60.0, "actual_speed_by_hour": []},
++        }
++        with traffic.app.app_context():
++            traffic.db().execute(
++                "UPDATE volumes_workflows SET status='ready_for_review', lanes=2, freeflow_speed=60, result_json=? WHERE request_id=?",
++                (json.dumps(result), request_id),
++            )
++            traffic.db().commit()
++        response = self.client.post(f"/api/requests/{request_id}/volumes/confirm", json={})
++        self.assertEqual(response.status_code, 409)
++        self.assertIn("negative", response.get_json()["error"])
++
++    def test_directions_placeholder_note_does_not_count_as_a_finished_service(self):
++        placeholder = {"rows": [], "note": "awaiting review", "source": "outscraper"}
++        self.assertFalse(traffic._all_requested_services_ready(["freeflow_time"], {"freeflow_time": placeholder}))
++        self.assertFalse(traffic._all_requested_services_ready(["volumes"], {"volumes": {"rows": [], "note": "x"}}))
++        entered = {"rows": [{"value": 4.2}], "note": "", "source": "outscraper"}
++        self.assertTrue(traffic._all_requested_services_ready(["freeflow_time"], {"freeflow_time": entered}))
++        admin_note = {"rows": [], "note": "Closed for works"}
++        self.assertTrue(traffic._all_requested_services_ready(["capacity"], {"capacity": admin_note}))
++        self.assertFalse(traffic._all_requested_services_ready(
++            ["freeflow_time", "capacity"], {"freeflow_time": placeholder, "capacity": admin_note}
++        ))
++
++    def test_mean_route_minutes_averages_a_to_b_time_over_all_records(self):
++        key = "road_distance_timing(meters:seconds)"
++        response = {"data": [[{key: {"0": 0, "1000": 120}}, {key: {"0": 0, "1000": 180}}]]}
++        self.assertAlmostEqual(traffic._mean_route_minutes(response, 500), 1.25)
++        self.assertIsNone(traffic._mean_route_minutes({"data": []}, 500))
++        self.assertIsNone(traffic._mean_route_minutes({"data": [{key: {"0": 0, "100": 10}}]}, 500))
++
++    def test_volumes_workbook_download_is_limited_to_owner_after_approval_and_admins(self):
++        request_id = self.insert_volume_request(services=["volumes"])
++
++        def browser(user_id, role):
++            test_client = traffic.app.test_client()
++            with test_client.session_transaction() as session:
++                session.update(uid=user_id, name="Tester", role=role)
++            return test_client
++
++        with tempfile.TemporaryDirectory() as temp_dir, \
++                mock.patch.object(traffic.volumes_runner, "APP_DIR", Path(temp_dir)):
++            run_dir = traffic.volumes_runner.request_run_dir(self.client_id, request_id)
++            run_dir.mkdir(parents=True)
++            result_path = run_dir / f"REQ-{request_id}-abc-results.xlsx"
++            outside_path = Path(temp_dir) / "secret-results.xlsx"
++            for path in (result_path, outside_path):
++                book = Workbook()
++                book.active.title = "Volumes"
++                book.save(path)
++                book.close()
++
++            def set_workflow(status, path):
++                with traffic.app.app_context():
++                    traffic.db().execute(
++                        "UPDATE volumes_workflows SET status=?, workbook_path=? WHERE request_id=?",
++                        (status, str(path), request_id),
++                    )
++                    traffic.db().commit()
++
++            url = f"/api/requests/{request_id}/volumes/workbook"
++            owner = browser(self.client_id, "client")
++            with traffic.app.app_context():
++                stranger_id = traffic.db().execute(
++                    "INSERT INTO users(name,email,pw,role) VALUES('Other client',?,?,'client')",
++                    (f"other-{time.time_ns()}@example.test", traffic.generate_password_hash("x" * 10)),
++                ).lastrowid
++                traffic.db().commit()
++            stranger = browser(stranger_id, "client")
++            admin = browser(1, "admin")
++
++            set_workflow("ready_for_review", result_path)
++            self.assertEqual(owner.get(url).status_code, 404)
++            self.assertEqual(admin.get(url).status_code, 200)
++
++            set_workflow("sent", result_path)
++            self.assertEqual(owner.get(url).status_code, 200)
++            self.assertEqual(stranger.get(url).status_code, 404)
++
++            set_workflow("sent", outside_path)
++            self.assertEqual(admin.get(url).status_code, 404)
++
+     def test_startup_backfills_workflows_for_existing_volume_requests(self):
+         request_id = self.insert_volume_request()
+         with traffic.app.app_context():
+diff --git a/tests/test_volumes_runner.py b/tests/test_volumes_runner.py
+index 014956a..7db6da7 100644
+--- a/tests/test_volumes_runner.py
++++ b/tests/test_volumes_runner.py
+@@ -48,28 +48,38 @@ class VolumeRunnerTests(unittest.TestCase):
+         finally:
+             workbook.close()
+ 
++    def write_result_workbook(self, path):
++        result_book = Workbook()
++        sheet = result_book.active
++        sheet.title = "Volumes"
++        sheet.append([
++            "R", "Lanes", "FFS", "Actual Speed", "Hour",
++            "Estimated Volume", "RMSE Tolerance",
++        ])
++        sheet.append([7, 2, 40, 25.5, 8, 120.5, 6.2])
++        sheet.append([7, 2, 40, 28, 9, 140.75, 7.1])
++        result_book.save(path)
++        result_book.close()
++
+     def request_rows(self):
+         return [
+             {"hour": 8, "lanes": 2, "freeflow_speed": 40, "actual_speed": 25.5},
+             {"hour": 9, "lanes": 2, "freeflow_speed": 40, "actual_speed": 28.0},
+         ]
+ 
+-    def test_prepare_persists_hourly_rows_and_replaces_only_this_request(self):
++    def test_prepare_stages_rows_in_the_clients_own_request_folder(self):
+         self.create_workbook(rows=[
+             [7, 1, 35, 22],
+             [42, 3, 55, 40],
+-            [7, 2, 38, 21],
+         ])
++        before = self.workbook_path.read_bytes()
+ 
+-        prepared = runner.prepare_volume_run(7, self.request_rows())
++        prepared = runner.prepare_volume_run(7, self.request_rows(), 5)
+ 
+-        shared_rows = self.read_rows(self.workbook_path)
+-        self.assertEqual(shared_rows[0], ("R", "Lanes", "FFS", "Actual Speed"))
+-        self.assertEqual(shared_rows[1], (42, 3, 55, 40))
+-        self.assertEqual(shared_rows[2:], [
+-            (7, 2, 40, 25.5),
+-            (7, 2, 40, 28),
+-        ])
++        self.assertEqual(self.workbook_path.read_bytes(), before)
++        run_dir = self.run_root / "instance" / "volume_runs" / "client-5" / "REQ-7"
++        self.assertEqual(Path(prepared["input_workbook"]).parent, run_dir)
++        self.assertEqual(Path(prepared["result_workbook"]).parent, run_dir)
+         self.assertEqual(prepared["hours"], [8, 9])
+         self.assertEqual(
+             self.read_rows(prepared["input_workbook"]),
+@@ -79,39 +89,55 @@ class VolumeRunnerTests(unittest.TestCase):
+                 (7, 2, 40, 28, 9),
+             ],
+         )
+-        self.assertFalse(
+-            self.workbook_path.with_name("~$" + self.workbook_path.name).exists()
+-        )
+ 
+-    def test_excel_lock_prevents_any_write(self):
+-        before = self.workbook_path.read_bytes()
++    def test_each_clients_request_gets_a_separate_workbook(self):
++        first = runner.prepare_volume_run(7, self.request_rows(), 5)
++        other_rows = [{"hour": 10, "lanes": 3, "freeflow_speed": 60, "actual_speed": 44.0}]
++        second = runner.prepare_volume_run(8, other_rows, 6)
++
++        self.assertNotEqual(Path(first["input_workbook"]).parent, Path(second["input_workbook"]).parent)
++        self.assertEqual([row[0] for row in self.read_rows(first["input_workbook"])[1:]], [7, 7])
++        self.assertEqual(self.read_rows(second["input_workbook"])[1:], [(8, 3, 60, 44, 10)])
++        self.assertEqual(self.read_rows(self.workbook_path), [("R", "Lanes", "FFS", "Actual Speed")])
++
++    def test_saved_result_is_never_reused_across_clients(self):
++        prepared = runner.prepare_volume_run(7, self.request_rows(), 5)
++        self.write_result_workbook(prepared["result_workbook"])
++        self.assertIsNotNone(runner.find_existing_volume_result(7, self.request_rows(), 5))
++        self.assertIsNone(runner.find_existing_volume_result(7, self.request_rows(), 6))
++
++    def test_client_id_is_required(self):
++        for bad in (None, 0, -1, True, "5"):
++            with self.assertRaisesRegex(ValueError, "client ID"):
++                runner.prepare_volume_run(7, self.request_rows(), bad)
++        self.assertFalse((self.run_root / "instance" / "volume_runs").exists())
++
++    def test_template_open_in_excel_does_not_block_a_run(self):
+         lock_path = self.workbook_path.with_name("~$" + self.workbook_path.name)
+         lock_path.touch()
+         try:
+-            with self.assertRaisesRegex(RuntimeError, "open in Excel"):
+-                runner.prepare_volume_run(7, self.request_rows())
++            prepared = runner.prepare_volume_run(7, self.request_rows(), 5)
+         finally:
+             lock_path.unlink()
+-        self.assertEqual(self.workbook_path.read_bytes(), before)
+-        self.assertFalse((self.run_root / "instance" / "volume_runs").exists())
++        self.assertTrue(Path(prepared["input_workbook"]).is_file())
+ 
+     def test_missing_sheet_and_wrong_headers_are_rejected_without_mutation(self):
+         self.create_workbook(sheet_name="Other")
+         before = self.workbook_path.read_bytes()
+         with self.assertRaisesRegex(RuntimeError, "Inqueries sheet"):
+-            runner.prepare_volume_run(7, self.request_rows())
++            runner.prepare_volume_run(7, self.request_rows(), 5)
+         self.assertEqual(self.workbook_path.read_bytes(), before)
+ 
+         self.create_workbook(headers=["Lanes", "R", "FFS", "Actual Speed"])
+         before = self.workbook_path.read_bytes()
+         with self.assertRaisesRegex(RuntimeError, "must begin with columns"):
+-            runner.prepare_volume_run(7, self.request_rows())
++            runner.prepare_volume_run(7, self.request_rows(), 5)
+         self.assertEqual(self.workbook_path.read_bytes(), before)
+ 
+     def test_missing_workbook_and_invalid_values_are_rejected(self):
+         self.workbook_path.unlink()
+         with self.assertRaisesRegex(RuntimeError, "workbook is missing"):
+-            runner.prepare_volume_run(7, self.request_rows())
++            runner.prepare_volume_run(7, self.request_rows(), 5)
+         self.assertFalse((self.run_root / "instance" / "volume_runs").exists())
+ 
+         self.create_workbook(rows=[[42, 3, 55, 40]])
+@@ -119,12 +145,12 @@ class VolumeRunnerTests(unittest.TestCase):
+         invalid_rows = self.request_rows()
+         invalid_rows[0]["lanes"] = 0
+         with self.assertRaisesRegex(ValueError, "greater than zero"):
+-            runner.prepare_volume_run(7, invalid_rows)
++            runner.prepare_volume_run(7, invalid_rows, 5)
+         self.assertEqual(self.workbook_path.read_bytes(), before)
+ 
+     def test_unsorted_hour_inputs_are_staged_in_hour_order(self):
+         rows = list(reversed(self.request_rows()))
+-        prepared = runner.prepare_volume_run(7, rows)
++        prepared = runner.prepare_volume_run(7, rows, 5)
+         staged = self.read_rows(prepared["input_workbook"])
+         self.assertEqual(prepared["hours"], [8, 9])
+         self.assertEqual(staged[0][4], "Hour")
+@@ -140,16 +166,16 @@ class VolumeRunnerTests(unittest.TestCase):
+                 "freeflow_speed": precise_speed,
+                 "actual_speed": precise_speed,
+             },
+-        ])
++        ], 5)
+         self.assertEqual(prepared["hours"], [8])
+         self.assertAlmostEqual(
+-            self.read_rows(self.workbook_path)[1][2],
++            self.read_rows(prepared["input_workbook"])[1][2],
+             precise_speed,
+             places=12,
+         )
+ 
+     def test_output_without_hour_values_is_mapped_to_current_request_hours(self):
+-        prepared = runner.prepare_volume_run(7, self.request_rows())
++        prepared = runner.prepare_volume_run(7, self.request_rows(), 5)
+ 
+         def fake_matlab(*args, **kwargs):
+             result_path = Path(prepared["result_workbook"])
+@@ -173,10 +199,9 @@ class VolumeRunnerTests(unittest.TestCase):
+         self.assertEqual([item["hour"] for item in result["hourly"]], [8, 9])
+         self.assertEqual([item["value"] for item in result["hourly"]], [100, 120])
+         self.assertEqual(matlab.call_count, 1)
+-        self.assertEqual(result["shared_workbook"], str(self.workbook_path))
+ 
+     def test_matlab_failure_is_reported(self):
+-        prepared = runner.prepare_volume_run(7, self.request_rows())
++        prepared = runner.prepare_volume_run(7, self.request_rows(), 5)
+         failed_run = mock.Mock(returncode=1, stdout="", stderr="model error")
+         with mock.patch.object(runner, "_matlab_executable", return_value="matlab"), \
+                 mock.patch.object(runner.subprocess, "run", return_value=failed_run):
+@@ -184,7 +209,7 @@ class VolumeRunnerTests(unittest.TestCase):
+                 runner.run_prepared_volume_estimation(prepared)
+ 
+     def test_matching_saved_matlab_result_is_reused_without_running_matlab(self):
+-        prepared = runner.prepare_volume_run(7, self.request_rows())
++        prepared = runner.prepare_volume_run(7, self.request_rows(), 5)
+         result_book = Workbook()
+         sheet = result_book.active
+         sheet.title = "Volumes"
+@@ -198,7 +223,7 @@ class VolumeRunnerTests(unittest.TestCase):
+         result_book.close()
+ 
+         with mock.patch.object(runner.subprocess, "run") as matlab:
+-            result = runner.find_existing_volume_result(7, self.request_rows())
++            result = runner.find_existing_volume_result(7, self.request_rows(), 5)
+ 
+         self.assertIsNotNone(result)
+         self.assertTrue(result["reused_existing_result"])
+@@ -209,7 +234,7 @@ class VolumeRunnerTests(unittest.TestCase):
+         matlab.assert_not_called()
+ 
+     def test_saved_matlab_result_is_not_reused_for_different_inputs(self):
+-        prepared = runner.prepare_volume_run(7, self.request_rows())
++        prepared = runner.prepare_volume_run(7, self.request_rows(), 5)
+         result_book = Workbook()
+         sheet = result_book.active
+         sheet.title = "Volumes"
+@@ -224,7 +249,7 @@ class VolumeRunnerTests(unittest.TestCase):
+ 
+         changed_rows = self.request_rows()
+         changed_rows[0]["actual_speed"] = 26.0
+-        self.assertIsNone(runner.find_existing_volume_result(7, changed_rows))
++        self.assertIsNone(runner.find_existing_volume_result(7, changed_rows, 5))
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/volumes_runner.py b/volumes_runner.py
+index a92e0c0..ad50084 100644
+--- a/volumes_runner.py
++++ b/volumes_runner.py
+@@ -4,17 +4,11 @@ import math
+ import os
+ import shutil
+ import subprocess
+-import threading
+ import uuid
+ from pathlib import Path
+ 
+ from openpyxl import load_workbook
+ 
+-if os.name == "nt":
+-    import msvcrt
+-else:
+-    import fcntl
+-
+ 
+ APP_DIR = Path(__file__).resolve().parent
+ INPUT_TEMPLATE = APP_DIR / "Inquiries_12-10-2026.xlsx"
+@@ -22,7 +16,6 @@ MODELS_FILE = APP_DIR / "Models.mat"
+ MATLAB_FUNCTION = "Link_Volumes_12_10_2026"
+ RUN_TIMEOUT_SECONDS = 300
+ REQUIRED_COLUMNS = ("R", "Lanes", "FFS", "Actual Speed")
+-_WORKBOOK_UPDATE_GUARD = threading.Lock()
+ 
+ 
+ def _matlab_executable():
+@@ -66,6 +59,23 @@ def _finite_number(value, field):
+     return number
+ 
+ 
++def volume_runs_root():
++    return APP_DIR / "instance" / "volume_runs"
++
++
++def _positive_int(value, field):
++    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
++        raise ValueError(f"A valid {field} is required for the MATLAB input.")
++    return value
++
++
++def request_run_dir(client_id, request_id):
++    """Each client's request gets its own folder, so no workbook is shared between clients."""
++    client_id = _positive_int(client_id, "client ID")
++    request_id = _positive_int(request_id, "request ID")
++    return volume_runs_root() / f"client-{client_id}" / f"REQ-{request_id}"
++
++
+ def _normalize_rows(request_id, rows):
+     if isinstance(request_id, bool) or not isinstance(request_id, int) or request_id <= 0:
+         raise ValueError("A valid request ID is required for the MATLAB input.")
+@@ -102,45 +112,6 @@ def _verify_headers(sheet):
+         )
+ 
+ 
+-def _acquire_workbook_update_lock(lock_path):
+-    if not _WORKBOOK_UPDATE_GUARD.acquire(blocking=False):
+-        raise RuntimeError(
+-            "Another volume request is currently updating the MATLAB input workbook. Retry shortly."
+-        )
+-    handle = None
+-    try:
+-        handle = open(lock_path, "a+b")
+-        if os.name == "nt":
+-            handle.seek(0, os.SEEK_END)
+-            if handle.tell() == 0:
+-                handle.write(b"0")
+-                handle.flush()
+-            handle.seek(0)
+-            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+-        else:
+-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+-        return handle
+-    except OSError as exc:
+-        if handle:
+-            handle.close()
+-        _WORKBOOK_UPDATE_GUARD.release()
+-        raise RuntimeError(
+-            "Another volume request is currently updating the MATLAB input workbook. Retry shortly."
+-        ) from exc
+-
+-
+-def _release_workbook_update_lock(handle):
+-    try:
+-        if os.name == "nt":
+-            handle.seek(0)
+-            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+-        else:
+-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+-    finally:
+-        handle.close()
+-        _WORKBOOK_UPDATE_GUARD.release()
+-
+-
+ def _read_request_rows(workbook_path, request_id):
+     workbook = load_workbook(workbook_path, read_only=True, data_only=True)
+     try:
+@@ -243,10 +214,10 @@ def _read_result_workbook(output_path, request_id, expected_rows, expected_hours
+         result_book.close()
+ 
+ 
+-def find_existing_volume_result(request_id, rows):
++def find_existing_volume_result(request_id, rows, client_id):
+     """Return a saved result only when its input and output match this request exactly."""
+     normalized, hours = _normalize_rows(request_id, rows)
+-    run_dir = APP_DIR / "instance" / "volume_runs"
++    run_dir = request_run_dir(client_id, request_id)
+     if not run_dir.is_dir():
+         return None
+ 
+@@ -291,7 +262,6 @@ def find_existing_volume_result(request_id, rows):
+                 "hourly": outputs,
+                 "input_workbook": str(input_path),
+                 "result_workbook": str(result_path),
+-                "shared_workbook": str(INPUT_TEMPLATE),
+                 "reused_existing_result": True,
+             }
+         except (OSError, ValueError, RuntimeError):
+@@ -299,101 +269,58 @@ def find_existing_volume_result(request_id, rows):
+     return None
+ 
+ 
+-def prepare_volume_run(request_id, rows):
+-    """Persist request rows to the shared workbook and stage an isolated MATLAB input."""
++def prepare_volume_run(request_id, rows, client_id):
++    """Stage a request-specific MATLAB input workbook inside the owning client's folder.
++
++    The template workbook is only read. Nothing from any request is written back to it,
++    so rows from different clients never end up in the same file.
++    """
+     if not INPUT_TEMPLATE.is_file():
+         raise RuntimeError(f"The MATLAB input workbook is missing: {INPUT_TEMPLATE.name}")
+     if not MODELS_FILE.is_file():
+         raise RuntimeError(f"The MATLAB model data is missing: {MODELS_FILE.name}")
+     normalized, hours = _normalize_rows(request_id, rows)
++    run_dir = request_run_dir(client_id, request_id)
+ 
+-    run_dir = APP_DIR / "instance" / "volume_runs"
+     run_id = uuid.uuid4().hex
+     workbook_path = run_dir / f"REQ-{int(request_id)}-{run_id}.xlsx"
+     output_path = run_dir / f"REQ-{int(request_id)}-{run_id}-results.xlsx"
+-    excel_lock_path = INPUT_TEMPLATE.with_name(f"~${INPUT_TEMPLATE.name}")
+-    application_lock_path = INPUT_TEMPLATE.with_name(
+-        f".{INPUT_TEMPLATE.name}.trafficlens.lock"
+-    )
+-    temporary_master = INPUT_TEMPLATE.with_name(
+-        f".{INPUT_TEMPLATE.stem}-{run_id}.tmp.xlsx"
+-    )
+     temporary_run = run_dir / f".REQ-{int(request_id)}-{run_id}.tmp.xlsx"
+ 
+-    if excel_lock_path.exists():
+-        raise RuntimeError(
+-            f"The input workbook {INPUT_TEMPLATE.name} is open in Excel. "
+-            "Close it and retry; no MATLAB calculation was started."
+-        )
+-    lock_handle = _acquire_workbook_update_lock(application_lock_path)
+-
++    run_dir.mkdir(parents=True, exist_ok=True)
+     try:
+-        if excel_lock_path.exists():
+-            raise RuntimeError(
+-                f"The input workbook {INPUT_TEMPLATE.name} is open in Excel. "
+-                "Close it and retry; no MATLAB calculation was started."
+-            )
+-        run_dir.mkdir(parents=True, exist_ok=True)
+-
+-        workbook = load_workbook(INPUT_TEMPLATE)
++        template = load_workbook(INPUT_TEMPLATE)
+         try:
+-            if "Inqueries" not in workbook.sheetnames:
++            if "Inqueries" not in template.sheetnames:
+                 raise RuntimeError("The input workbook does not contain the Inqueries sheet.")
+-            sheet = workbook["Inqueries"]
+-            _verify_headers(sheet)
+-            matching_rows = [
+-                row_index
+-                for row_index in range(2, sheet.max_row + 1)
+-                if sheet.cell(row=row_index, column=1).value == request_id
+-            ]
+-            for row_index in reversed(matching_rows):
+-                sheet.delete_rows(row_index, 1)
+-            for row in normalized:
+-                sheet.append(row)
+-            workbook.save(temporary_master)
+-        finally:
+-            workbook.close()
+-
+-        shutil.copy2(temporary_master, temporary_run)
+-        run_workbook = load_workbook(temporary_run)
+-        try:
+-            run_sheet = run_workbook["Inqueries"]
++            _verify_headers(template["Inqueries"])
++            run_sheet = template["Inqueries"]
+             if run_sheet.max_row > 1:
+                 run_sheet.delete_rows(2, run_sheet.max_row - 1)
+             run_sheet.cell(row=1, column=5, value="Hour")
+             for row, hour in zip(normalized, hours):
+                 run_sheet.append((*row, hour))
+-            run_workbook.save(temporary_run)
++            template.save(temporary_run)
+         finally:
+-            run_workbook.close()
+-
+-        try:
+-            os.replace(temporary_master, INPUT_TEMPLATE)
+-        except PermissionError as exc:
+-            raise RuntimeError(
+-                f"The input workbook {INPUT_TEMPLATE.name} became locked while saving. "
+-                "No MATLAB calculation was started."
+-            ) from exc
++            template.close()
+         os.replace(temporary_run, workbook_path)
+-        saved_rows = _read_request_rows(INPUT_TEMPLATE, request_id)
++        saved_rows = _read_request_rows(workbook_path, request_id)
+         if not _rows_match_after_excel_round_trip(normalized, saved_rows):
+             raise RuntimeError(
+-                "The MATLAB input rows were written but could not be verified in the shared workbook."
++                "The MATLAB input rows were written but could not be verified in the request workbook."
+             )
+     finally:
+-        for path in (temporary_master, temporary_run):
+-            try:
+-                path.unlink()
+-            except FileNotFoundError:
+-                pass
+-        _release_workbook_update_lock(lock_handle)
++        try:
++            temporary_run.unlink()
++        except FileNotFoundError:
++            pass
+ 
+     return {
+         "request_id": request_id,
++        "client_id": client_id,
+         "hours": hours,
+         "normalized_rows": normalized,
+         "input_workbook": str(workbook_path),
+-        "shared_workbook": str(INPUT_TEMPLATE),
+         "result_workbook": str(output_path),
+     }
+ 
+@@ -442,11 +369,10 @@ def run_prepared_volume_estimation(prepared_run):
+         "hourly": outputs,
+         "input_workbook": str(workbook_path),
+         "result_workbook": str(output_path),
+-        "shared_workbook": prepared_run["shared_workbook"],
+     }
+ 
+ 
+-def run_volume_estimation(request_id, rows):
++def run_volume_estimation(request_id, rows, client_id):
+     """Persist the current request and run the model for its selected hours."""
+-    prepared_run = prepare_volume_run(request_id, rows)
++    prepared_run = prepare_volume_run(request_id, rows, client_id)
+     return run_prepared_volume_estimation(prepared_run)

@@ -76,7 +76,7 @@
 <div class="svc-h"><h3>Traffic volumes · MATLAB workflow</h3><span id="volumesWorkflowBadge" class="b {{volumes_workflow.status}}">{{volumes_workflow.status|replace('_',' ')|title}}</span></div>
 <p id="volumesWorkflowMessage" class="hint" aria-live="polite">{% if volumes_workflow.error %}{{volumes_workflow.error}}{% elif volumes_workflow.status=='ready_for_review' %}MATLAB finished. Review the hourly volumes and RMSE tolerance before sending them to the client.{% elif volumes_workflow.status=='sent' %}Approved volume results have been sent to the client.{% else %}Provide lane count, confirm actual speeds, and accept a valid free-flow speed. MATLAB starts only after all required inputs are ready.{% endif %}</p>
 <div class="grid2">
-<div><label for="volumeLaneCount">Number of lanes</label><input id="volumeLaneCount" type="number" min="0.01" step="any" value="{{volumes_workflow.lanes or ''}}" {% if volumes_workflow.status in ('running','ready_for_review','sent') %}disabled{% endif %}></div>
+<div><label for="volumeLaneCount">Number of lanes</label><input id="volumeLaneCount" type="number" min="1" max="12" step="1" value="{{volumes_workflow.lanes or ''}}" {% if volumes_workflow.status in ('running','ready_for_review','sent') %}disabled{% endif %}></div>
 <div><label for="volumeFreeflowSpeed">Free-flow speed · weekly weekend reference</label><input id="volumeFreeflowSpeed" readonly value="{{'%.2f'|format(volumes_workflow.freeflow_speed) if volumes_workflow.freeflow_speed is not none else 'Waiting for API result'}}"><small id="volumeFreeflowContext" class="hint">{% if volumes_workflow.freeflow_context %}{{volumes_workflow.freeflow_context.weekend_day}} {{volumes_workflow.freeflow_context.weekend_date}} · selected local time window {{volumes_workflow.freeflow_context.timezone}}{% endif %}</small></div>
 </div>
 <div id="freeflowValidationPanel" class="note-box" {% if not volumes_workflow.freeflow_validation %}hidden{% endif %}>
@@ -89,8 +89,10 @@
 <button class="btn alt" id="retryVolumeModel" type="button" {% if volumes_workflow.status!='failed' %}hidden{% endif %}>Retry MATLAB</button>
 <span class="msg" id="volumeWorkflowAction" aria-live="polite"></span></p>
 {% if volumes_workflow.result %}<div class="tw"><table><thead><tr><th>Hour</th><th>Lanes</th><th>Free-flow speed (km/h)</th><th>Actual speed (km/h)</th><th>Estimated volume (veh/h)</th><th>RMSE tolerance</th></tr></thead><tbody>
-{% for item in volumes_workflow.result.hourly %}{% set actual=volumes_workflow.result.inputs.actual_speed_by_hour[loop.index0] %}<tr><td>{{'%02d:00'|format(item.hour)}}</td><td>{{volumes_workflow.result.inputs.lanes}}</td><td>{{'%.2f'|format(volumes_workflow.result.inputs.freeflow_speed)}}</td><td>{{'%.2f'|format(actual.speed_kmh)}}</td><td>{{'%.2f'|format(item.value)}}</td><td>{{'%.2f'|format(item.tolerance)}}</td></tr>{% endfor %}
+{% for item in volumes_workflow.result.hourly %}{% set actual=volumes_workflow.result.inputs.actual_speed_by_hour[loop.index0] %}<tr><td>{{'%02d:00'|format(item.hour)}}</td><td>{{volumes_workflow.result.inputs.lanes}}</td><td>{{'%.2f'|format(volumes_workflow.result.inputs.freeflow_speed)}}</td><td>{{'%.2f'|format(actual.speed_kmh)}}</td><td>{{(item.value + 0.5)|int}}</td><td>{{'%.1f'|format(item.tolerance)}}</td></tr>{% endfor %}
 </tbody></table></div>{% endif %}
+{% if volumes_workflow.status=='ready_for_review' and volumes_workflow.result and volumes_workflow.result.warnings %}<div class="hint" role="alert"><strong>Check before approving:</strong><ul>{% for warning in volumes_workflow.result.warnings %}<li>{{warning}}</li>{% endfor %}</ul></div>{% endif %}
+{% if volumes_workflow.status in ('ready_for_review','sent') %}<p><a class="btn alt" href="{{url_for('download_volumes_workbook',rid=r.id)}}">Download this request's volumes workbook</a></p>{% endif %}
 {% if volumes_workflow.status=='ready_for_review' %}<p><button class="btn" id="confirmVolumesResult" type="button">Approve &amp; Send Volumes to Client</button></p>{% endif %}
 </section>
 {% endif %}

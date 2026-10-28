@@ -4,16 +4,10 @@ import math
 import os
 import shutil
 import subprocess
-import threading
 import uuid
 from pathlib import Path
 
 from openpyxl import load_workbook
-
-if os.name == "nt":
-    import msvcrt
-else:
-    import fcntl
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -22,7 +16,6 @@ MODELS_FILE = APP_DIR / "Models.mat"
 MATLAB_FUNCTION = "Link_Volumes_12_10_2026"
 RUN_TIMEOUT_SECONDS = 300
 REQUIRED_COLUMNS = ("R", "Lanes", "FFS", "Actual Speed")
-_WORKBOOK_UPDATE_GUARD = threading.Lock()
 
 
 def _matlab_executable():
@@ -66,6 +59,23 @@ def _finite_number(value, field):
     return number
 
 
+def volume_runs_root():
+    return APP_DIR / "instance" / "volume_runs"
+
+
+def _positive_int(value, field):
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"A valid {field} is required for the MATLAB input.")
+    return value
+
+
+def request_run_dir(client_id, request_id):
+    """Each client's request gets its own folder, so no workbook is shared between clients."""
+    client_id = _positive_int(client_id, "client ID")
+    request_id = _positive_int(request_id, "request ID")
+    return volume_runs_root() / f"client-{client_id}" / f"REQ-{request_id}"
+
+
 def _normalize_rows(request_id, rows):
     if isinstance(request_id, bool) or not isinstance(request_id, int) or request_id <= 0:
         raise ValueError("A valid request ID is required for the MATLAB input.")
@@ -100,45 +110,6 @@ def _verify_headers(sheet):
             "The Inqueries sheet must begin with columns R, Lanes, FFS, Actual Speed "
             "in that order."
         )
-
-
-def _acquire_workbook_update_lock(lock_path):
-    if not _WORKBOOK_UPDATE_GUARD.acquire(blocking=False):
-        raise RuntimeError(
-            "Another volume request is currently updating the MATLAB input workbook. Retry shortly."
-        )
-    handle = None
-    try:
-        handle = open(lock_path, "a+b")
-        if os.name == "nt":
-            handle.seek(0, os.SEEK_END)
-            if handle.tell() == 0:
-                handle.write(b"0")
-                handle.flush()
-            handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-        else:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return handle
-    except OSError as exc:
-        if handle:
-            handle.close()
-        _WORKBOOK_UPDATE_GUARD.release()
-        raise RuntimeError(
-            "Another volume request is currently updating the MATLAB input workbook. Retry shortly."
-        ) from exc
-
-
-def _release_workbook_update_lock(handle):
-    try:
-        if os.name == "nt":
-            handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-    finally:
-        handle.close()
-        _WORKBOOK_UPDATE_GUARD.release()
 
 
 def _read_request_rows(workbook_path, request_id):
@@ -243,10 +214,10 @@ def _read_result_workbook(output_path, request_id, expected_rows, expected_hours
         result_book.close()
 
 
-def find_existing_volume_result(request_id, rows):
+def find_existing_volume_result(request_id, rows, client_id):
     """Return a saved result only when its input and output match this request exactly."""
     normalized, hours = _normalize_rows(request_id, rows)
-    run_dir = APP_DIR / "instance" / "volume_runs"
+    run_dir = request_run_dir(client_id, request_id)
     if not run_dir.is_dir():
         return None
 
@@ -291,7 +262,6 @@ def find_existing_volume_result(request_id, rows):
                 "hourly": outputs,
                 "input_workbook": str(input_path),
                 "result_workbook": str(result_path),
-                "shared_workbook": str(INPUT_TEMPLATE),
                 "reused_existing_result": True,
             }
         except (OSError, ValueError, RuntimeError):
@@ -299,101 +269,58 @@ def find_existing_volume_result(request_id, rows):
     return None
 
 
-def prepare_volume_run(request_id, rows):
-    """Persist request rows to the shared workbook and stage an isolated MATLAB input."""
+def prepare_volume_run(request_id, rows, client_id):
+    """Stage a request-specific MATLAB input workbook inside the owning client's folder.
+
+    The template workbook is only read. Nothing from any request is written back to it,
+    so rows from different clients never end up in the same file.
+    """
     if not INPUT_TEMPLATE.is_file():
         raise RuntimeError(f"The MATLAB input workbook is missing: {INPUT_TEMPLATE.name}")
     if not MODELS_FILE.is_file():
         raise RuntimeError(f"The MATLAB model data is missing: {MODELS_FILE.name}")
     normalized, hours = _normalize_rows(request_id, rows)
+    run_dir = request_run_dir(client_id, request_id)
 
-    run_dir = APP_DIR / "instance" / "volume_runs"
     run_id = uuid.uuid4().hex
     workbook_path = run_dir / f"REQ-{int(request_id)}-{run_id}.xlsx"
     output_path = run_dir / f"REQ-{int(request_id)}-{run_id}-results.xlsx"
-    excel_lock_path = INPUT_TEMPLATE.with_name(f"~${INPUT_TEMPLATE.name}")
-    application_lock_path = INPUT_TEMPLATE.with_name(
-        f".{INPUT_TEMPLATE.name}.trafficlens.lock"
-    )
-    temporary_master = INPUT_TEMPLATE.with_name(
-        f".{INPUT_TEMPLATE.stem}-{run_id}.tmp.xlsx"
-    )
     temporary_run = run_dir / f".REQ-{int(request_id)}-{run_id}.tmp.xlsx"
 
-    if excel_lock_path.exists():
-        raise RuntimeError(
-            f"The input workbook {INPUT_TEMPLATE.name} is open in Excel. "
-            "Close it and retry; no MATLAB calculation was started."
-        )
-    lock_handle = _acquire_workbook_update_lock(application_lock_path)
-
+    run_dir.mkdir(parents=True, exist_ok=True)
     try:
-        if excel_lock_path.exists():
-            raise RuntimeError(
-                f"The input workbook {INPUT_TEMPLATE.name} is open in Excel. "
-                "Close it and retry; no MATLAB calculation was started."
-            )
-        run_dir.mkdir(parents=True, exist_ok=True)
-
-        workbook = load_workbook(INPUT_TEMPLATE)
+        template = load_workbook(INPUT_TEMPLATE)
         try:
-            if "Inqueries" not in workbook.sheetnames:
+            if "Inqueries" not in template.sheetnames:
                 raise RuntimeError("The input workbook does not contain the Inqueries sheet.")
-            sheet = workbook["Inqueries"]
-            _verify_headers(sheet)
-            matching_rows = [
-                row_index
-                for row_index in range(2, sheet.max_row + 1)
-                if sheet.cell(row=row_index, column=1).value == request_id
-            ]
-            for row_index in reversed(matching_rows):
-                sheet.delete_rows(row_index, 1)
-            for row in normalized:
-                sheet.append(row)
-            workbook.save(temporary_master)
-        finally:
-            workbook.close()
-
-        shutil.copy2(temporary_master, temporary_run)
-        run_workbook = load_workbook(temporary_run)
-        try:
-            run_sheet = run_workbook["Inqueries"]
+            _verify_headers(template["Inqueries"])
+            run_sheet = template["Inqueries"]
             if run_sheet.max_row > 1:
                 run_sheet.delete_rows(2, run_sheet.max_row - 1)
             run_sheet.cell(row=1, column=5, value="Hour")
             for row, hour in zip(normalized, hours):
                 run_sheet.append((*row, hour))
-            run_workbook.save(temporary_run)
+            template.save(temporary_run)
         finally:
-            run_workbook.close()
-
-        try:
-            os.replace(temporary_master, INPUT_TEMPLATE)
-        except PermissionError as exc:
-            raise RuntimeError(
-                f"The input workbook {INPUT_TEMPLATE.name} became locked while saving. "
-                "No MATLAB calculation was started."
-            ) from exc
+            template.close()
         os.replace(temporary_run, workbook_path)
-        saved_rows = _read_request_rows(INPUT_TEMPLATE, request_id)
+        saved_rows = _read_request_rows(workbook_path, request_id)
         if not _rows_match_after_excel_round_trip(normalized, saved_rows):
             raise RuntimeError(
-                "The MATLAB input rows were written but could not be verified in the shared workbook."
+                "The MATLAB input rows were written but could not be verified in the request workbook."
             )
     finally:
-        for path in (temporary_master, temporary_run):
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
-        _release_workbook_update_lock(lock_handle)
+        try:
+            temporary_run.unlink()
+        except FileNotFoundError:
+            pass
 
     return {
         "request_id": request_id,
+        "client_id": client_id,
         "hours": hours,
         "normalized_rows": normalized,
         "input_workbook": str(workbook_path),
-        "shared_workbook": str(INPUT_TEMPLATE),
         "result_workbook": str(output_path),
     }
 
@@ -442,11 +369,10 @@ def run_prepared_volume_estimation(prepared_run):
         "hourly": outputs,
         "input_workbook": str(workbook_path),
         "result_workbook": str(output_path),
-        "shared_workbook": prepared_run["shared_workbook"],
     }
 
 
-def run_volume_estimation(request_id, rows):
+def run_volume_estimation(request_id, rows, client_id):
     """Persist the current request and run the model for its selected hours."""
-    prepared_run = prepare_volume_run(request_id, rows)
+    prepared_run = prepare_volume_run(request_id, rows, client_id)
     return run_prepared_volume_estimation(prepared_run)

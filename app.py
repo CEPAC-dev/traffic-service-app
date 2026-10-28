@@ -341,8 +341,15 @@ def init():
             )
     _translate_legacy_notifications(c)
     if not c.execute("SELECT 1 FROM users").fetchone():
+        admin_password = os.environ.get("TRAFFICLENS_ADMIN_PASSWORD", "").strip()
+        generated_password = not admin_password
+        if generated_password:
+            admin_password = secrets.token_urlsafe(12)
         c.execute("INSERT INTO users(name,email,pw,role) VALUES(?,?,?,?)",
-                  ("Admin", "admin@demo.com", generate_password_hash("admin123"), "admin"))
+                  ("Admin", "admin@demo.com", generate_password_hash(admin_password), "admin"))
+        if generated_password:
+            print(f"[TrafficLens] First-run admin created: admin@demo.com / {admin_password}  "
+                  "(shown once; set TRAFFICLENS_ADMIN_PASSWORD to choose your own)", flush=True)
     bundled_network = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Kwait Links.zip")
     setup_done = c.execute("SELECT 1 FROM settings WHERE key='bundled_network_setup_v2'").fetchone()
     network_row = c.execute("SELECT value FROM settings WHERE key='network'").fetchone()
@@ -794,6 +801,11 @@ def _persist_holiday_result_context(job_id):
     if not saved.get("rows"):
         saved["note"] = "Directions API response is complete and awaiting administrator review of the service value."
         saved["source"] = "outscraper"
+        if service == "freeflow_time":
+            suggested = _suggest_freeflow_minutes(job_id, request_row["road_km"])
+            if suggested is not None:
+                saved["suggested_minutes"] = suggested
+                saved["note"] += f" Suggested A-to-B free flow time: {suggested:.2f} min (average of the holiday Directions response). Confirm or correct it."
     reference_context = {
         key: context[key] for key in (
             "study_date", "country_code", "country_name", "timezone",
@@ -873,6 +885,32 @@ def _interpolate_route_seconds(profile, target_meters):
             ratio = (target_meters - before_distance) / (distance - before_distance)
             return before_seconds + ratio * (seconds - before_seconds)
     raise ValueError("The road timing profile does not contain the A-to-B distance.")
+
+def _mean_route_minutes(response, target_meters):
+    """Average A-to-B travel time, in minutes, across every record of a Directions response."""
+    seconds = []
+    for record in _flatten_provider_records((response or {}).get("data")):
+        try:
+            value = _interpolate_route_seconds(
+                record.get("road_distance_timing(meters:seconds)"), target_meters
+            )
+        except ValueError:
+            continue
+        if value > 0:
+            seconds.append(value)
+    return sum(seconds) / len(seconds) / 60 if seconds else None
+
+def _suggest_freeflow_minutes(job_id, road_km):
+    try:
+        target_meters = float(road_km) * 1000
+        route_row = db().execute(
+            "SELECT raw_response_json FROM outscraper_job_routes WHERE job_id=? ORDER BY route_index LIMIT 1",
+            (job_id,),
+        ).fetchone()
+        response = json.loads(route_row["raw_response_json"] or "{}") if route_row else {}
+        return _mean_route_minutes(response, target_meters) if target_meters > 0 else None
+    except (TypeError, ValueError, KeyError, sqlite3.Error):
+        return None
 
 def _extract_request_directions_result(job_id):
     workflow = db().execute(
@@ -970,6 +1008,29 @@ def _extract_request_directions_result(job_id):
             _evaluate_volume_freeflow(workflow["request_id"])
         _start_volume_calculation(workflow["request_id"])
 
+def _volume_result_warnings(result):
+    """Plain-language checks the admin sees before approving MATLAB output."""
+    lanes = ((result.get("inputs") or {}).get("lanes")) or None
+    warnings = []
+    for item in result.get("hourly", []):
+        label = f"{int(item['hour']):02d}:00"
+        value, tolerance = item["value"], item.get("tolerance")
+        if value < 0:
+            warnings.append(f"{label}: the estimated volume is negative.")
+        elif value == 0:
+            warnings.append(f"{label}: the estimated volume is zero.")
+        elif lanes and value / lanes > MAX_VOLUME_PER_LANE:
+            warnings.append(
+                f"{label}: {value / lanes:.0f} veh/h per lane is above {MAX_VOLUME_PER_LANE}, "
+                "which is higher than a lane normally carries."
+            )
+        if tolerance is not None and value > 0 and tolerance > value:
+            warnings.append(f"{label}: the RMSE tolerance is larger than the estimated volume.")
+    return warnings
+
+MAX_VOLUME_LANES = 12
+MAX_VOLUME_PER_LANE = 2400  # veh/h/lane, above typical saturation flow
+
 def _start_volume_calculation(request_id):
     _sync_volume_actual_speeds(request_id)
     workflow = db().execute(
@@ -1002,7 +1063,7 @@ def _start_volume_calculation(request_id):
             if isinstance(item, dict)
         }
         request_row = db().execute(
-            "SELECT hours,data FROM requests WHERE id=?", (request_id,)
+            "SELECT hours,data,user_id FROM requests WHERE id=?", (request_id,)
         ).fetchone()
         if not request_row:
             raise ValueError("The source request no longer exists.")
@@ -1042,7 +1103,7 @@ def _start_volume_calculation(request_id):
         db().commit()
         return False
 
-    existing_result = volumes_runner.find_existing_volume_result(request_id, rows)
+    existing_result = volumes_runner.find_existing_volume_result(request_id, rows, request_row["user_id"])
     if existing_result:
         request_data = json.loads(request_row["data"] or "{}")
         existing_result["inputs"] = {
@@ -1054,6 +1115,7 @@ def _start_volume_calculation(request_id):
         ],
         "freeflow_context": (request_data.get("volumes") or {}).get("freeflow_context"),
         }
+        existing_result["warnings"] = _volume_result_warnings(existing_result)
         db().execute(
         "UPDATE volumes_workflows SET status='ready_for_review', result_json=?, "
         "workbook_path=?, error=NULL, updated_at=? "
@@ -1075,7 +1137,7 @@ def _start_volume_calculation(request_id):
         _outscraper_workers.add(worker_key)
 
     try:
-        prepared_run = volumes_runner.prepare_volume_run(request_id, rows)
+        prepared_run = volumes_runner.prepare_volume_run(request_id, rows, request_row["user_id"])
     except ValueError as exc:
         with _outscraper_workers_lock:
             _outscraper_workers.discard(worker_key)
@@ -1146,6 +1208,7 @@ def _run_volume_calculation(request_id, prepared_run):
                 ],
                 "freeflow_context": freeflow_context,
             }
+            result["warnings"] = _volume_result_warnings(result)
             db().execute(
                 "UPDATE volumes_workflows SET status='ready_for_review', result_json=?, workbook_path=?, "
                 "error=NULL, updated_at=? WHERE request_id=? AND status='running'",
@@ -2965,8 +3028,9 @@ def save_volumes_lanes(rid):
         lanes = float(payload.get("lanes"))
     except (TypeError, ValueError):
         return jsonify(error="Enter a valid lane count."), 400
-    if not math.isfinite(lanes) or lanes <= 0:
-        return jsonify(error="Lane count must be greater than zero."), 400
+    if not math.isfinite(lanes) or not lanes.is_integer() or not 1 <= lanes <= MAX_VOLUME_LANES:
+        return jsonify(error=f"Lane count must be a whole number from 1 to {MAX_VOLUME_LANES}."), 400
+    lanes = int(lanes)
     workflow = db().execute(
         "SELECT status FROM volumes_workflows WHERE request_id=?", (rid,)
     ).fetchone()
@@ -3183,6 +3247,34 @@ def retry_volumes_calculation(rid):
     status = current["status"] if current else "waiting_for_inputs"
     return jsonify(ok=started, status=status)
 
+@app.get("/api/requests/<int:rid>/volumes/workbook")
+@login_required
+def download_volumes_workbook(rid):
+    """Serve this request's own MATLAB result workbook: its client after approval, or an admin."""
+    row = db().execute(
+        "SELECT r.user_id, w.status, w.workbook_path FROM requests r "
+        "JOIN volumes_workflows w ON w.request_id=r.id WHERE r.id=?",
+        (rid,),
+    ).fetchone()
+    is_admin = session.get("role") == "admin"
+    if not row or (row["user_id"] != session["uid"] and not is_admin):
+        abort(404)
+    if not is_admin and row["status"] != "sent":
+        abort(404)
+    try:
+        resolved = Path(row["workbook_path"] or "").resolve(strict=True)
+        resolved.relative_to(volumes_runner.volume_runs_root().resolve())
+    except (OSError, ValueError):
+        abort(404)
+    if not resolved.is_file() or not resolved.name.endswith("-results.xlsx"):
+        abort(404)
+    return send_file(
+        resolved,
+        as_attachment=True,
+        download_name=f"REQ-{rid}-volumes.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
 @app.post("/api/requests/<int:rid>/volumes/confirm")
 @admin_required
 def confirm_volumes_result(rid):
@@ -3203,6 +3295,8 @@ def confirm_volumes_result(rid):
     requested_hours = sorted(set(json.loads(row["hours"] or "[]")))
     if [item.get("hour") for item in outputs] != requested_hours:
         return jsonify(error="The MATLAB result does not match the requested hours. Recalculate before sending."), 409
+    if any(item.get("value") is None or item["value"] < 0 for item in outputs):
+        return jsonify(error="The MATLAB result contains a negative volume. Check the inputs and recalculate before sending."), 409
     data = json.loads(row["data"] or "{}")
     volume_data = {
         "rows": [
