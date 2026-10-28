@@ -1,6 +1,6 @@
 {% extends "base.html" %}{% block body %}
 <div class="page-heading">
-  <div><a class="detail-back-link" href="{{url_for('admin')}}#requests-all">← All requests</a><span class="eyebrow">REQUEST REVIEW</span><h1>REQ-{{r.id}}</h1><p>{{r.created}} · <span class="b {{r.status}}">{{r.status}}</span></p></div>
+  <div><a class="detail-back-link" href="{{url_for('admin')}}#requests-all">← All requests</a><span class="eyebrow">REQUEST REVIEW</span><h1>REQ-{{r.id}}{% if r.title %} · {{r.title}}{% endif %}</h1><p>{{r.created}} · <span class="b {{r.status}}">{{r.status}}</span></p></div>
   <a class="btn alt" href="{{url_for('admin')}}#requests-all">Back to requests</a>
 </div>
 <div class="request-detail-grid admin-detail-grid">
@@ -39,7 +39,7 @@
 {% if 'travel' in r.services or 'speed' in r.services or 'volumes' in r.services %}{% if r.point_c %}
 <section class="card" id="requestDirectionsWorkflow" data-job-id="{{directions_workflow.job_id if directions_workflow else ''}}" data-workflow-status="{{directions_workflow.status if directions_workflow else ''}}" data-status-url="{{url_for('request_directions_status',rid=r.id)}}" style="margin:14px 0">
 <div class="svc-h"><h3>API Directions result workflow</h3><span id="directionsWorkflowBadge" class="b {{directions_workflow.status if directions_workflow else 'Pending'}}">{{directions_workflow.status|replace('_',' ')|title if directions_workflow else 'Not sent'}}</span></div>
-<p id="directionsWorkflowMessage" class="hint">{% if directions_workflow and directions_workflow.error %}{{directions_workflow.error}}{% elif directions_workflow and directions_workflow.status=='ready' and volumes_workflow and volumes_workflow.status=='sent' and ('speed' in r.services or 'travel' in r.services) %}Traffic volumes have already been sent. Review and confirm these Directions results to send the selected Speed/Travel services; this will not rerun MATLAB.{% elif directions_workflow and directions_workflow.status=='ready' %}Response processed and ready for administrator review.{% elif directions_workflow and directions_workflow.status=='confirmed' %}Results were confirmed by administrator {{directions_workflow.confirmed_by}} at {{directions_workflow.confirmed_at}}.{% elif directions_workflow %}Waiting for the linked Scraper response. This page checks the same request automatically.{% else %}No Directions request has been sent for this client request.{% endif %}</p>
+<p id="directionsWorkflowMessage" class="hint">{% if directions_workflow and directions_workflow.error %}{{directions_workflow.error}}{% elif directions_workflow and directions_workflow.status=='ready' and volumes_workflow and volumes_workflow.status=='sent' and ('speed' in r.services or 'travel' in r.services) %}Traffic volumes have already been sent. Review and confirm these Directions results to send the selected Speed/Travel services; this will not rerun MATLAB.{% elif directions_workflow and directions_workflow.status=='ready' and 'volumes' in r.services and (not volumes_workflow or volumes_workflow.status!='sent') %}{% if 'speed' in r.services or 'travel' in r.services %}Speed / Travel results are ready. They are sent together with Traffic volumes when you approve in the Traffic volumes panel below.{% else %}Actual speed is ready for MATLAB. Nothing needs to be confirmed here.{% endif %}{% elif directions_workflow and directions_workflow.status=='ready' %}Response processed and ready for administrator review.{% elif directions_workflow and directions_workflow.status=='confirmed' %}Results were confirmed by administrator {{directions_workflow.confirmed_by}} at {{directions_workflow.confirmed_at}}.{% elif directions_workflow %}Waiting for the linked Scraper response. This page checks the same request automatically.{% else %}No Directions request has been sent for this client request.{% endif %}</p>
 <div id="directionsResultReview" {% if not directions_workflow or directions_workflow.status not in ('ready','confirmed') %}hidden{% endif %}>
 {% if directions_workflow and directions_workflow.result %}
 <div class="tw"><table><tbody>
@@ -51,7 +51,8 @@
 <details><summary>Hourly results used for client report</summary><div class="tw"><table><thead><tr><th>Hour</th><th>Distance (m)</th><th>Time (s)</th><th>Speed (km/h)</th><th>Basis</th></tr></thead><tbody>{% for item in directions_workflow.result.hourly %}<tr><td>{{'%02d:00'|format(item.hour)}}</td><td>{{'%.1f'|format(item.distance_m)}}</td><td>{{'%.2f'|format(item.time_seconds)}}</td><td>{{'%.2f'|format(item.speed_kmh)}}</td><td>{{'Reused available result' if item.reused_observation else 'Returned for this hour'}}</td></tr>{% endfor %}</tbody></table></div></details>
 {% endif %}
 <div class="row-actions" style="margin-top:12px"><a class="btn alt" id="viewDirectionsScraper" href="{{url_for('outscraper_job_detail',job_id=directions_workflow.job_id) if directions_workflow else '#'}}" {% if not directions_workflow %}hidden{% endif %}>View Data Scraper</a>
-<button class="btn" id="confirmDirectionsResults" type="button" {% if not directions_workflow or directions_workflow.status!='ready' %}hidden{% endif %}>{% if 'volumes' in r.services and volumes_workflow and volumes_workflow.status=='sent' and ('speed' in r.services or 'travel' in r.services) %}Confirm &amp; Send Speed / Travel to Client{% elif 'volumes' in r.services and 'speed' not in r.services and 'travel' not in r.services %}Save Actual Speed for MATLAB{% else %}Confirm &amp; Send Results{% endif %}</button></div>
+<button class="btn warn" id="abandonDirectionsJob" type="button" hidden title="Use this when the Scraper will not return data. Nothing is re-sent automatically.">Stop waiting &amp; allow re-send</button>
+<button class="btn" id="confirmDirectionsResults" type="button" {% if not directions_workflow or directions_workflow.status!='ready' or ('volumes' in r.services and (not volumes_workflow or volumes_workflow.status!='sent')) %}hidden{% endif %}>{% if 'volumes' in r.services and volumes_workflow and volumes_workflow.status=='sent' and ('speed' in r.services or 'travel' in r.services) %}Confirm &amp; Send Speed / Travel to Client{% elif 'volumes' in r.services and 'speed' not in r.services and 'travel' not in r.services %}Save Actual Speed for MATLAB{% else %}Confirm &amp; Send Results{% endif %}</button></div>
 </div>
 </section>
 <dialog id="directionsReviewDialog" class="directions-review-dialog">
@@ -74,7 +75,7 @@
 {% if 'volumes' in r.services and volumes_workflow %}
 <section class="card" id="volumesWorkflow" data-status-url="{{url_for('volumes_workflow_status',rid=r.id)}}" data-rendered-status="{{volumes_workflow.status}}" style="margin:14px 0">
 <div class="svc-h"><h3>Traffic volumes · MATLAB workflow</h3><span id="volumesWorkflowBadge" class="b {{volumes_workflow.status}}">{{volumes_workflow.status|replace('_',' ')|title}}</span></div>
-<p id="volumesWorkflowMessage" class="hint" aria-live="polite">{% if volumes_workflow.error %}{{volumes_workflow.error}}{% elif volumes_workflow.status=='ready_for_review' %}MATLAB finished. Review the hourly volumes and RMSE tolerance before sending them to the client.{% elif volumes_workflow.status=='sent' %}Approved volume results have been sent to the client.{% else %}Provide lane count, confirm actual speeds, and accept a valid free-flow speed. MATLAB starts only after all required inputs are ready.{% endif %}</p>
+<p id="volumesWorkflowMessage" class="hint" aria-live="polite">{% if volumes_workflow.error %}{{volumes_workflow.error}}{% elif volumes_workflow.status=='ready_for_review' %}MATLAB finished. Review the hourly volumes and RMSE tolerance before sending them to the client.{% if 'speed' in r.services or 'travel' in r.services %} Speed / Travel results are sent in the same step.{% endif %}{% elif volumes_workflow.status=='sent' %}Approved volume results have been sent to the client.{% else %}Provide lane count, confirm actual speeds, and accept a valid free-flow speed. MATLAB starts only after all required inputs are ready.{% endif %}</p>
 <div class="grid2">
 <div><label for="volumeLaneCount">Number of lanes</label><input id="volumeLaneCount" type="number" min="1" max="12" step="1" value="{{volumes_workflow.lanes or ''}}" {% if volumes_workflow.status in ('running','ready_for_review','sent') %}disabled{% endif %}></div>
 <div><label for="volumeFreeflowSpeed">Free-flow speed · weekly weekend reference</label><input id="volumeFreeflowSpeed" readonly value="{{'%.2f'|format(volumes_workflow.freeflow_speed) if volumes_workflow.freeflow_speed is not none else 'Waiting for API result'}}"><small id="volumeFreeflowContext" class="hint">{% if volumes_workflow.freeflow_context %}{{volumes_workflow.freeflow_context.weekend_day}} {{volumes_workflow.freeflow_context.weekend_date}} · selected local time window {{volumes_workflow.freeflow_context.timezone}}{% endif %}</small></div>
@@ -82,7 +83,7 @@
 <div id="freeflowValidationPanel" class="note-box" {% if not volumes_workflow.freeflow_validation %}hidden{% endif %}>
 <b id="freeflowValidationMessage">{% if volumes_workflow.freeflow_validation %}{% if volumes_workflow.freeflow_validation.is_valid %}Free-flow speed is higher than actual speed for every requested hour.{% else %}{{volumes_workflow.error or 'Review the hourly comparison below.'}}{% endif %}{% endif %}</b>
 <div id="freeflowComparisonTable" class="tw" {% if not volumes_workflow.freeflow_validation %}hidden{% endif %}><table><thead><tr><th>Hour</th><th>Actual speed</th><th>Free-flow speed</th><th>Check</th></tr></thead><tbody>{% if volumes_workflow.freeflow_validation %}{% for item in volumes_workflow.freeflow_validation.rows %}<tr><td>{{'%02d:00'|format(item.hour)}}</td><td>{{'%.2f'|format(item.actual_speed_kmh) if item.actual_speed_kmh is not none else 'Waiting for Directions'}}</td><td>{{'%.2f'|format(item.freeflow_speed_kmh)}}</td><td>{{'✓' if item.valid else '✗'}}</td></tr>{% endfor %}{% endif %}</tbody></table></div>
-<div class="row-actions"><span class="pill" id="freeflowAcceptedBadge" {% if not volumes_workflow.freeflow_accepted %}hidden{% endif %}>Free-flow accepted{% if volumes_workflow.freeflow_override %} · Used anyway{% endif %}</span><button class="btn" id="useFreeflowAnyway" type="button" {% if not volumes_workflow.freeflow_validation or volumes_workflow.freeflow_validation.missing_hours or not volumes_workflow.freeflow_validation.mismatched_hours %}hidden{% endif %}>Use anyway</button><button class="btn alt" id="resendFreeflowSpeed" type="button" {% if volumes_workflow.freeflow_accepted or volumes_workflow.freeflow_job_status in ('submitting','running','unknown') or not volumes_workflow.freeflow_job_id or volumes_workflow.freeflow_speed is none %}hidden{% endif %}>Re-send</button></div>
+<div class="row-actions"><span class="pill" id="freeflowAcceptedBadge" {% if not volumes_workflow.freeflow_accepted %}hidden{% endif %}>Free-flow accepted{% if volumes_workflow.freeflow_override %} · Used anyway{% endif %}</span><button class="btn" id="useFreeflowAnyway" type="button" {% if not volumes_workflow.freeflow_validation or volumes_workflow.freeflow_validation.missing_hours or not volumes_workflow.freeflow_validation.mismatched_hours %}hidden{% endif %}>Use anyway</button><button class="btn alt" id="resendFreeflowSpeed" type="button" {% if volumes_workflow.freeflow_accepted or volumes_workflow.freeflow_job_status in ('submitting','running','unknown') or not volumes_workflow.freeflow_job_id or volumes_workflow.freeflow_speed is none %}hidden{% endif %}>Re-send</button><button class="btn warn" id="abandonFreeflowJob" type="button" data-job-id="{{volumes_workflow.freeflow_job_id or ''}}" {% if volumes_workflow.freeflow_accepted or volumes_workflow.freeflow_job_status not in ('running','unknown') %}hidden{% endif %} title="Use this when the Scraper will not return data. Nothing is re-sent automatically.">Stop waiting &amp; allow re-send</button></div>
 </div>
 <details id="freeflowAttempts"><summary>Free-flow request attempts (cost is unknown)</summary><div id="freeflowAttemptList" class="sent-api-requests"></div></details>
 <p><button class="btn alt" id="saveVolumeLanes" type="button" {% if volumes_workflow.status in ('running','ready_for_review','sent') %}hidden{% endif %}>Save lanes &amp; run MATLAB when ready</button>
@@ -93,7 +94,7 @@
 </tbody></table></div>{% endif %}
 {% if volumes_workflow.status=='ready_for_review' and volumes_workflow.result and volumes_workflow.result.warnings %}<div class="hint" role="alert"><strong>Check before approving:</strong><ul>{% for warning in volumes_workflow.result.warnings %}<li>{{warning}}</li>{% endfor %}</ul></div>{% endif %}
 {% if volumes_workflow.status in ('ready_for_review','sent') %}<p><a class="btn alt" href="{{url_for('download_volumes_workbook',rid=r.id)}}">Download this request's volumes workbook</a></p>{% endif %}
-{% if volumes_workflow.status=='ready_for_review' %}<p><button class="btn" id="confirmVolumesResult" type="button">Approve &amp; Send Volumes to Client</button></p>{% endif %}
+{% if volumes_workflow.status=='ready_for_review' %}<p><button class="btn" id="confirmVolumesResult" type="button">{% if 'speed' in r.services or 'travel' in r.services %}Approve &amp; Send All to Client{% else %}Approve &amp; Send Volumes to Client{% endif %}</button></p>{% endif %}
 </section>
 {% endif %}
 <div class="coordinate-readout request-coordinates" aria-label="Request coordinates">
@@ -122,6 +123,16 @@ const map=L.map('rmap');tiles(map);const pg=L.polyline(REQ.path,{color:'#0D9488'
 REQ.coords.forEach((p,i)=>L.marker(p).addTo(map).bindTooltip(i?'B':'A',{permanent:true,direction:'top'}));
 if(REQ.point_c){L.marker(REQ.point_c,{icon:L.divIcon({className:'point-c-marker',html:'C',iconSize:[28,28],iconAnchor:[14,14]})}).addTo(map).bindTooltip('C · calculated',{permanent:true,direction:'top'});map.fitBounds(L.latLngBounds([...REQ.path,REQ.point_c]),{padding:[40,40]})}else map.fitBounds(pg.getBounds(),{padding:[40,40]});
 const post=(u,b)=>fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(r=>r.json());
+const abandonJob=async(jobId,messageEl)=>{
+ if(!jobId)return;
+ if(!window.confirm('Stop waiting for this Scraper request and allow a new one?\n\nNothing is sent automatically. The provider may still bill the original request, and a new request needs its own approval.'))return;
+ try{
+  const response=await fetch(`/api/outscraper/${encodeURIComponent(jobId)}/abandon`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({acknowledge_possible_charge:true})});
+  const data=await response.json();
+  if(!response.ok)throw new Error(data.error||'Could not stop waiting for this request.');
+  window.location.reload();
+ }catch(error){if(messageEl)messageEl.textContent=error.message||'Could not stop waiting for this request.'}
+};
 const showPointC=document.getElementById('showPointC');
 const ok=el=>{el.textContent='Saved';setTimeout(()=>el.textContent='',2500)};
 rerun.onclick=async()=>{const r=await post(`/api/requests/${REQ.id}/network`,{});alert(r.error||(r.filled.length?`Filled from the network: ${r.filled.map(s=>SV[s]).join(', ')}`:`The network has no new data for this link (coverage ${Math.round(r.coverage*100)}%).`));location.reload()};
@@ -220,7 +231,7 @@ if(directionsDialog){
    if(!workflowResponse.ok)throw new Error(workflowData.error||'Could not check the existing Directions request.');
    const activeWorkflow=workflowData.workflow;
    if(activeWorkflow&&!['failed','rejected','invalidated'].includes(activeWorkflow.status)){
-    detectedLocation.textContent=`A Scraper request is already linked to this client request (${activeWorkflow.status.replaceAll('_',' ')}). Use View Data Scraper or review the current result below; no duplicate request was sent.`;
+    detectedLocation.textContent=`A Scraper request is already linked to this client request (${activeWorkflow.status.replaceAll('_',' ')}). Use View Data Scraper or review the current result below; no duplicate request was sent.${['running','unknown'].includes(activeWorkflow.job_status)?' If the Scraper will not return data, close this window and press "Stop waiting & allow re-send".':''}`;
     return;
    }
    const response=await fetch(`/api/requests/${REQ.id}/directions/location`,{cache:'no-store'}),data=await response.json();
@@ -241,11 +252,13 @@ if(directionsDialog){
   workflowBadge.className=`b ${workflow.status}`;
   if(workflowTimer&&['ready','confirmed','failed','rejected','invalidated'].includes(workflow.status)){window.clearInterval(workflowTimer);workflowTimer=null}
   workflowMessage.textContent=workflow.error||(
-   workflow.status==='ready'?(VOLUMES_ALREADY_SENT&&HAS_CLIENT_DIRECTIONS?'Traffic volumes have already been sent. Confirm below to automatically send the saved Speed / Travel results; MATLAB will not run again.':'Scraper response processed. Review the extracted A → B results below.'):
+   workflow.status==='ready'?(REQ.services.includes('volumes')&&!VOLUMES_ALREADY_SENT?(HAS_CLIENT_DIRECTIONS?'Speed / Travel results are ready. They are sent together with Traffic volumes when you approve in the Traffic volumes panel below.':'Actual speed is ready for MATLAB. Nothing needs to be confirmed here.'):VOLUMES_ALREADY_SENT&&HAS_CLIENT_DIRECTIONS?'Traffic volumes have already been sent. Confirm below to automatically send the saved Speed / Travel results; MATLAB will not run again.':'Scraper response processed. Review the extracted A → B results below.'):
    workflow.status==='confirmed'?(volumeOnly?`Actual speed was saved for MATLAB at ${workflow.confirmed_at}; it was not sent to the client.`:`Results were confirmed and sent at ${workflow.confirmed_at}.`):
    `Scraper status: ${workflow.job_status||workflow.status}. Waiting for a complete response.`
   );
   viewScraper.href=workflow.view_url;viewScraper.hidden=false;
+  const abandonDirections=document.getElementById('abandonDirectionsJob');
+  if(abandonDirections){abandonDirections.dataset.jobId=workflow.job_id;abandonDirections.hidden=!['running','unknown'].includes(workflow.job_status)||['ready','confirmed'].includes(workflow.status)}
   if(workflow.result){
    const result=workflow.result;
    review.hidden=false;
@@ -257,7 +270,7 @@ if(directionsDialog){
     ${result.hourly.map(item=>`<tr><td>${pad(item.hour)}:00</td><td>${Number(item.distance_m).toFixed(1)}</td><td>${Number(item.time_seconds).toFixed(2)}</td><td>${Number(item.speed_kmh).toFixed(2)}</td><td>${item.reused_observation?'Reused available result':'Returned for this hour'}</td></tr>`).join('')}
     </tbody></table></div></details>`;
   }
-  confirmButton.hidden=workflow.status!=='ready';
+  confirmButton.hidden=workflow.status!=='ready'||(REQ.services.includes('volumes')&&document.getElementById('volumesWorkflow')?.dataset.renderedStatus!=='sent');
   confirmButton.dataset.jobId=workflow.job_id;
  };
  let lastProviderRefresh=0,workflowPollBusy=false,workflowTimer=null;
@@ -275,7 +288,8 @@ if(directionsDialog){
   }catch(error){workflowMessage.textContent=error.message||'Could not check Scraper status.'}
   finally{workflowPollBusy=false}
  };
- if(workflowPanel.dataset.jobId)workflowTimer=window.setInterval(pollWorkflow,5000);
+ if(workflowPanel.dataset.jobId){workflowTimer=window.setInterval(pollWorkflow,5000);pollWorkflow()}
+ document.getElementById('abandonDirectionsJob')?.addEventListener('click',event=>abandonJob(event.currentTarget.dataset.jobId||workflowPanel.dataset.jobId,workflowMessage));
  sendButton.onclick=async()=>{
   if(!costAck.checked)return;
   if(!routeLocation){sendMessage.textContent='Detect the route country before sending.';sendButton.disabled=false;return}
@@ -387,6 +401,11 @@ if(directionsDialog){
     }
     if(useAnywayButton)useAnywayButton.hidden=state.freeflow_accepted||!!state.freeflow_validation?.missing_hours?.length||!state.freeflow_validation?.mismatched_hours?.length;
     if(resendButton)resendButton.hidden=state.freeflow_accepted||freeflowActive||!state.freeflow_job_id||!hasFreeflowSpeed;
+    const abandonFreeflow=document.getElementById('abandonFreeflowJob');
+    if(abandonFreeflow){
+     abandonFreeflow.dataset.jobId=state.freeflow_job_id||'';
+     abandonFreeflow.hidden=state.freeflow_accepted||!['running','unknown'].includes(state.freeflow_job_status);
+    }
     if(attemptList){
      attemptList.innerHTML=(state.freeflow_attempts||[]).map(attempt=>
       `<div class="sent-api-request"><a href="/admin/outscraper/${encodeURIComponent(attempt.id)}">${esc(attempt.submitted_at)} · ${esc(attempt.status)}</a><p class="hint">${attempt.result?`Selected free-flow speed: ${Number(attempt.result.selected_speed_kmh).toFixed(2)} km/h`:'No usable result recorded.'}${attempt.validation?` · ${attempt.validation.is_valid?'Passed validation':attempt.validation.mismatched_hours?.length?`Needs re-send at ${attempt.validation.mismatched_hours.join(', ')}`:'Waiting for actual speed'}`:''}${attempt.accepted?` · Accepted${attempt.override?' with Use anyway':''}`:''}</p>${attempt.error?`<p class="hint">${esc(attempt.error)}</p>`:''}</div>`
@@ -566,6 +585,7 @@ if(directionsDialog){
   };
   document.getElementById('openFreeflowSpeedDialog')?.addEventListener('click',openFreeflowDialog);
   document.getElementById('resendFreeflowSpeed')?.addEventListener('click',openFreeflowDialog);
+  document.getElementById('abandonFreeflowJob')?.addEventListener('click',event=>abandonJob(event.currentTarget.dataset.jobId,document.getElementById('volumeWorkflowAction')));
   costAck.addEventListener('change',()=>{confirmButton.disabled=!costAck.checked||!activePreview});
   confirmButton.addEventListener('click',async()=>{
    if(!activePreview||!costAck.checked)return;

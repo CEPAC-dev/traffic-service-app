@@ -22,6 +22,7 @@
         exits.</label>
     </div>
     <div class="card">
+      <h3>Request name</h3><label for="reqTitle">Name (optional)</label><input type="text" id="reqTitle" maxlength="80" placeholder="e.g. Gulf Road – morning peak" autocomplete="off">
       <h3>Date and time</h3><label>Date (one day only)</label><input type="date" id="d1">
       <label for="startTime">Start time (hour:minute:second)</label><input type="time" id="startTime" step="1">
       <label for="endTime">End time (hour:minute:second)</label><input type="time" id="endTime" step="1">
@@ -245,7 +246,8 @@
       coords: [fmt(pts[0].getLatLng()), fmt(pts[1].getLatLng())], path: route.path, road_km: route.km, junctions: route.junctions, no_junctions: nj.checked,
       point_c: route.pointC ? fmt({lat:route.pointC[0],lng:route.pointC[1]}) : null,
       point_c_distance_km: route.routeDistanceToC ? route.routeDistanceToC / 1000 : null,
-      area: `Link A to B (~${route.km} km${route.road ? ' by road' : ', straight line'})`
+      area: `Link A to B (~${route.km} km${route.road ? ' by road' : ', straight line'})`,
+      title: document.getElementById('reqTitle').value.trim()
     };
     const r = await fetch('/api/requests', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const j = await r.json(); if (!r.ok) return alert(j.error); ok.disabled = true;

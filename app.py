@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS requests(id INTEGER PRIMARY KEY, user_id INTEGER, cre
   services TEXT, area TEXT, bbox TEXT, coords TEXT, status TEXT DEFAULT 'Pending', results TEXT,
   type TEXT DEFAULT 'area', reply TEXT, reply_at TEXT, data TEXT, hours TEXT, path TEXT, road_km REAL, junctions INTEGER,
   start_time TEXT, end_time TEXT, point_c TEXT, point_c_distance_km REAL,
-  show_point_c INTEGER NOT NULL DEFAULT 0);
+  show_point_c INTEGER NOT NULL DEFAULT 0, title TEXT);
 CREATE TABLE IF NOT EXISTS service_info(key TEXT PRIMARY KEY, description TEXT);
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS notifications(
@@ -329,7 +329,7 @@ def init():
         "WHERE execution_status='queued' AND job_id IN (SELECT id FROM outscraper_jobs WHERE execution_status='unknown' AND error LIKE 'The app restarted while submission is in progress%')"
     )
     cols = [x[1] for x in c.execute("PRAGMA table_info(requests)")]
-    for col, ddl in (("type", "TEXT DEFAULT 'area'"), ("reply", "TEXT"), ("reply_at", "TEXT"), ("data", "TEXT"), ("hours", "TEXT"), ("path", "TEXT"), ("road_km", "REAL"), ("junctions", "INTEGER"), ("start_time", "TEXT"), ("end_time", "TEXT"), ("point_c", "TEXT"), ("point_c_distance_km", "REAL"), ("show_point_c", "INTEGER NOT NULL DEFAULT 0")):
+    for col, ddl in (("type", "TEXT DEFAULT 'area'"), ("reply", "TEXT"), ("reply_at", "TEXT"), ("data", "TEXT"), ("hours", "TEXT"), ("path", "TEXT"), ("road_km", "REAL"), ("junctions", "INTEGER"), ("start_time", "TEXT"), ("end_time", "TEXT"), ("point_c", "TEXT"), ("point_c_distance_km", "REAL"), ("show_point_c", "INTEGER NOT NULL DEFAULT 0"), ("title", "TEXT")):
         if col not in cols: c.execute(f"ALTER TABLE requests ADD COLUMN {col} {ddl}")
     workflow_now = _timestamp_now()
     for request_id, services_json in c.execute("SELECT id,services FROM requests"):
@@ -414,6 +414,8 @@ def _refresh_job_status(job_id):
         status = "unknown"
     elif any(state == "failed" for state in states):
         status = "failed"
+    elif any(state == "abandoned" for state in states):
+        status = "abandoned"
     elif states and all(state in ("rejected", "invalidated") for state in states):
         status = states[0]
     else:
@@ -1248,7 +1250,7 @@ def _poll_outscraper_route(route):
             db().commit()
             return "running"
         db().execute(
-            "UPDATE outscraper_job_routes SET execution_status='failed', completed_at=?, error=? WHERE id=?",
+            "UPDATE outscraper_job_routes SET execution_status='failed', completed_at=?, error=? WHERE id=? AND execution_status!='abandoned'",
             (_timestamp_now(), str(exc), route["id"]))
         db().commit()
         return "failed"
@@ -1264,7 +1266,7 @@ def _poll_outscraper_route(route):
     if state == "failed" and not isinstance(provider_error, str):
         provider_error = "Outscraper marked the request as failed."
     db().execute(
-        "UPDATE outscraper_job_routes SET execution_status=?, provider_status=?, raw_response_json=?, result_count=?, completed_at=?, error=? WHERE id=?",
+        "UPDATE outscraper_job_routes SET execution_status=?, provider_status=?, raw_response_json=?, result_count=?, completed_at=?, error=? WHERE id=? AND execution_status!='abandoned'",
         (state, str(response.get("status") or "")[:80], json.dumps(safe_response, ensure_ascii=False),
          outscraper.result_count(response), finished,
          provider_error[:500] if state == "failed" else
@@ -1418,6 +1420,13 @@ def fmt_hours(hs):
         while j + 1 < len(hs) and hs[j + 1] == hs[j] + 1: j += 1
         out.append(f"{hs[i]:02d}:00-{hs[j] + 1:02d}:00"); i = j + 1
     return ", ".join(out) or "-"
+
+def _clean_request_title(value):
+    """Client-chosen request name: optional, single line, at most 80 characters."""
+    if not isinstance(value, str):
+        return None
+    cleaned = " ".join("".join(ch for ch in value if ch.isprintable() or ch.isspace()).split())[:80]
+    return cleaned or None
 
 def to_dict(r):
     d = dict(r)
@@ -2063,9 +2072,9 @@ def create_request():
                 raise ValueError
         except (TypeError, ValueError):
             return jsonify(error="A valid road point C more than 1.5 km from A along the road is required for Time, Speed, or Volumes requests"), 400
-    cur = db().execute("INSERT INTO requests(user_id,created,d1,d2,services,area,bbox,coords,type,hours,path,road_km,junctions,start_time,end_time,point_c,point_c_distance_km) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    cur = db().execute("INSERT INTO requests(user_id,created,d1,d2,services,area,bbox,coords,type,hours,path,road_km,junctions,start_time,end_time,point_c,point_c_distance_km,title) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (session["uid"], dt.date.today().isoformat(), day, day, json.dumps(sv), str(j.get("area") or "Link")[:120],
-         json.dumps([min(lats), min(lngs), max(lats), max(lngs)]), json.dumps(coords), "link", json.dumps(hours), json.dumps(path), road_km, junctions, start_time, end_time, json.dumps(point_c) if point_c else None, point_c_distance_km))
+         json.dumps([min(lats), min(lngs), max(lats), max(lngs)]), json.dumps(coords), "link", json.dumps(hours), json.dumps(path), road_km, junctions, start_time, end_time, json.dumps(point_c) if point_c else None, point_c_distance_km, _clean_request_title(j.get("title"))))
     if "volumes" in sv:
         now = _timestamp_now()
         db().execute(
@@ -2080,6 +2089,22 @@ def create_request():
     except Exception as e: app.logger.warning("network lookup failed: %s", e)      # never block a client's request
     st = db().execute("SELECT status FROM requests WHERE id=?", (rid,)).fetchone()["status"]
     return jsonify(id=rid, status=st, filled=(info or {}).get("filled", []))
+
+
+@app.post("/api/requests/<int:rid>/title")
+@login_required
+def rename_request(rid):
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload.get("title"), str):
+        return jsonify(error="Enter a name for the request."), 400
+    title = _clean_request_title(payload["title"])
+    cursor = db().execute(
+        "UPDATE requests SET title=? WHERE id=? AND user_id=?", (title, rid, session["uid"])
+    )
+    if cursor.rowcount != 1:
+        return jsonify(error="Request not found"), 404
+    db().commit()
+    return jsonify(ok=True, title=title)
 
 @app.route("/requests")
 @login_required
@@ -2197,8 +2222,10 @@ def admin():
     review_request_ids = {
         row["request_id"]
         for row in db().execute(
-            "SELECT request_id FROM request_directions_workflows WHERE status='ready' "
-            "UNION SELECT request_id FROM volumes_workflows WHERE status='ready_for_review'"
+            "SELECT w.request_id FROM request_directions_workflows w JOIN requests r ON r.id=w.request_id "
+            "WHERE w.status='ready' AND r.status NOT IN ('Completed','Rejected') "
+            "UNION SELECT v.request_id FROM volumes_workflows v JOIN requests r ON r.id=v.request_id "
+            "WHERE v.status='ready_for_review' AND r.status NOT IN ('Completed','Rejected')"
         ).fetchall()
     }
     for item in reqs:
@@ -2979,6 +3006,68 @@ def refresh_outscraper_job(job_id):
     status = _refresh_job_status(job_id)
     return jsonify(ok=True, status=status, routes=polled)
 
+ABANDON_MESSAGE = (
+    "Stopped waiting: the Scraper returned no data. The original request is kept in history; "
+    "a new request can be prepared and approved."
+)
+
+@app.post("/api/outscraper/<job_id>/abandon")
+@admin_required
+def abandon_outscraper_job(job_id):
+    """Stop waiting for a Directions job that never returned data so a NEW request can be prepared.
+
+    This never resubmits anything: the old job stays in history, and a re-send still needs its own
+    preview, cost acknowledgement and approval. The provider may still bill for the original call.
+    """
+    payload = request.get_json(silent=True) or {}
+    if payload.get("acknowledge_possible_charge") is not True:
+        return jsonify(error="Confirm that the provider may still bill the original request before stopping the wait."), 409
+    d = db()
+    d.execute("BEGIN IMMEDIATE")
+    job = d.execute(
+        "SELECT execution_status, updated_at FROM outscraper_jobs WHERE id=?", (job_id,)
+    ).fetchone()
+    if not job:
+        d.rollback()
+        return jsonify(error="Request not found"), 404
+    state = job["execution_status"]
+    stale_submit = False
+    if state == "submitting":
+        try:
+            age = (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(job["updated_at"])).total_seconds()
+        except (TypeError, ValueError):
+            age = 0
+        stale_submit = age > 300
+    if state not in ("running", "unknown") and not stale_submit:
+        d.rollback()
+        return jsonify(error="Only a request that is still waiting for the provider, or whose status is uncertain, can be stopped."), 409
+    now = _timestamp_now()
+    d.execute(
+        "UPDATE outscraper_job_routes SET execution_status='abandoned', error=?, completed_at=COALESCE(completed_at,?) "
+        "WHERE job_id=? AND execution_status IN ('queued','submitting','running','unknown')",
+        (ABANDON_MESSAGE, now, job_id),
+    )
+    d.execute(
+        "UPDATE outscraper_jobs SET execution_status='abandoned', error=?, completed_at=COALESCE(completed_at,?), updated_at=? WHERE id=?",
+        (ABANDON_MESSAGE, now, now, job_id),
+    )
+    d.execute(
+        "UPDATE request_directions_workflows SET status='failed', error=?, updated_at=? "
+        "WHERE job_id=? AND status NOT IN ('ready','confirmed')",
+        (ABANDON_MESSAGE, now, job_id),
+    )
+    d.execute(
+        "UPDATE volume_freeflow_attempts SET status='abandoned', error=? WHERE job_id=? AND accepted=0",
+        (ABANDON_MESSAGE, job_id),
+    )
+    d.execute(
+        "UPDATE volumes_workflows SET status=CASE WHEN status IN ('running','ready_for_review','sent') THEN status ELSE 'waiting_for_inputs' END, "
+        "error=?, updated_at=? WHERE freeflow_job_id=? AND freeflow_accepted=0",
+        (ABANDON_MESSAGE, now, job_id),
+    )
+    d.commit()
+    return jsonify(ok=True, status="abandoned", message=ABANDON_MESSAGE)
+
 @app.get("/api/requests/<int:rid>/directions")
 @admin_required
 def request_directions_status(rid):
@@ -3275,6 +3364,33 @@ def download_volumes_workbook(rid):
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
+def _directions_service_data(requested_services, result, job_id):
+    """Speed / Travel service payloads built from a reviewed A->C Directions result."""
+    updated = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+    hourly = result["hourly"]
+    reuse_note = (
+        " No separate result was returned for "
+        + ", ".join(f"{hour:02d}:00" for hour in result.get("reused_hours", []))
+        + "; the available completed result was reused for those hours."
+        if result.get("reused_hours") else ""
+    )
+    payloads = {}
+    if "travel" in requested_services:
+        payloads["travel"] = {
+            "rows": [{"hour": item["hour"], "value": item["travel_minutes"]} for item in hourly],
+            "note": "Automatically extracted from the A→C Scraper response at the saved A→B road distance." + reuse_note,
+            "source": "outscraper", "updated": updated,
+            "outscraper_job_id": job_id, "directions_result": result,
+        }
+    if "speed" in requested_services:
+        payloads["speed"] = {
+            "rows": [{"hour": item["hour"], "value": item["speed_kmh"]} for item in hourly],
+            "note": "Automatically calculated as A→B distance / time and converted to km/h." + reuse_note,
+            "source": "outscraper", "updated": updated,
+            "outscraper_job_id": job_id, "directions_result": result,
+        }
+    return payloads
+
 @app.post("/api/requests/<int:rid>/volumes/confirm")
 @admin_required
 def confirm_volumes_result(rid):
@@ -3313,6 +3429,26 @@ def confirm_volumes_result(rid):
     data["volumes"] = volume_data
     requested_services = set(json.loads(row["services"] or "[]"))
     _save_volume_lanes_service(data, requested_services, workflow["lanes"])
+    # One approval sends everything that is ready: the reviewed Directions result (Speed / Travel)
+    # goes out together with Traffic volumes and Lanes.
+    directions_row = db().execute(
+        "SELECT job_id,result_json FROM request_directions_workflows "
+        "WHERE request_id=? AND status='ready' AND result_json IS NOT NULL "
+        "ORDER BY updated_at DESC,created_at DESC LIMIT 1",
+        (rid,),
+    ).fetchone()
+    directions_job_id = None
+    if directions_row:
+        directions_job_id = directions_row["job_id"]
+        data.update(_directions_service_data(
+            requested_services, json.loads(directions_row["result_json"]), directions_job_id
+        ))
+    not_ready = [
+        SERVICES[service] for service in ("speed", "travel")
+        if service in requested_services and not (data.get(service) or {}).get("rows")
+    ]
+    if not_ready:
+        return jsonify(error="These results are not ready yet: " + ", ".join(not_ready) + ". Wait for the Directions result before sending."), 409
     all_services_ready = _all_requested_services_ready(requested_services, data)
     now = _timestamp_now()
     d = db()
@@ -3333,10 +3469,18 @@ def confirm_volumes_result(rid):
         "WHERE request_id=? AND status='ready_for_review'",
         (session["uid"], now, now, now, rid),
     )
+    if directions_job_id:
+        d.execute(
+            "UPDATE request_directions_workflows SET status='confirmed', confirmed_by=?, confirmed_at=?, updated_at=? "
+            "WHERE request_id=? AND job_id=? AND status='ready'",
+            (session["uid"], now, now, rid, directions_job_id),
+        )
+    sent_directions = bool(directions_job_id and {"speed", "travel"}.intersection(requested_services))
     _create_notification(
         row["user_id"], rid, "volume_result",
-        "Traffic volume results are ready",
-        f"The administrator approved the traffic volume results for request REQ-{rid}.",
+        "Request results are ready" if sent_directions else "Traffic volume results are ready",
+        f"The administrator approved the results for request REQ-{rid}." if sent_directions
+        else f"The administrator approved the traffic volume results for request REQ-{rid}.",
     )
     d.commit()
     return jsonify(

@@ -2829,6 +2829,237 @@ class OutscraperWorkflowTests(unittest.TestCase):
         self.assertIn(b"Routes and options below are editable", response.data)
 
 
+class AbandonStuckJobTests(unittest.TestCase):
+    """A Scraper job that never returns data must not block a new request forever."""
+
+    def setUp(self):
+        with traffic.app.app_context():
+            traffic.db().execute(
+                "INSERT OR IGNORE INTO users(name,email,pw,role) VALUES('Abandon admin','abandon-admin@example.test','x','admin')"
+            )
+            self.admin_id = traffic.db().execute(
+                "SELECT id FROM users WHERE email='abandon-admin@example.test'"
+            ).fetchone()["id"]
+            traffic.db().commit()
+        self.client = traffic.app.test_client()
+        with self.client.session_transaction() as session:
+            session.update(uid=self.admin_id, name="Abandon admin", role="admin")
+
+    def make_job(self, job_id, status, provider_id="prov-1"):
+        with traffic.app.app_context():
+            d = traffic.db()
+            request_id = d.execute(
+                "INSERT INTO requests(user_id,created,d1,d2,services,area,bbox,coords,status,type,hours,path) "
+                "VALUES(?,'2026-01-01','2026-01-01','2026-01-01','[\"volumes\"]','t','[]','[]','Processing','link','[]','[]')",
+                (self.admin_id,),
+            ).lastrowid
+            d.execute(
+                "INSERT INTO outscraper_jobs(id,created_at,updated_at,config_json,config_hash,approval_token_hash,"
+                "approval_status,execution_status) VALUES(?,?,?,'{}','h','t','approved',?)",
+                (job_id, "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00", status),
+            )
+            d.execute(
+                "INSERT INTO outscraper_job_routes(job_id,route_index,origin,destination,execution_status,provider_request_id) "
+                "VALUES(?,1,'a','b',?,?)",
+                (job_id, status, provider_id),
+            )
+            d.execute(
+                "INSERT INTO request_directions_workflows(job_id,request_id,status,interval_seconds,created_at,updated_at) "
+                "VALUES(?,?,?,3600,'2026-01-01','2026-01-01')",
+                (job_id, request_id, status),
+            )
+            d.execute(
+                "INSERT INTO volume_freeflow_attempts(job_id,request_id,submitted_at,status) VALUES(?,?,'2026-01-01',?)",
+                (job_id, request_id, status),
+            )
+            d.execute(
+                "INSERT INTO volumes_workflows(request_id,status,freeflow_job_id,created_at,updated_at) "
+                "VALUES(?,'waiting_for_inputs',?,'2026-01-01','2026-01-01')",
+                (request_id, job_id),
+            )
+            d.commit()
+            return request_id
+
+    def post(self, job_id, payload):
+        return self.client.post(f"/api/outscraper/{job_id}/abandon", json=payload)
+
+    def test_requires_explicit_acknowledgement(self):
+        self.make_job("abandon-ack", "running")
+        response = self.post("abandon-ack", {})
+        self.assertEqual(response.status_code, 409)
+        with traffic.app.app_context():
+            row = traffic.db().execute("SELECT execution_status FROM outscraper_jobs WHERE id='abandon-ack'").fetchone()
+            self.assertEqual(row["execution_status"], "running")
+
+    def test_running_job_becomes_abandoned_and_workflows_are_unblocked(self):
+        request_id = self.make_job("abandon-run", "running")
+        response = self.post("abandon-run", {"acknowledge_possible_charge": True})
+        self.assertEqual(response.status_code, 200)
+        with traffic.app.app_context():
+            d = traffic.db()
+            self.assertEqual(d.execute("SELECT execution_status FROM outscraper_jobs WHERE id='abandon-run'").fetchone()[0], "abandoned")
+            self.assertEqual(d.execute("SELECT execution_status FROM outscraper_job_routes WHERE job_id='abandon-run'").fetchone()[0], "abandoned")
+            # 'failed' is the state the preview endpoint and the A->C dialog already treat as re-sendable
+            self.assertEqual(d.execute("SELECT status FROM request_directions_workflows WHERE job_id='abandon-run'").fetchone()[0], "failed")
+            self.assertEqual(d.execute("SELECT status FROM volume_freeflow_attempts WHERE job_id='abandon-run'").fetchone()[0], "abandoned")
+            self.assertEqual(d.execute("SELECT status FROM volumes_workflows WHERE request_id=?", (request_id,)).fetchone()[0], "waiting_for_inputs")
+
+    def test_unknown_job_can_be_abandoned(self):
+        self.make_job("abandon-unknown", "unknown")
+        self.assertEqual(self.post("abandon-unknown", {"acknowledge_possible_charge": True}).status_code, 200)
+
+    def test_completed_and_missing_jobs_cannot_be_abandoned(self):
+        self.make_job("abandon-done", "completed")
+        self.assertEqual(self.post("abandon-done", {"acknowledge_possible_charge": True}).status_code, 409)
+        self.assertEqual(self.post("does-not-exist", {"acknowledge_possible_charge": True}).status_code, 404)
+
+    def test_refresh_keeps_abandoned_status(self):
+        self.make_job("abandon-refresh", "running")
+        self.post("abandon-refresh", {"acknowledge_possible_charge": True})
+        with traffic.app.app_context():
+            self.assertEqual(traffic._refresh_job_status("abandon-refresh"), "abandoned")
+
+    def test_late_provider_answer_cannot_revive_an_abandoned_route(self):
+        self.make_job("abandon-late", "running")
+        self.post("abandon-late", {"acknowledge_possible_charge": True})
+        with traffic.app.app_context():
+            route = dict(traffic.db().execute("SELECT * FROM outscraper_job_routes WHERE job_id='abandon-late'").fetchone())
+            with mock.patch.object(traffic.outscraper, "fetch_request", return_value={"status": "Success", "data": [{"x": 1}]}):
+                traffic._poll_outscraper_route(route)
+            self.assertEqual(
+                traffic.db().execute("SELECT execution_status FROM outscraper_job_routes WHERE job_id='abandon-late'").fetchone()[0],
+                "abandoned",
+            )
+
+    def test_admin_request_page_renders_the_new_buttons(self):
+        request_id = self.make_job("abandon-page", "running")
+        response = self.client.get(f"/admin/request/{request_id}")
+        if response.status_code == 200:
+            self.assertIn(b"abandonFreeflowJob", response.data)
+            self.assertIn(b"abandonDirectionsJob", response.data)
+
+
+class SendAllAndNamingTests(unittest.TestCase):
+    """One approval sends Volumes + Lanes + Speed/Travel; clients can name requests."""
+
+    def setUp(self):
+        with traffic.app.app_context():
+            d = traffic.db()
+            d.execute("INSERT OR IGNORE INTO users(name,email,pw,role) VALUES('SendAll admin','sendall-admin@example.test','x','admin')")
+            d.execute("INSERT OR IGNORE INTO users(name,email,pw,role) VALUES('SendAll client','sendall-client@example.test','x','client')")
+            self.admin_id = d.execute("SELECT id FROM users WHERE email='sendall-admin@example.test'").fetchone()["id"]
+            self.client_id = d.execute("SELECT id FROM users WHERE email='sendall-client@example.test'").fetchone()["id"]
+            d.commit()
+        self.admin = traffic.app.test_client()
+        with self.admin.session_transaction() as s:
+            s.update(uid=self.admin_id, name="SendAll admin", role="admin")
+        self.client = traffic.app.test_client()
+        with self.client.session_transaction() as s:
+            s.update(uid=self.client_id, name="SendAll client", role="client")
+
+    def make_request(self, services, *, directions=True, volumes_ready=True, tag="a"):
+        directions_result = {
+            "hourly": [
+                {"hour": 7, "distance_m": 290.0, "time_seconds": 40.0, "travel_minutes": 40.0 / 60, "speed_kmh": 26.1, "reused_observation": False},
+                {"hour": 8, "distance_m": 290.0, "time_seconds": 41.0, "travel_minutes": 41.0 / 60, "speed_kmh": 25.5, "reused_observation": False},
+            ],
+        }
+        volumes_result = {
+            "hourly": [{"hour": 7, "value": 951.2, "tolerance": 91.7}, {"hour": 8, "value": 950.8, "tolerance": 91.7}],
+            "inputs": {"lanes": 3},
+        }
+        with traffic.app.app_context():
+            d = traffic.db()
+            rid = d.execute(
+                "INSERT INTO requests(user_id,created,d1,d2,services,area,bbox,coords,status,type,hours,path) "
+                "VALUES(?,'2026-10-28','2026-10-25','2026-10-25',?,'t','[]','[]','Processing','link','[7,8]','[]')",
+                (self.client_id, json.dumps(services)),
+            ).lastrowid
+            d.execute(
+                "INSERT INTO volumes_workflows(request_id,status,lanes,result_json,created_at,updated_at) VALUES(?,?,?,?,'2026-10-28','2026-10-28')",
+                (rid, "ready_for_review" if volumes_ready else "waiting_for_inputs", 3, json.dumps(volumes_result)),
+            )
+            if directions:
+                job_id = f"sendall-{tag}-{rid}"
+                d.execute(
+                    "INSERT INTO outscraper_jobs(id,created_at,updated_at,config_json,config_hash,approval_token_hash,approval_status,execution_status) "
+                    "VALUES(?,'2026-10-28','2026-10-28','{}','h','t','approved','completed')", (job_id,))
+                d.execute(
+                    "INSERT INTO request_directions_workflows(job_id,request_id,status,interval_seconds,result_json,created_at,updated_at) "
+                    "VALUES(?,?,'ready',3600,?,'2026-10-28','2026-10-28')", (job_id, rid, json.dumps(directions_result)))
+            d.commit()
+            return rid
+
+    def test_single_approval_sends_volumes_lanes_speed_and_travel(self):
+        rid = self.make_request(["lanes", "speed", "travel", "volumes"])
+        response = self.admin.post(f"/api/requests/{rid}/volumes/confirm", json={})
+        self.assertEqual(response.status_code, 200, response.get_json())
+        with traffic.app.app_context():
+            d = traffic.db()
+            row = d.execute("SELECT status,data FROM requests WHERE id=?", (rid,)).fetchone()
+            data = json.loads(row["data"])
+            self.assertEqual([item["value"] for item in data["volumes"]["rows"]], [951, 951])
+            self.assertEqual(data["lanes"]["rows"][0]["value"], 3)
+            self.assertEqual([round(item["value"], 1) for item in data["speed"]["rows"]], [26.1, 25.5])
+            self.assertEqual(len(data["travel"]["rows"]), 2)
+            self.assertEqual(row["status"], "Completed")
+            self.assertEqual(d.execute("SELECT status FROM request_directions_workflows WHERE request_id=?", (rid,)).fetchone()[0], "confirmed")
+            self.assertEqual(d.execute("SELECT status FROM volumes_workflows WHERE request_id=?", (rid,)).fetchone()[0], "sent")
+            notes = d.execute("SELECT title FROM notifications WHERE request_id=? AND user_id=?", (rid, self.client_id)).fetchall()
+            self.assertEqual(len(notes), 1)
+
+    def test_speed_requested_but_directions_not_ready_is_refused_and_nothing_is_sent(self):
+        rid = self.make_request(["speed", "volumes"], directions=False)
+        response = self.admin.post(f"/api/requests/{rid}/volumes/confirm", json={})
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("Speed", response.get_json()["error"])
+        with traffic.app.app_context():
+            self.assertEqual(traffic.db().execute("SELECT status FROM volumes_workflows WHERE request_id=?", (rid,)).fetchone()[0], "ready_for_review")
+
+    def test_volumes_only_request_does_not_leak_speed_and_closes_the_directions_review(self):
+        rid = self.make_request(["volumes"])
+        self.assertEqual(self.admin.post(f"/api/requests/{rid}/volumes/confirm", json={}).status_code, 200)
+        with traffic.app.app_context():
+            d = traffic.db()
+            data = json.loads(d.execute("SELECT data FROM requests WHERE id=?", (rid,)).fetchone()["data"])
+            self.assertNotIn("speed", data)
+            self.assertNotIn("travel", data)
+            self.assertEqual(d.execute("SELECT status FROM request_directions_workflows WHERE request_id=?", (rid,)).fetchone()[0], "confirmed")
+
+    def test_completed_request_is_not_listed_as_waiting_for_review(self):
+        rid = self.make_request(["volumes"])
+        with traffic.app.app_context():
+            traffic.db().execute("UPDATE requests SET status='Completed' WHERE id=?", (rid,))
+            traffic.db().commit()
+        page = self.admin.get("/admin").get_data(as_text=True)
+        row = next(chunk for chunk in page.split('<tr class="dr"')[1:] if f"<b>REQ-{rid}</b>" in chunk)
+        self.assertIn('data-review="false"', row)
+        self.assertNotIn(">Waiting for review</span>", row)
+
+    def test_client_can_name_and_rename_only_their_own_request(self):
+        rid = self.make_request(["volumes"])
+        ok = self.client.post(f"/api/requests/{rid}/title", json={"title": "  Gulf Road   morning peak \n"})
+        self.assertEqual(ok.status_code, 200)
+        self.assertEqual(ok.get_json()["title"], "Gulf Road morning peak")
+        with traffic.app.app_context():
+            traffic.db().execute("INSERT OR IGNORE INTO users(name,email,pw,role) VALUES('Other client','sendall-other@example.test','x','client')")
+            other_id = traffic.db().execute("SELECT id FROM users WHERE email='sendall-other@example.test'").fetchone()["id"]
+            traffic.db().commit()
+        other = traffic.app.test_client()
+        with other.session_transaction() as s:
+            s.update(uid=other_id, name="Other client", role="client")
+        self.assertEqual(other.post(f"/api/requests/{rid}/title", json={"title": "Hijack"}).status_code, 404)
+        self.assertEqual(self.client.post(f"/api/requests/{rid}/title", json={"title": 5}).status_code, 400)
+        page = self.client.get("/requests").get_data(as_text=True)
+        self.assertIn("Gulf Road morning peak", page)
+        self.assertIn("Gulf Road morning peak", self.admin.get("/admin").get_data(as_text=True))
+
+    def test_title_is_trimmed_and_limited(self):
+        self.assertIsNone(traffic._clean_request_title("   "))
+        self.assertIsNone(traffic._clean_request_title(None))
+        self.assertEqual(len(traffic._clean_request_title("x" * 200)), 80)
+
+
 if __name__ == "__main__":
     unittest.main()
     

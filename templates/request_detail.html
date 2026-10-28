@@ -1,6 +1,6 @@
 {% extends "base.html" %}{% block body %}
 <div class="page-heading">
-  <div><a class="detail-back-link" href="{{url_for('my_requests')}}">← My requests</a><span class="eyebrow">REQUEST DETAILS</span><h1>REQ-{{r.id}}</h1><p>Submitted {{r.created}}</p></div>
+  <div><a class="detail-back-link" href="{{url_for('my_requests')}}">← My requests</a><span class="eyebrow">REQUEST DETAILS</span><h1 id="requestTitleHeading">REQ-{{r.id}}{% if r.title %} · {{r.title}}{% endif %}</h1><p>Submitted {{r.created}}</p></div>
   <span class="b {{r.status}}">{{r.status}}</span>
 </div>
 <div class="request-detail-grid">
@@ -8,7 +8,22 @@
   <section class="card request-detail-card"><span class="eyebrow">STATUS</span><h2>{{r.status}}</h2><p>{% if r.status=='Pending' %}Your request has been received and is waiting to be processed.{% elif r.status=='Processing' %}Your request is being processed. Results will appear here as they become available.{% elif r.status=='Completed' %}Processing is complete. Your results are ready.{% elif r.status=='Failed' %}Processing could not be completed. Review the message below or contact support.{% else %}Current request status: {{r.status}}.{% endif %}</p>{% if r.reply %}<div class="request-reply"><b>Message from the team</b><p>{{r.reply}}</p></div>{% endif %}</section>
 </div>
 <div class="row-actions request-detail-actions">
+  <button class="btn alt" id="renameRequest" type="button">{% if r.title %}Rename request{% else %}Name this request{% endif %}</button><span class="msg" id="renameMessage" aria-live="polite"></span>
   {% if r.results_available %}<a class="btn" href="{{url_for('result',rid=r.id)}}">View results</a>{% endif %}
   <a class="btn alt" href="{{url_for('study',repeat_request_id=r.id)}}">Create a similar request</a>
 </div>
+<script>
+document.getElementById('renameRequest').onclick=async()=>{
+ const current={{ (r.title or '')|tojson }};
+ const value=window.prompt('Request name (up to 80 characters; leave empty to remove):',current);
+ if(value===null)return;
+ const message=document.getElementById('renameMessage');
+ try{
+  const response=await fetch('/api/requests/{{r.id}}/title',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:value})});
+  const data=await response.json();
+  if(!response.ok)throw new Error(data.error||'Could not rename the request.');
+  location.reload();
+ }catch(error){message.textContent=error.message||'Could not rename the request.'}
+};
+</script>
 {% endblock %}
