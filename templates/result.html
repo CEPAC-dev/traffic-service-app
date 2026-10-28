@@ -21,7 +21,7 @@
   <div class="section-heading"><div><span class="eyebrow">FULL REPORT</span><h2>Service details</h2><p>Hourly values, source information and notes for each requested service.</p></div></div>
   <div id="secs"></div>
 </section>
-<div class="result-export"><a class="btn" href="{{url_for('export_result_excel',rid=r.id)}}">Download Excel report</a></div>
+<div class="result-export"><a class="btn" href="{{url_for('export_result_excel',rid=r.id)}}">Download Excel report</a>{% if r.data and r.data.get('volumes') and r.data.volumes.get('rows') %} <a class="btn alt" href="{{url_for('download_volumes_workbook',rid=r.id)}}">Download Volumes workbook</a>{% endif %}</div>
 {% endblock %}
 {% block js %}<script>
 const R={{ r|tojson }},FORMS={{ forms|tojson }},SV={{ SERVICES|tojson }},SVI={{ SVINFO|tojson }},D=R.data||{};
@@ -34,7 +34,7 @@ const kps=[],charts=[];
 R.services.forEach(s=>{const F=FORMS[s],d=D[s]||{},rows=rowsOf(s),has=rows.length||((d.note||'').trim()&&d.source!=='outscraper'),hourly=F.kind==='hourly';
  const numeric=rows.length>0&&rows.every(r=>Number.isFinite(Number(r.value)));
  let main='';
- if(rows.length&&numeric){const v=hourly?avg(rows):Number(rows[0].value),t=+v.toFixed(2);
+ if(rows.length&&numeric){const v=hourly?avg(rows):Number(rows[0].value),t=+v.toFixed(s==='volumes'?0:2);
   main=`<p style="margin:8px 0"><span class="big-v">${t}</span> <span style="color:var(--mut)">${esc(F.unit)}${hourly?' (average of the selected hours)':''}</span></p>`;
   kps.push(`<div class="card kpi k${kps.length%6+1}"><i class="ic">${SVI[s].icon}</i><b>${t}</b><span>${esc(SV[s])} · ${esc(F.unit)}${hourly?' (avg)':''}</span></div>`)}
  else if(rows.length&&!hourly){main=`<p style="margin:8px 0"><span class="big-v">${esc(rows[0].value)}</span> <span style="color:var(--mut)">${esc(F.unit)}</span></p>`}

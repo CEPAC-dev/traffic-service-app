@@ -962,7 +962,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
                         "freeflow_speed": 30,
                         "actual_speed": 29.0,
                     },
-                ])
+                ], self.client_id)
                 result_book = Workbook()
                 result_sheet = result_book.active
                 result_sheet.title = "Volumes"
@@ -991,8 +991,9 @@ class OutscraperWorkflowTests(unittest.TestCase):
 
         self.assertEqual(detail.status_code, 200)
         self.assertIn(b"ready_for_review", detail.data)
-        self.assertIn(b"898.61", detail.data)
-        self.assertIn(b"923.03", detail.data)
+        self.assertIn(b"<td>899</td>", detail.data)
+        self.assertIn(b"<td>923</td>", detail.data)
+        self.assertNotIn(b"898.61", detail.data)
         self.assertIn(b"Approve &amp; Send Volumes to Client", detail.data)
         with traffic.app.app_context():
             request = traffic.db().execute(
@@ -1054,7 +1055,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
             )
             traffic.db().commit()
 
-            def prepare_inputs(saved_request_id, rows):
+            def prepare_inputs(saved_request_id, rows, client_id):
                 self.assertEqual(saved_request_id, request_id)
                 self.assertEqual(
                     [row["hour"] for row in rows],
@@ -1090,6 +1091,125 @@ class OutscraperWorkflowTests(unittest.TestCase):
         self.assertEqual(workflow["workbook_path"], prepared_run["input_workbook"])
         thread.assert_called_once()
         self.assertEqual(thread.call_args.kwargs["args"], (request_id, prepared_run))
+
+    def test_volume_lanes_must_be_a_whole_number_from_1_to_12(self):
+        request_id = self.insert_volume_request(services=["lanes", "volumes"])
+        for bad in (2.5, 0, -1, 13, "x", None):
+            response = self.client.post(f"/api/requests/{request_id}/volumes/lanes", json={"lanes": bad})
+            self.assertEqual(response.status_code, 400, bad)
+        accepted = self.client.post(f"/api/requests/{request_id}/volumes/lanes", json={"lanes": 2})
+        self.assertEqual(accepted.status_code, 200, accepted.get_json())
+        with traffic.app.app_context():
+            lanes = traffic.db().execute(
+                "SELECT lanes FROM volumes_workflows WHERE request_id=?", (request_id,)
+            ).fetchone()["lanes"]
+        self.assertEqual(lanes, 2)
+
+    def test_volume_warnings_flag_implausible_results(self):
+        result = {
+            "inputs": {"lanes": 1},
+            "hourly": [
+                {"hour": 7, "value": 900.0, "tolerance": 50.0},
+                {"hour": 8, "value": 3000.0, "tolerance": 50.0},
+                {"hour": 9, "value": -5.0, "tolerance": 1.0},
+                {"hour": 10, "value": 100.0, "tolerance": 150.0},
+                {"hour": 11, "value": 0.0, "tolerance": 0.0},
+            ],
+        }
+        warnings = traffic._volume_result_warnings(result)
+        self.assertEqual(len(warnings), 4)
+        self.assertFalse(any(text.startswith("07:00") for text in warnings))
+        for hour in ("08:00", "09:00", "10:00", "11:00"):
+            self.assertEqual(sum(text.startswith(hour) for text in warnings), 1, hour)
+
+    def test_negative_volume_cannot_be_approved(self):
+        request_id = self.insert_volume_request(services=["volumes"])
+        result = {
+            "hourly": [
+                {"hour": 7, "value": -5.0, "tolerance": 1.0},
+                {"hour": 8, "value": 790.0, "tolerance": 38.6},
+            ],
+            "inputs": {"lanes": 2, "freeflow_speed": 60.0, "actual_speed_by_hour": []},
+        }
+        with traffic.app.app_context():
+            traffic.db().execute(
+                "UPDATE volumes_workflows SET status='ready_for_review', lanes=2, freeflow_speed=60, result_json=? WHERE request_id=?",
+                (json.dumps(result), request_id),
+            )
+            traffic.db().commit()
+        response = self.client.post(f"/api/requests/{request_id}/volumes/confirm", json={})
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("negative", response.get_json()["error"])
+
+    def test_directions_placeholder_note_does_not_count_as_a_finished_service(self):
+        placeholder = {"rows": [], "note": "awaiting review", "source": "outscraper"}
+        self.assertFalse(traffic._all_requested_services_ready(["freeflow_time"], {"freeflow_time": placeholder}))
+        self.assertFalse(traffic._all_requested_services_ready(["volumes"], {"volumes": {"rows": [], "note": "x"}}))
+        entered = {"rows": [{"value": 4.2}], "note": "", "source": "outscraper"}
+        self.assertTrue(traffic._all_requested_services_ready(["freeflow_time"], {"freeflow_time": entered}))
+        admin_note = {"rows": [], "note": "Closed for works"}
+        self.assertTrue(traffic._all_requested_services_ready(["capacity"], {"capacity": admin_note}))
+        self.assertFalse(traffic._all_requested_services_ready(
+            ["freeflow_time", "capacity"], {"freeflow_time": placeholder, "capacity": admin_note}
+        ))
+
+    def test_mean_route_minutes_averages_a_to_b_time_over_all_records(self):
+        key = "road_distance_timing(meters:seconds)"
+        response = {"data": [[{key: {"0": 0, "1000": 120}}, {key: {"0": 0, "1000": 180}}]]}
+        self.assertAlmostEqual(traffic._mean_route_minutes(response, 500), 1.25)
+        self.assertIsNone(traffic._mean_route_minutes({"data": []}, 500))
+        self.assertIsNone(traffic._mean_route_minutes({"data": [{key: {"0": 0, "100": 10}}]}, 500))
+
+    def test_volumes_workbook_download_is_limited_to_owner_after_approval_and_admins(self):
+        request_id = self.insert_volume_request(services=["volumes"])
+
+        def browser(user_id, role):
+            test_client = traffic.app.test_client()
+            with test_client.session_transaction() as session:
+                session.update(uid=user_id, name="Tester", role=role)
+            return test_client
+
+        with tempfile.TemporaryDirectory() as temp_dir, \
+                mock.patch.object(traffic.volumes_runner, "APP_DIR", Path(temp_dir)):
+            run_dir = traffic.volumes_runner.request_run_dir(self.client_id, request_id)
+            run_dir.mkdir(parents=True)
+            result_path = run_dir / f"REQ-{request_id}-abc-results.xlsx"
+            outside_path = Path(temp_dir) / "secret-results.xlsx"
+            for path in (result_path, outside_path):
+                book = Workbook()
+                book.active.title = "Volumes"
+                book.save(path)
+                book.close()
+
+            def set_workflow(status, path):
+                with traffic.app.app_context():
+                    traffic.db().execute(
+                        "UPDATE volumes_workflows SET status=?, workbook_path=? WHERE request_id=?",
+                        (status, str(path), request_id),
+                    )
+                    traffic.db().commit()
+
+            url = f"/api/requests/{request_id}/volumes/workbook"
+            owner = browser(self.client_id, "client")
+            with traffic.app.app_context():
+                stranger_id = traffic.db().execute(
+                    "INSERT INTO users(name,email,pw,role) VALUES('Other client',?,?,'client')",
+                    (f"other-{time.time_ns()}@example.test", traffic.generate_password_hash("x" * 10)),
+                ).lastrowid
+                traffic.db().commit()
+            stranger = browser(stranger_id, "client")
+            admin = browser(1, "admin")
+
+            set_workflow("ready_for_review", result_path)
+            self.assertEqual(owner.get(url).status_code, 404)
+            self.assertEqual(admin.get(url).status_code, 200)
+
+            set_workflow("sent", result_path)
+            self.assertEqual(owner.get(url).status_code, 200)
+            self.assertEqual(stranger.get(url).status_code, 404)
+
+            set_workflow("sent", outside_path)
+            self.assertEqual(admin.get(url).status_code, 404)
 
     def test_startup_backfills_workflows_for_existing_volume_requests(self):
         request_id = self.insert_volume_request()

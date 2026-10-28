@@ -10,7 +10,7 @@
 
 Open http://127.0.0.1:5000
 If you do not activate the virtual environment, start the app with `.\.venv\Scripts\python.exe app.py` so it uses the project's installed dependencies instead of a different system Python.
-Default admin: admin@demo.com / admin123. Change this password before use outside a local development environment.
+On the first start (empty database) the app creates the admin account `admin@demo.com`. Its password is the value of `TRAFFICLENS_ADMIN_PASSWORD` in `.env`; if that is empty, a random password is printed once in the console. Existing databases are not changed, so replace any account that still uses an old default password.
 Edit `.env` locally and replace both placeholders. Generate a strong `SECRET_KEY` locally (for example, run `python -c "import secrets; print(secrets.token_hex(32))"`); set `OUTSCRAPER_API_KEY` to your own key. Never paste the API key into chat or commit `.env`. Without a configured `SECRET_KEY`, the app creates an ephemeral one and existing sessions will expire when the process restarts.
 Needs an internet connection (map tiles, place search and road routing).
 
@@ -31,8 +31,11 @@ This optional procedure sends a real, potentially billable request. First config
 ## Services (Admin > Services)
 Enable or disable the built-in services clients can request, or add a custom service.
 Custom services can be recorded once per road link or once per selected hour, with optional units and numeric or text values (for example, LOS grades).
-**Free flow time** and **Free flow speed** are enabled by default. Their Directions API requests use 7:00 AM in the route's local time zone on the nearest national public holiday to the study date (ties use the earlier date). The country is identified from the route midpoint using OpenStreetMap Nominatim; holiday dates come from the `holidays` package. The selected holiday and time zone are bound to the approval and recorded in the result page, Excel report, and Directions API result export. If the country or time zone cannot be identified, the request is not prepared.
-After the provider job completes, its raw response is retained for admin review and the client report shows the exact date used. An administrator must review and enter the numeric service value; the integration does not infer a speed or travel-time field from undocumented provider response shapes.
+**Free flow time** and **Free flow speed** are enabled by default. **Free flow time** uses Directions API at 7:00 AM in the route's local time zone on the nearest national public holiday to the study date (ties use the earlier date). **Free flow speed** uses 7:00 AM on the latest weekly weekend date before today in the route's country. The country is identified from the route midpoint using OpenStreetMap Nominatim; holiday dates come from the `holidays` package. The selected date and time zone are bound to the approval and recorded in the result page, Excel report, and Directions API result export. If the country or time zone cannot be identified, the request is not prepared.
+After the provider job completes, its raw response is retained for admin review and the client report shows the exact date used. For Free flow time the app suggests an A-to-B value (the average over the response) in the request note, but the administrator must still enter or confirm the numeric value; the request is not marked Completed until they do. The integration does not infer a speed or travel-time field from undocumented provider response shapes.
+
+## Traffic volumes: files per client
+Each request that includes Volumes gets its own folder, `instance/volume_runs/client-<client id>/REQ-<request id>/`, holding that request's MATLAB input workbook and result workbook. `Inquiries_12-10-2026.xlsx` is only a read-only template (headers); no request is ever written back to it, so no workbook mixes clients. Volumes are rounded to whole vehicles per hour and the lane count must be a whole number from 1 to 12. The admin can download a request's result workbook from the request page; the client gets a **Download Volumes workbook** link on their result page after the admin approves the volumes. Before approving, the admin sees warnings for negative, zero, or implausibly high per-lane volumes.
 
 ## Road-link search and requests
 On the study page, search road links by partial text from any network attribute. Results are paginated and can be selected directly on the map.
