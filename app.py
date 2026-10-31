@@ -85,7 +85,8 @@ CREATE TABLE IF NOT EXISTS requests(id INTEGER PRIMARY KEY, user_id INTEGER, cre
   services TEXT, area TEXT, bbox TEXT, coords TEXT, status TEXT DEFAULT 'Pending', results TEXT,
   type TEXT DEFAULT 'area', reply TEXT, reply_at TEXT, data TEXT, hours TEXT, path TEXT, road_km REAL, junctions INTEGER,
   start_time TEXT, end_time TEXT, point_c TEXT, point_c_distance_km REAL,
-  show_point_c INTEGER NOT NULL DEFAULT 0, title TEXT);
+  show_point_c INTEGER NOT NULL DEFAULT 0, title TEXT,
+  junction_quality_ack INTEGER NOT NULL DEFAULT 0, junction_quality_ack_at TEXT);
 CREATE TABLE IF NOT EXISTS service_info(key TEXT PRIMARY KEY, description TEXT);
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS notifications(
@@ -329,7 +330,7 @@ def init():
         "WHERE execution_status='queued' AND job_id IN (SELECT id FROM outscraper_jobs WHERE execution_status='unknown' AND error LIKE 'The app restarted while submission is in progress%')"
     )
     cols = [x[1] for x in c.execute("PRAGMA table_info(requests)")]
-    for col, ddl in (("type", "TEXT DEFAULT 'area'"), ("reply", "TEXT"), ("reply_at", "TEXT"), ("data", "TEXT"), ("hours", "TEXT"), ("path", "TEXT"), ("road_km", "REAL"), ("junctions", "INTEGER"), ("start_time", "TEXT"), ("end_time", "TEXT"), ("point_c", "TEXT"), ("point_c_distance_km", "REAL"), ("show_point_c", "INTEGER NOT NULL DEFAULT 0"), ("title", "TEXT")):
+    for col, ddl in (("type", "TEXT DEFAULT 'area'"), ("reply", "TEXT"), ("reply_at", "TEXT"), ("data", "TEXT"), ("hours", "TEXT"), ("path", "TEXT"), ("road_km", "REAL"), ("junctions", "INTEGER"), ("start_time", "TEXT"), ("end_time", "TEXT"), ("point_c", "TEXT"), ("point_c_distance_km", "REAL"), ("show_point_c", "INTEGER NOT NULL DEFAULT 0"), ("title", "TEXT"), ("junction_quality_ack", "INTEGER NOT NULL DEFAULT 0"), ("junction_quality_ack_at", "TEXT")):
         if col not in cols: c.execute(f"ALTER TABLE requests ADD COLUMN {col} {ddl}")
     workflow_now = _timestamp_now()
     for request_id, services_json in c.execute("SELECT id,services FROM requests"):
@@ -2044,7 +2045,6 @@ def create_request():
     hours = list(range(start_seconds // 3600, (end_seconds - 1) // 3600 + 1))
     start_time, end_time = start_time.strftime("%H:%M:%S"), end_time.strftime("%H:%M:%S")
     if len(coords) != 2: return jsonify(error="Select the start and the end of the link"), 400
-    if not j.get("no_junctions"): return jsonify(error="Confirm that the link has no intersections, entrances or exits"), 400
     if not sv: return jsonify(error="Choose at least one service"), 400
     if not hours: return jsonify(error="Choose at least one hour"), 400
     lats, lngs = [c[0] for c in coords], [c[1] for c in coords]
@@ -2055,8 +2055,16 @@ def create_request():
     except (TypeError, ValueError, IndexError): path, road_km, junctions = [], None, None
     if junctions is None or junctions < 0 or len(path) < 2:
         return jsonify(error="The road route could not be verified for intersections. Adjust points A and B and try again."), 400
-    if junctions > 0:
-        return jsonify(error="This link contains possible intersections between A and B. Move one of the points so the link covers a single road section."), 400
+    junction_quality_ack = junctions > 0 and j.get("accept_intersection_quality_impact") is True
+    if junctions == 0 and j.get("no_junctions") is not True:
+        return jsonify(error="Confirm that the link has no intersections, entrances or exits."), 400
+    if junctions > 0 and not junction_quality_ack:
+        return jsonify(
+            error=(
+                f"This link contains {junctions} possible intersection(s). "
+                "Confirm that you agree to submit it knowing intersections may affect result quality."
+            )
+        ), 400
     point_c = None
     point_c_distance_km = None
     if {"speed", "travel", "volumes"}.intersection(sv):
@@ -2072,9 +2080,10 @@ def create_request():
                 raise ValueError
         except (TypeError, ValueError):
             return jsonify(error="A valid road point C more than 1.5 km from A along the road is required for Time, Speed, or Volumes requests"), 400
-    cur = db().execute("INSERT INTO requests(user_id,created,d1,d2,services,area,bbox,coords,type,hours,path,road_km,junctions,start_time,end_time,point_c,point_c_distance_km,title) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    junction_quality_ack_at = _timestamp_now() if junction_quality_ack else None
+    cur = db().execute("INSERT INTO requests(user_id,created,d1,d2,services,area,bbox,coords,type,hours,path,road_km,junctions,start_time,end_time,point_c,point_c_distance_km,title,junction_quality_ack,junction_quality_ack_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (session["uid"], dt.date.today().isoformat(), day, day, json.dumps(sv), str(j.get("area") or "Link")[:120],
-         json.dumps([min(lats), min(lngs), max(lats), max(lngs)]), json.dumps(coords), "link", json.dumps(hours), json.dumps(path), road_km, junctions, start_time, end_time, json.dumps(point_c) if point_c else None, point_c_distance_km, _clean_request_title(j.get("title"))))
+         json.dumps([min(lats), min(lngs), max(lats), max(lngs)]), json.dumps(coords), "link", json.dumps(hours), json.dumps(path), road_km, junctions, start_time, end_time, json.dumps(point_c) if point_c else None, point_c_distance_km, _clean_request_title(j.get("title")), int(junction_quality_ack), junction_quality_ack_at))
     if "volumes" in sv:
         now = _timestamp_now()
         db().execute(

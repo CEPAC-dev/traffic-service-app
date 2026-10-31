@@ -2,10 +2,10 @@
 <div class="page-heading"><div><span class="eyebrow">SERVICE REQUEST</span><h1>Create a request</h1><p>Choose a road link, schedule, and the service data you need. The system handles processing.</p></div></div>
 <div class="search"><input id="q" placeholder="Search for a place, e.g. Nasr City"><button class="btn"
     id="go">Search</button></div>
-{% if repeat_request %}<div class="tip source-request-tip"><b>Repeating request REQ-{{repeat_request.id}}</b><br>Its date, times, services and A/B locations have been copied below. You can edit them before submitting. This creates a new request; the original remains unchanged. Please confirm the no-intersections declaration again.</div>{% endif %}
+{% if repeat_request %}<div class="tip source-request-tip"><b>Repeating request REQ-{{repeat_request.id}}</b><br>Its date, times, services and A/B locations have been copied below. You can edit them before submitting. This creates a new request; the original remains unchanged. Please confirm the route condition again, including any quality-impact acknowledgment if intersections are detected.</div>{% endif %}
 <div class="callout"><b>🔗 Select your link.</b> Click the map to choose the <b>start (A)</b> and the <b>end (B)</b> of
   the link.
-  The link must be one road section with <b>no intersections, entrances or exits</b> between A and B.</div>
+  Choose one road section without intersections, entrances or exits whenever possible. If the route check finds intersections, you can continue only after explicitly acknowledging that they may affect result quality.</div>
 <div class="study">
   <div id="map"></div>
   <div class="side">
@@ -18,8 +18,8 @@
         {% if session.get('role') == 'admin' %}<div id="pointCReadout" hidden><b>Point C · calculated</b><code id="pointCCoordinates">Not calculated</code></div>{% endif %}
       </div>
       <p style="margin:8px 0 0"><button class="btn alt" id="reset" type="button">Reset points</button></p>
-      <label class="cf"><input type="checkbox" id="nj"> I confirm this link has no intersections, entrances or
-        exits.</label>
+      <label class="cf" id="noJunctionDeclaration"><input type="checkbox" id="nj"> I confirm this link has no intersections, entrances or exits.</label>
+      <label class="cf" id="junctionQualityConsent" hidden><input type="checkbox" id="acceptJunctionQuality"> I agree to submit this link despite the detected intersections, knowing they may affect the quality of the results.</label>
     </div>
     <div class="card">
       <h3>Request name</h3><label for="reqTitle">Name (optional)</label><input type="text" id="reqTitle" maxlength="80" placeholder="e.g. Gulf Road – morning peak" autocomplete="off">
@@ -60,6 +60,9 @@
 <script>
   const repeatRequest = {{repeat_request|tojson if repeat_request else 'null'}};
   const canPreviewPointC = {{ 'true' if session.get('role') == 'admin' else 'false' }};
+  const noJunctionDeclaration = document.getElementById('noJunctionDeclaration');
+  const junctionQualityConsent = document.getElementById('junctionQualityConsent');
+  const acceptJunctionQuality = document.getElementById('acceptJunctionQuality');
   let pts = [], line = null, extensionLine = null, markerC = null, route = null, seq = 0;
   const map = L.map('map').setView([30.0444, 31.2357], 11); tiles(map); const rg = L.featureGroup().addTo(map);
   const fmt = p => [+p.lat.toFixed(6), +p.lng.toFixed(6)];
@@ -87,7 +90,11 @@
       ? `Exact range: ${startTime.value}–${endTime.value}. Included hourly periods: ${hours.map(hour => `${String(hour).padStart(2, '0')}:00-${String(hour + 1).padStart(2, '0')}:00`).join(', ')}.`
       : 'Choose a valid start and end time on the same day.';
     const needsPointC = [...document.querySelectorAll('#svl input:checked')].some(input => ['speed', 'travel', 'volumes'].includes(input.value));
-    ok.disabled = !(pts.length == 2 && route?.road && route.junctions === 0 && (!needsPointC || route.pointC) && nj.checked && hours.length && d1.value && document.querySelector('#svl input:checked'))
+    const verifiedRoute = route?.road && Number.isInteger(route.junctions) && route.junctions >= 0;
+    const routeAcknowledged = route?.junctions === 0 ? nj.checked : route?.junctions > 0 && acceptJunctionQuality.checked;
+    noJunctionDeclaration.hidden = !verifiedRoute || route.junctions !== 0;
+    junctionQualityConsent.hidden = !verifiedRoute || route.junctions === 0;
+    ok.disabled = !(pts.length == 2 && verifiedRoute && (!needsPointC || route.pointC) && routeAcknowledged && hours.length && d1.value && document.querySelector('#svl input:checked'))
   }
   function draw() {
     if (line) { rg.removeLayer(line); line = null }
@@ -163,7 +170,7 @@
     throw new Error('Could not extend the routed road far enough beyond B to place point C.');
   }
   async function solve() {
-    route = null; updateCoordinates(); check(); draw();
+    route = null; acceptJunctionQuality.checked = false; updateCoordinates(); check(); draw();
     if (pts.length < 2) { info.textContent = pts.length ? 'Start (A) selected. Click the map to select the end (B).' : 'Click the map to select the start (A) of the link.'; return }
     const a = pts[0].getLatLng(), b = pts[1].getLatLng(), my = ++seq;
     const needsPointC = [...document.querySelectorAll('#svl input:checked')].some(input => ['speed', 'travel', 'volumes'].includes(input.value));
@@ -194,14 +201,14 @@
     if (route.road) map.fitBounds(L.latLngBounds([...route.path, ...(canPreviewPointC ? route.extensionPath || [] : [])]), { padding: [25, 25], maxZoom: 16 });
     const A = fmt(pts[0].getLatLng()), B = fmt(pts[1].getLatLng());
     const pointCInfo = canPreviewPointC && route.pointC ? `<br>Delta (straight A–B): ${(a.distanceTo(b) / 1000).toFixed(3)} km<br>Ratio: ${route.ratio.toFixed(3)}<br>New Distance beyond B: ${(route.newDistance / 1000).toFixed(3)} km<br>Road distance A→C: ${(route.routeDistanceToC / 1000).toFixed(3)} km<br>Point C: ${fmt({lat:route.pointC[0],lng:route.pointC[1]}).join(', ')}` : '';
-    info.innerHTML = `A: ${A.join(', ')}<br>B: ${B.join(', ')}<br>` + (route.road ? `Road length: ~${route.km} km<br>` + (route.junctions ? `<b style="color:#92400E">⚠ ${route.junctions} possible junction(s) along this road. Move A or B so the link has none.</b>` : '✅ No junctions found along this road.') + pointCInfo
+    info.innerHTML = `A: ${A.join(', ')}<br>B: ${B.join(', ')}<br>` + (route.road ? `Road length: ~${route.km} km<br>` + (route.junctions ? `<b style="color:#92400E">⚠ ${route.junctions} possible junction(s) detected. Prefer moving A or B to exclude them; otherwise acknowledge the possible quality impact below.</b>` : '✅ No junctions found along this road.') + pointCInfo
       : `${route.error || `Road not found, straight-line distance: ~${route.km} km`}<br><b style="color:#92400E">The link could not be checked for intersections or point C, so it cannot be submitted.</b>`); check()
   }
   map.on('click', e => { if (pts.length >= 2) return; const m = L.marker(e.latlng, { draggable: true }).addTo(rg).bindTooltip(pts.length ? 'B' : 'A', { permanent: true, direction: 'top' }); m.on('dragend', solve); pts.push(m); updateCoordinates(); solve() });
-  reset.onclick = () => {   rg.clearLayers(); pts = []; line = null; extensionLine = null; markerC = null; route = null; seq++; nj.checked = false; msg.innerHTML = ''; updateCoordinates(); solve() };
+  reset.onclick = () => {   rg.clearLayers(); pts = []; line = null; extensionLine = null; markerC = null; route = null; seq++;   nj.checked = false; acceptJunctionQuality.checked = false; msg.innerHTML = ''; updateCoordinates(); solve() };
   resetOrder.onclick = () => {
     rg.clearLayers(); pts = []; line = null; extensionLine = null; markerC = null; route = null; seq++;
-    nj.checked = false; msg.replaceChildren(); q.value = ''; updateCoordinates();
+    nj.checked = false; acceptJunctionQuality.checked = false; msg.replaceChildren(); q.value = ''; updateCoordinates();
     startTime.value = ''; endTime.value = '';
     document.querySelectorAll('#svl input[type="checkbox"]').forEach(input => {
       input.checked = input.value === 'speed' || input.value === 'travel';
@@ -212,7 +219,7 @@
   document.querySelectorAll('.q').forEach(b => b.onclick = () => {
     startTime.value = b.dataset.start; endTime.value = b.dataset.end; check()
   });
-  nj.onchange = check; d1.onchange = check; startTime.oninput = check; endTime.oninput = check;
+  nj.onchange = check; acceptJunctionQuality.onchange = check; d1.onchange = check; startTime.oninput = check; endTime.oninput = check;
   svl.onchange = solve;
   if (repeatRequest) {
     d1.value = repeatRequest.date;
@@ -239,11 +246,16 @@
   };
   q.onkeydown = e => { if (e.key === 'Enter') go.click() };
   ok.onclick = async () => {
-    if (!route?.road || route.junctions !== 0) return;
+    if (!route?.road || !Number.isInteger(route.junctions) || route.junctions < 0) return;
+    const acceptsQualityImpact = route.junctions > 0 && acceptJunctionQuality.checked;
+    if (acceptsQualityImpact && !window.confirm(
+      `This route has ${route.junctions} possible intersection(s) between A and B. I agree to submit it knowing this may affect the quality of the results. Continue?`
+    )) return;
     const body = {
       type: 'link', services: [...document.querySelectorAll('#svl input:checked')].map(i => i.value), date: d1.value,
       start_time: startTime.value, end_time: endTime.value, hours: hourSlots(),
-      coords: [fmt(pts[0].getLatLng()), fmt(pts[1].getLatLng())], path: route.path, road_km: route.km, junctions: route.junctions, no_junctions: nj.checked,
+      coords: [fmt(pts[0].getLatLng()), fmt(pts[1].getLatLng())], path: route.path, road_km: route.km, junctions: route.junctions, no_junctions: route.junctions === 0 && nj.checked,
+      accept_intersection_quality_impact: acceptsQualityImpact,
       point_c: route.pointC ? fmt({lat:route.pointC[0],lng:route.pointC[1]}) : null,
       point_c_distance_km: route.routeDistanceToC ? route.routeDistanceToC / 1000 : null,
       area: `Link A to B (~${route.km} km${route.road ? ' by road' : ', straight line'})`,
