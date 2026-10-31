@@ -4,6 +4,7 @@ import math
 import os
 import shutil
 import subprocess
+import time
 import uuid
 from pathlib import Path
 
@@ -74,6 +75,59 @@ def request_run_dir(client_id, request_id):
     client_id = _positive_int(client_id, "client ID")
     request_id = _positive_int(request_id, "request ID")
     return volume_runs_root() / f"client-{client_id}" / f"REQ-{request_id}"
+
+
+def _paired_input_name(path):
+    """The input workbook that belongs to a ...-results.xlsx file."""
+    path = Path(path)
+    if path.name.endswith("-results.xlsx"):
+        return path.with_name(path.name[: -len("-results.xlsx")] + ".xlsx")
+    return path
+
+
+def cleanup_request_runs(client_id, request_id, keep_paths):
+    """Delete the superseded run workbooks of one request, keeping only the given results."""
+    run_dir = request_run_dir(client_id, request_id)
+    if not run_dir.is_dir():
+        return 0
+    keep = set()
+    for path in keep_paths:
+        if path:
+            keep.add(Path(path).resolve())
+            keep.add(_paired_input_name(path).resolve())
+    removed = 0
+    for path in run_dir.iterdir():
+        if path.is_file() and path.suffix == ".xlsx" and path.resolve() not in keep:
+            try:
+                path.unlink()
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
+def purge_stale_runs(referenced_paths, max_age_days, now=None):
+    """Delete run workbooks older than max_age_days that no workflow still points to."""
+    if not max_age_days or max_age_days <= 0:
+        return 0
+    root = volume_runs_root()
+    if not root.is_dir():
+        return 0
+    keep = set()
+    for path in referenced_paths:
+        if path:
+            keep.add(Path(path).resolve())
+            keep.add(_paired_input_name(path).resolve())
+    cutoff = (now if now is not None else time.time()) - max_age_days * 86400
+    removed = 0
+    for path in root.rglob("*.xlsx"):
+        try:
+            if path.is_file() and path.resolve() not in keep and path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+        except OSError:
+            continue
+    return removed
 
 
 def _normalize_rows(request_id, rows):

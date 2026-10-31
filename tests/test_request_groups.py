@@ -11,6 +11,7 @@ os.environ.setdefault("TRAFFICLENS_DB", os.path.join(_database_dir.name, "groups
 os.environ.setdefault("OUTSCRAPER_API_KEY", "unit-test-api-key")
 os.environ.setdefault("SECRET_KEY", "unit-test-session-secret-that-is-long-enough")
 os.environ.setdefault("TRAFFICLENS_OUTSCRAPER_AUTO_POLL", "0")
+os.environ.setdefault("TRAFFICLENS_MAINTENANCE", "0")  # no scheduled backups or cleanup during tests
 
 import app as traffic
 
