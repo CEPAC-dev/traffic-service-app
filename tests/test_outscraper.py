@@ -2802,8 +2802,9 @@ class OutscraperWorkflowTests(unittest.TestCase):
     def test_study_request_stores_exact_times_and_all_overlapping_hours(self):
         study_page = self.client.get("/study")
         self.assertEqual(study_page.status_code, 200)
-        self.assertIn(b'id="startTime" step="1"', study_page.data)
-        self.assertIn(b'id="endTime" step="1"', study_page.data)
+        # the order wizard replaced the fixed start/end inputs: each period gets its own client-entered start/end times
+        self.assertIn(b'id="periodRows"', study_page.data)
+        self.assertIn(b'name="mode" value="multi_link"', study_page.data)
         request_data = {
             "services": ["travel"], "date": "2026-10-21",
             "start_time": "07:15:30", "end_time": "09:00:00",

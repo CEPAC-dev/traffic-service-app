@@ -1,0 +1,27 @@
+{% extends "base.html" %}{% block body %}
+<div class="page-heading"><div><span class="eyebrow">{{ 'GROUPED ORDER' }}</span><h1>GRP-{{g.id}}{% if g.title %} · {{g.title}}{% endif %}</h1>
+<p>{{ card.links }} link{{ '' if card.links == 1 else 's' }} × {{ card.periods|length }} period{{ '' if card.periods|length == 1 else 's' }} = {{ card.count }} requests · study date {{g.study_date}}{% if admin_view %} · client {{g.client}}{% endif %}</p></div>
+<div class="row-actions">
+{% if admin_view and not card.sent %}<button class="btn" id="sendGroup" type="button" {{ '' if ready else 'disabled' }}>Send one report to client</button>{% endif %}
+{% if card.sent or admin_view %}<a class="btn {{ '' if card.sent else 'alt' }}" href="{{url_for('export_group_excel',gid=g.id)}}">Download Excel report</a>{% endif %}
+<a class="btn alt" href="{{ url_for('admin') if admin_view else url_for('my_requests') }}">Back</a></div></div>
+<div class="card" style="margin-bottom:14px"><p style="margin:0"><span class="b {{card.status}}">{{card.status}}</span>
+{% for s in card.services %}<span class="pill">{{SVINFO[s].icon}} {{SERVICES[s]}}</span>{% endfor %}
+{% if card.sent %}<span class="hint"> · Report sent {{g.sent_at}}</span>{% elif admin_view %}<span class="hint"> · {{ 'Every request is Completed. You can send the single report now.' if ready else 'Open each request below, finish its review, then send one report for the whole order.' }}</span>{% else %}<span class="hint"> · All results will arrive together in one report once every part is ready.</span>{% endif %}</p></div>
+<div class="tw"><table><thead><tr><th>Link</th><th>Period</th><th>Time range</th><th>A → B</th><th>Status</th>{% if admin_view or card.sent %}<th>Action</th>{% endif %}</tr></thead><tbody>
+{% for c in children %}<tr><td><b>Link {{c.link_no}}</b>{% if admin_view %}<small class="request-subtext">REQ-{{c.id}}</small>{% endif %}</td><td><span class="pill">{{c.period_label or '-'}}</span></td><td>{{c.time_range_label}}</td>
+<td class="request-data-cell">{{'%.5f, %.5f'|format(c.coords[0][0],c.coords[0][1])}}<br>{{'%.5f, %.5f'|format(c.coords[-1][0],c.coords[-1][1])}}</td>
+<td>{% if admin_view %}<span class="b {{c.status}}">{{c.status}}</span>{% else %}<span class="b {{ 'Completed' if card.sent and c.status != 'Rejected' else c.status if c.status == 'Rejected' else 'Processing' }}">{{ 'Completed' if card.sent and c.status != 'Rejected' else c.status if c.status == 'Rejected' else 'Preparing' }}</span>{% endif %}</td>
+{% if admin_view %}<td><a class="btn btn-small" href="{{url_for('admin_request',rid=c.id)}}">Open</a></td>{% elif card.sent %}<td>{% if c.status != 'Rejected' %}<a class="btn btn-small alt" href="{{url_for('result',rid=c.id)}}">Details</a>{% endif %}</td>{% endif %}</tr>{% endfor %}
+</tbody></table></div>
+{% endblock %}
+{% block js %}{% if admin_view and not card.sent %}<script>
+document.getElementById('sendGroup').onclick=async event=>{
+ const b=event.currentTarget;
+ if(!confirm('Send one report with all results of GRP-{{g.id}} to {{g.client|e}}?'))return;
+ b.disabled=true;
+ const r=await fetch('/api/groups/{{g.id}}/send',{method:'POST'});const j=await r.json();
+ if(!r.ok){b.disabled=false;return alert(j.error||'Could not send the report.')}
+ location.reload();
+};
+</script>{% endif %}{% endblock %}

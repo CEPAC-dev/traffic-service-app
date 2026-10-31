@@ -17,7 +17,7 @@
 <div class="dashboard-section">
 <div class="section-heading"><div><h2>Recent requests</h2><p>Latest client submissions requiring attention.</p></div><a class="btn alt" href="{{url_for('admin')}}#requests">All requests</a></div>
 <div class="card table-card"><div class="tw"><table class="recent-table"><thead><tr><th>Request ID</th><th>User</th><th>Service</th><th>A</th><th>B</th><th>Status</th><th>Created at</th><th>Action</th></tr></thead><tbody>
-{% for r in reqs[:8] %}<tr><td><b>REQ-{{r.id}}</b>{% if r.title %}<small class="request-subtext">{{r.title}}</small>{% endif %}</td><td>{{r.client}}</td><td>{% for service in r.services %}<span class="pill">{{SVINFO[service].icon}} {{SERVICES[service]}}</span>{% endfor %}</td>
+{% for r in reqs[:8] %}<tr><td><b>REQ-{{r.id}}</b>{% if r.group_id %} <a class="pill" href="{{url_for('admin_group',gid=r.group_id)}}">GRP-{{r.group_id}}{% if r.period_label %} · {{r.period_label}}{% endif %}</a>{% elif r.period_label %} <span class="pill">{{r.period_label}}</span>{% endif %}{% if r.title %}<small class="request-subtext">{{r.title}}</small>{% endif %}</td><td>{{r.client}}</td><td>{% for service in r.services %}<span class="pill">{{SVINFO[service].icon}} {{SERVICES[service]}}</span>{% endfor %}</td>
 <td class="request-data-cell">{{'%.5f, %.5f'|format(r.coords[0][0],r.coords[0][1]) if r.coords else '-'}}</td><td class="request-data-cell">{{'%.5f, %.5f'|format(r.coords[-1][0],r.coords[-1][1]) if r.coords else '-'}}</td>
 <td><span class="b {{'waiting_review' if r.waiting_for_review else r.status}}">{{r.dashboard_status}}</span></td><td>{{r.created}}</td><td><a class="btn btn-small" href="{{url_for('admin_request',rid=r.id)}}">View</a></td></tr>
 {% else %}<tr><td colspan="8"><div class="table-empty"><b>No requests yet</b><span>New client requests will appear here.</span></div></td></tr>{% endfor %}
@@ -35,7 +35,7 @@
 <button class="btn alt" id="clr" type="button">Clear filters</button>
 </div>
 <div class="card table-card"><div class="tw"><table id="rt" class="request-table"><thead><tr><th>Request ID</th><th>User</th><th>Service</th><th>A</th><th>B</th><th>Status</th><th>Created at</th><th>Action</th></tr></thead><tbody>
-{% for r in reqs %}<tr class="dr" data-status="{{r.status}}" data-review="{{'true' if r.waiting_for_review else 'false'}}" data-service="{{r.services|join(',')}}" data-created="{{r.created[:10]}}"><td><b>REQ-{{r.id}}</b>{% if r.title %}<small class="request-subtext">{{r.title}}</small>{% endif %}</td><td>{{r.client}}</td><td>{% for service in r.services %}<span class="pill">{{SVINFO[service].icon}} {{SERVICES[service]}}</span>{% endfor %}</td>
+{% for r in reqs %}<tr class="dr" data-status="{{r.status}}" data-review="{{'true' if r.waiting_for_review else 'false'}}" data-service="{{r.services|join(',')}}" data-created="{{r.created[:10]}}"><td><b>REQ-{{r.id}}</b>{% if r.group_id %} <a class="pill" href="{{url_for('admin_group',gid=r.group_id)}}">GRP-{{r.group_id}}{% if r.period_label %} · {{r.period_label}}{% endif %}</a>{% elif r.period_label %} <span class="pill">{{r.period_label}}</span>{% endif %}{% if r.title %}<small class="request-subtext">{{r.title}}</small>{% endif %}</td><td>{{r.client}}</td><td>{% for service in r.services %}<span class="pill">{{SVINFO[service].icon}} {{SERVICES[service]}}</span>{% endfor %}</td>
 <td class="request-data-cell">{{'%.5f, %.5f'|format(r.coords[0][0],r.coords[0][1]) if r.coords else '-'}}</td><td class="request-data-cell">{{'%.5f, %.5f'|format(r.coords[-1][0],r.coords[-1][1]) if r.coords else '-'}}</td>
 <td><span class="b {{'waiting_review' if r.waiting_for_review else r.status}}">{{r.dashboard_status}}</span></td><td>{{r.created}}</td><td><div class="row-actions"><a class="btn btn-small" href="{{url_for('admin_request',rid=r.id)}}">View</a>{% if r.status not in ('Completed','Rejected') %}<button class="btn alt btn-small reject-request" data-id="{{r.id}}">Reject</button>{% endif %}<button class="btn alt delete-request" data-id="{{r.id}}">Delete</button></div></td></tr>
 {% else %}<tr class="empty-row"><td colspan="8"><div class="table-empty"><b>No requests yet</b><span>New client requests will appear here.</span></div></td></tr>{% endfor %}
@@ -57,6 +57,11 @@
 <label class="cf"><input type="checkbox" class="service-enabled" data-k="{{k}}" {{ 'checked' if service.enabled }}> Available to clients</label>
 <textarea rows="4" data-k="{{k}}">{{ SVINFO[k].desc }}</textarea>
 <p><button class="btn svs" data-k="{{k}}" type="button">Save description</button> <button class="btn alt svr" data-k="{{k}}" type="button">Reset description</button><span class="msg"></span></p></div>{% endfor %}</div>
+<div class="card" style="margin-top:14px"><h3>Study periods</h3>
+<p class="sub">Clients pick from these period names (AM, MD, PM...) and enter the exact start and end times themselves, because peak hours differ by country.</p>
+<div class="chk">{% for p in periods %}<label><input type="checkbox" class="period-enabled" data-id="{{p.id}}" {{ 'checked' if p.is_active }}><span><b>{{p.label}}</b></span></label>{% endfor %}</div>
+<div class="grid2"><div><label for="newPeriodLabel">New period name</label><input id="newPeriodLabel" maxlength="12" placeholder="e.g. EVE"></div></div>
+<p><button class="btn" id="addPeriod" type="button">Add period</button><span class="msg" id="addPeriodMsg"></span></p></div>
 <div class="card" style="margin-top:14px"><h3>Add a service</h3>
 <div class="grid2"><div><label for="newServiceName">Service name</label><input id="newServiceName" maxlength="80" placeholder="e.g. Traffic volume or LOS"></div>
 <div><label for="newServiceUnit">Unit (optional)</label><input id="newServiceUnit" maxlength="24" placeholder="e.g. veh/h"></div></div>
@@ -193,6 +198,16 @@ document.querySelectorAll('.service-enabled').forEach(i=>i.onchange=async()=>{
  if(!r.ok){i.checked=!i.checked;alert(r.error||'Could not update service availability');return}
  note(i);
 });
+document.querySelectorAll('.period-enabled').forEach(i=>i.onchange=async()=>{
+ const r=await post(`/api/periods/${i.dataset.id}/availability`,{enabled:i.checked});
+ if(!r.ok){i.checked=!i.checked;alert(r.error||'Could not update this period');}
+});
+document.getElementById('addPeriod').onclick=async()=>{
+ const m=document.getElementById('addPeriodMsg');m.textContent='Adding...';
+ const r=await post('/api/periods',{label:newPeriodLabel.value});
+ if(!r.ok){m.textContent=r.error||'Could not add period';m.style.color='#B91C1C';return}
+ location.hash='services';location.reload();
+};
 document.getElementById('addService').onclick=async()=>{
  const m=document.getElementById('addServiceMsg');m.textContent='Adding...';
  const r=await post('/api/services/custom',{name:newServiceName.value,unit:newServiceUnit.value,kind:newServiceKind.value});
