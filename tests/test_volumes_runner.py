@@ -1,3 +1,5 @@
+import os
+import time
 import tempfile
 import unittest
 from pathlib import Path
@@ -105,6 +107,42 @@ class VolumeRunnerTests(unittest.TestCase):
         self.write_result_workbook(prepared["result_workbook"])
         self.assertIsNotNone(runner.find_existing_volume_result(7, self.request_rows(), 5))
         self.assertIsNone(runner.find_existing_volume_result(7, self.request_rows(), 6))
+
+    def test_cleanup_keeps_only_the_approved_run_of_that_request(self):
+        run_dir = runner.request_run_dir(5, 7)
+        run_dir.mkdir(parents=True)
+        for name in ("REQ-7-keep.xlsx", "REQ-7-keep-results.xlsx", "REQ-7-old.xlsx", "REQ-7-old-results.xlsx"):
+            (run_dir / name).write_bytes(b"x")
+        other_dir = runner.request_run_dir(6, 8)
+        other_dir.mkdir(parents=True)
+        (other_dir / "REQ-8-a.xlsx").write_bytes(b"x")
+
+        removed = runner.cleanup_request_runs(5, 7, [str(run_dir / "REQ-7-keep-results.xlsx")])
+
+        self.assertEqual(removed, 2)
+        self.assertEqual(sorted(path.name for path in run_dir.iterdir()), ["REQ-7-keep-results.xlsx", "REQ-7-keep.xlsx"])
+        self.assertTrue((other_dir / "REQ-8-a.xlsx").exists())
+        self.assertEqual(runner.cleanup_request_runs(5, 99, []), 0)
+
+    def test_purge_removes_only_old_unreferenced_run_files(self):
+        run_dir = runner.request_run_dir(5, 7)
+        run_dir.mkdir(parents=True)
+        old_unreferenced = run_dir / "REQ-7-old.xlsx"
+        old_referenced = run_dir / "REQ-7-ref-results.xlsx"
+        old_referenced_input = run_dir / "REQ-7-ref.xlsx"
+        recent = run_dir / "REQ-7-recent.xlsx"
+        for path in (old_unreferenced, old_referenced, old_referenced_input, recent):
+            path.write_bytes(b"x")
+        forty_days_ago = time.time() - 40 * 86400
+        for path in (old_unreferenced, old_referenced, old_referenced_input):
+            os.utime(path, (forty_days_ago, forty_days_ago))
+
+        self.assertEqual(runner.purge_stale_runs([str(old_referenced)], 0), 0)
+        removed = runner.purge_stale_runs([str(old_referenced)], 30)
+
+        self.assertEqual(removed, 1)
+        self.assertFalse(old_unreferenced.exists())
+        self.assertTrue(old_referenced.exists() and old_referenced_input.exists() and recent.exists())
 
     def test_client_id_is_required(self):
         for bad in (None, 0, -1, True, "5"):

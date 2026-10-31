@@ -1,0 +1,925 @@
+diff --git a/.env.example b/.env.example
+index e0f755d..06f5568 100644
+--- a/.env.example
++++ b/.env.example
+@@ -3,3 +3,11 @@ SECRET_KEY=generate-a-random-secret-for-local-use
+ OUTSCRAPER_API_KEY=your-outscraper-api-key
+ # Password for the first-run admin account (admin@demo.com). If empty, a random one is printed once at first start.
+ TRAFFICLENS_ADMIN_PASSWORD=
++# Upkeep (all optional). Backups go to ./backups unless TRAFFICLENS_BACKUP_DIR is set.
++TRAFFICLENS_BACKUP_EVERY_HOURS=24
++TRAFFICLENS_BACKUP_KEEP=7
++TRAFFICLENS_BACKUP_DIR=
++# Delete MATLAB run workbooks that are older than this many days and no longer referenced (0 = never).
++VOLUME_RUN_RETENTION_DAYS=30
++# Set to 0 to stop the built-in scheduler (for example when you run backup.py from Task Scheduler instead).
++TRAFFICLENS_MAINTENANCE=1
+diff --git a/.github/workflows/tests.yml b/.github/workflows/tests.yml
+new file mode 100644
+index 0000000..002a910
+--- /dev/null
++++ b/.github/workflows/tests.yml
+@@ -0,0 +1,21 @@
++name: Tests
++
++on:
++  push:
++    branches: [main]
++  pull_request:
++
++jobs:
++  test:
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++      - uses: actions/setup-python@v5
++        with:
++          python-version: "3.12"
++          cache: pip
++          cache-dependency-path: requirements.txt
++      - name: Install dependencies
++        run: pip install -r requirements.txt
++      - name: Run the test suite
++        run: python -m unittest discover -s tests -v
+diff --git a/.gitignore b/.gitignore
+index e0e4913..dbcefeb 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -12,3 +12,5 @@ outscraper_exports/
+ *.lock
+ ~$*.xlsx
+ *.asv
++instance/
++backups/
+diff --git a/README.md b/README.md
+index 68a9b32..9429041 100644
+--- a/README.md
++++ b/README.md
+@@ -34,6 +34,14 @@ Custom services can be recorded once per road link or once per selected hour, wi
+ **Free flow time** and **Free flow speed** are enabled by default. **Free flow time** uses Directions API at 7:00 AM in the route's local time zone on the nearest national public holiday to the study date (ties use the earlier date). **Free flow speed** uses 7:00 AM on the latest weekly weekend date before today in the route's country. The country is identified from the route midpoint using OpenStreetMap Nominatim; holiday dates come from the `holidays` package. The selected date and time zone are bound to the approval and recorded in the result page, Excel report, and Directions API result export. If the country or time zone cannot be identified, the request is not prepared.
+ After the provider job completes, its raw response is retained for admin review and the client report shows the exact date used. For Free flow time the app suggests an A-to-B value (the average over the response) in the request note, but the administrator must still enter or confirm the numeric value; the request is not marked Completed until they do. The integration does not infer a speed or travel-time field from undocumented provider response shapes.
+ 
++## History, lane suggestions, upkeep and backups
++- **Lane count for Volumes:** if the road network has a lane count for the link, it is offered as a suggestion in the admin's lane field. The admin still has to save it, so nothing starts without review. For Free flow time the admin gets a **Use suggested value** button; the value is saved only when the admin saves the request.
++- **Request history:** every admin action that changes a result (lanes, free-flow speed, approvals, status, saved values) is recorded with who did it and when. It appears under *Request history* on the admin request page.
++- **Restarts:** a MATLAB run that was in progress when the app stopped is marked as failed on the next start, and the admin can press Retry.
++- **Cleanup:** when volumes are approved, the other (older) run workbooks of that request are deleted. Unreferenced run workbooks older than `VOLUME_RUN_RETENTION_DAYS` (default 30) are removed.
++- **Backups:** the app writes a zip with a consistent database snapshot and all `instance/volume_runs` files every `TRAFFICLENS_BACKUP_EVERY_HOURS` (default 24) into `./backups`, keeping the newest `TRAFFICLENS_BACKUP_KEEP` (default 7). You can also run `python backup.py` yourself, for example from Windows Task Scheduler. Copy the `backups` folder to another disk or machine, because a backup next to the data does not protect against losing the machine. `.env` and `outscraper_exports/` are not included.
++- **Tests on GitHub:** `.github/workflows/tests.yml` runs the whole test suite on every push and pull request.
++
+ ## Traffic volumes: files per client
+ Each request that includes Volumes gets its own folder, `instance/volume_runs/client-<client id>/REQ-<request id>/`, holding that request's MATLAB input workbook and result workbook. `Inquiries_12-10-2026.xlsx` is only a read-only template (headers); no request is ever written back to it, so no workbook mixes clients. Volumes are rounded to whole vehicles per hour and the lane count must be a whole number from 1 to 12. The admin can download a request's result workbook from the request page; the client gets a **Download Volumes workbook** link on their result page after the admin approves the volumes. Before approving, the admin sees warnings for negative, zero, or implausibly high per-lane volumes.
+ 
+diff --git a/app.py b/app.py
+index 6a2eab5..d3764d0 100644
+--- a/app.py
++++ b/app.py
+@@ -2,13 +2,14 @@ import csv, hashlib, io, json, math, os, re, secrets, sqlite3, threading, time,
+ from functools import lru_cache, wraps
+ from pathlib import Path
+ from flask import Flask, g, render_template, request, redirect, url_for, session, jsonify, abort, flash
+-from flask import send_file
++from flask import send_file, has_request_context
+ from werkzeug.security import generate_password_hash, check_password_hash
+ from dotenv import load_dotenv
+ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+ import urllib.error
+ from urllib.parse import urlencode
+ from urllib.request import Request as UrlRequest, urlopen
++import backup as backup_tool
+ import volumes_runner
+ try:
+     import holidays
+@@ -37,6 +38,7 @@ if not configured_secret:
+     app.logger.warning("SECRET_KEY is not configured; using an ephemeral key for this local run.")
+ app.config["MAX_CONTENT_LENGTH"] = 300 * 1024 * 1024   # network files can be large
+ app.config["OUTSCRAPER_AUTO_POLL"] = os.environ.get("TRAFFICLENS_OUTSCRAPER_AUTO_POLL", "1") != "0"
++app.config["MAINTENANCE_AUTO_START"] = os.environ.get("TRAFFICLENS_MAINTENANCE", "1") != "0"
+ DB = os.environ.get("TRAFFICLENS_DB") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "mobility.db")
+ SERVICES = {"lanes": "Number of lanes", "speed": "Speed", "travel": "Travel time", "length": "Length",
+             "freeflow_time": "Free flow time", "freeflow_speed": "Free flow speed", "capacity": "Capacity",
+@@ -87,6 +89,11 @@ CREATE TABLE IF NOT EXISTS requests(id INTEGER PRIMARY KEY, user_id INTEGER, cre
+   start_time TEXT, end_time TEXT, point_c TEXT, point_c_distance_km REAL,
+   show_point_c INTEGER NOT NULL DEFAULT 0, title TEXT,
+   junction_quality_ack INTEGER NOT NULL DEFAULT 0, junction_quality_ack_at TEXT);
++CREATE TABLE IF NOT EXISTS audit_log(
++  id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, user_id INTEGER, user_name TEXT,
++  role TEXT, action TEXT NOT NULL, request_id INTEGER, details TEXT
++);
++CREATE INDEX IF NOT EXISTS idx_audit_request ON audit_log(request_id, id);
+ CREATE TABLE IF NOT EXISTS service_info(key TEXT PRIMARY KEY, description TEXT);
+ CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
+ CREATE TABLE IF NOT EXISTS notifications(
+@@ -197,6 +204,99 @@ def _create_notification(user_id, request_id, kind, title, message):
+         (user_id, request_id, kind, title, message, dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+     )
+ 
++def audit(action, request_id=None, **details):
++    """Record who did what to a request. The caller commits together with its own change."""
++    actor = (session.get("uid"), session.get("name"), session.get("role")) if has_request_context() else (None, "system", "system")
++    try:
++        db().execute(
++            "INSERT INTO audit_log(created_at,user_id,user_name,role,action,request_id,details) VALUES(?,?,?,?,?,?,?)",
++            (_timestamp_now(), *actor, action, request_id, json.dumps(details, default=str, ensure_ascii=False)),
++        )
++    except sqlite3.Error as exc:
++        app.logger.warning("audit log write failed: %s", exc)
++
++AUDIT_LABELS = {
++    "request_saved": "Request saved",
++    "status_changed": "Status changed",
++    "service_saved": "Service value saved",
++    "directions_confirmed": "Directions result approved",
++    "volumes_lanes_saved": "Lane count saved",
++    "volumes_freeflow_accepted": "Free-flow speed accepted",
++    "volumes_retry_requested": "MATLAB retry requested",
++    "volumes_approved": "Volumes approved and sent to the client",
++    "volumes_run_interrupted": "MATLAB run interrupted by an app restart",
++}
++
++def _audit_details_text(raw):
++    try:
++        details = json.loads(raw or "{}")
++    except ValueError:
++        return str(raw or "")[:400]
++    if not isinstance(details, dict):
++        return str(details)[:400]
++    text = "; ".join(f"{key}: {json.dumps(value, ensure_ascii=False) if isinstance(value, (list, dict)) else value}" for key, value in details.items())
++    return text if len(text) <= 600 else text[:597] + "..."
++
++def _audit_entries_for_request(rid, limit=200):
++    rows = db().execute(
++        "SELECT created_at,user_name,role,action,details FROM audit_log WHERE request_id=? ORDER BY id DESC LIMIT ?",
++        (rid, limit),
++    ).fetchall()
++    return [
++        {
++            "when": row["created_at"],
++            "who": f"{row['user_name'] or 'unknown'} ({row['role'] or '-'})",
++            "action": AUDIT_LABELS.get(row["action"], row["action"]),
++            "details": _audit_details_text(row["details"]),
++        }
++        for row in rows
++    ]
++
++def _cleanup_superseded_volume_runs(rid):
++    """After a result is approved, keep only that run's workbooks for the request."""
++    try:
++        row = db().execute(
++            "SELECT r.user_id, w.workbook_path FROM requests r JOIN volumes_workflows w ON w.request_id=r.id WHERE r.id=?",
++            (rid,),
++        ).fetchone()
++        if row and row["workbook_path"]:
++            volumes_runner.cleanup_request_runs(row["user_id"], rid, [row["workbook_path"]])
++    except (OSError, ValueError, sqlite3.Error) as exc:
++        app.logger.warning("could not clean old volume runs for request %s: %s", rid, exc)
++
++def _run_maintenance_once():
++    """Purge stale run files and take a backup if one is due. Safe to call repeatedly."""
++    retention_days = int(os.environ.get("VOLUME_RUN_RETENTION_DAYS", "30") or 0)
++    backup_hours = float(os.environ.get("TRAFFICLENS_BACKUP_EVERY_HOURS", "24") or 0)
++    with app.app_context():
++        if retention_days > 0:
++            referenced = [row["workbook_path"] for row in db().execute("SELECT workbook_path FROM volumes_workflows WHERE workbook_path IS NOT NULL")]
++            removed = volumes_runner.purge_stale_runs(referenced, retention_days)
++            if removed:
++                app.logger.info("removed %s stale MATLAB run workbook(s)", removed)
++    if backup_hours > 0:
++        dest = backup_tool.default_backup_dir()
++        last = backup_tool.latest_backup_time(dest)
++        if last is None or (dt.datetime.now() - last).total_seconds() >= backup_hours * 3600:
++            keep = int(os.environ.get("TRAFFICLENS_BACKUP_KEEP", "7") or 7)
++            path = backup_tool.run_backup(
++                db_path=DB, runs_dir=volumes_runner.volume_runs_root(), dest_dir=dest, keep=keep,
++            )
++            app.logger.info("backup written: %s", path)
++
++def _maintenance_loop():
++    while True:
++        try:
++            _run_maintenance_once()
++        except Exception:
++            app.logger.exception("scheduled maintenance failed")
++        time.sleep(3600)
++
++def start_maintenance():
++    thread = threading.Thread(target=_maintenance_loop, name="trafficlens-maintenance", daemon=True)
++    thread.start()
++    return thread
++
+ def _notify_admins_new_request(request_id, client_name):
+     admins = db().execute("SELECT id FROM users WHERE role='admin'").fetchall()
+     for admin_user in admins:
+@@ -310,9 +410,22 @@ def init():
+         ("freeflow_validation_json", "TEXT"),
+         ("freeflow_override", "INTEGER NOT NULL DEFAULT 0"),
+         ("freeflow_accepted_at", "TEXT"),
++        ("suggested_lanes", "INTEGER"),
+     ):
+         if column not in volume_cols:
+             c.execute(f"ALTER TABLE volumes_workflows ADD COLUMN {column} {definition}")
++    interrupted = [row[0] for row in c.execute("SELECT request_id FROM volumes_workflows WHERE status='running'")]
++    if interrupted:
++        stamp = _timestamp_now()
++        for interrupted_id in interrupted:
++            c.execute(
++                "UPDATE volumes_workflows SET status='failed', error=?, updated_at=? WHERE request_id=? AND status='running'",
++                ("The app restarted while MATLAB was running. Use Retry to run the calculation again.", stamp, interrupted_id),
++            )
++            c.execute(
++                "INSERT INTO audit_log(created_at,user_id,user_name,role,action,request_id,details) VALUES(?,NULL,'system','system','volumes_run_interrupted',?,?)",
++                (stamp, interrupted_id, json.dumps({"reason": "app restart"})),
++            )
+     c.execute(
+         "UPDATE volumes_workflows SET freeflow_accepted=1 "
+         "WHERE freeflow_speed IS NOT NULL AND freeflow_accepted=0 AND freeflow_result_json IS NULL"
+@@ -1556,6 +1669,28 @@ def net_services():
+     if cfg.get("capacity"): out.append("capacity")
+     return out
+ 
++def _network_lane_suggestion(lookup_result):
++    """A usable lane count from a road-network lookup, or None (0 lanes in the file means 'unknown')."""
++    try:
++        lanes = int(((lookup_result or {}).get("values", {}).get("lanes") or {}).get("value"))
++    except (TypeError, ValueError):
++        return None
++    return lanes if 1 <= lanes <= MAX_VOLUME_LANES else None
++
++def _backfill_suggested_lanes(rid, path_json):
++    """Requests created before lane suggestions existed: look the link up once. 0 = looked up, nothing usable."""
++    cfg = get_setting("network", {})
++    if not (network.HAVE_GEO and cfg.get("file")):
++        return None
++    try:
++        lanes = _network_lane_suggestion(network.lookup(cfg, json.loads(path_json or "[]")))
++    except Exception as exc:  # a bad network file must never break the admin page
++        app.logger.warning("lane suggestion lookup failed for request %s: %s", rid, exc)
++        return None
++    db().execute("UPDATE volumes_workflows SET suggested_lanes=? WHERE request_id=?", (lanes or 0, rid))
++    db().commit()
++    return lanes
++
+ def apply_network(rid):
+     """Fill the services the network can answer. Pending request: all answered -> Completed, some answered -> Processing."""
+     cfg = get_setting("network", {})
+@@ -1572,6 +1707,10 @@ def apply_network(rid):
+         if v and not (cur.get("rows") and cur.get("source") != "network"):     # never overwrite what the admin entered
+             data[s] = {"rows": [{"value": v["value"]}], "note": v["note"], "source": "network", "updated": now}
+             filled.append(s)
++    if "volumes" in d["services"]:
++        suggested_lanes = _network_lane_suggestion(res)
++        if suggested_lanes:
++            db().execute("UPDATE volumes_workflows SET suggested_lanes=? WHERE request_id=?", (suggested_lanes, rid))
+     status, reply, reply_at = row["status"], row["reply"], row["reply_at"]
+     if status == "Pending" and filled:
+         answered = [s for s in d["services"] if data.get(s, {}).get("rows")]
+@@ -2674,6 +2813,9 @@ def admin_request(rid):
+         "SELECT * FROM volumes_workflows WHERE request_id=?", (rid,)
+     ).fetchone()
+     volumes_workflow = dict(volumes_row) if volumes_row else None
++    if (volumes_workflow and volumes_workflow.get("lanes") is None
++            and volumes_workflow.get("suggested_lanes") is None and volumes_workflow["status"] != "sent"):
++        volumes_workflow["suggested_lanes"] = _backfill_suggested_lanes(rid, r["path"]) or 0
+     if volumes_workflow and volumes_workflow.get("result_json"):
+         volumes_workflow["result"] = json.loads(volumes_workflow["result_json"])
+     if volumes_workflow and volumes_workflow.get("freeflow_result_json"):
+@@ -2711,7 +2853,8 @@ def admin_request(rid):
+         directions_workflow = dict(workflow_row)
+         directions_workflow["result"] = json.loads(directions_workflow.pop("result_json") or "null")
+     return render_template("admin_request.html", r=to_dict(r), forms=forms_catalog(), statuses=STATUSES,
+-                           directions_workflow=directions_workflow, volumes_workflow=volumes_workflow)
++                           directions_workflow=directions_workflow, volumes_workflow=volumes_workflow,
++                           audit_entries=_audit_entries_for_request(rid))
+ 
+ _timezone_finder = TimezoneFinder() if TimezoneFinder is not None else None
+ 
+@@ -3519,6 +3662,7 @@ def save_volumes_lanes(rid):
+     )
+     if "lanes" in requested_services:
+         db().execute("UPDATE requests SET data=? WHERE id=?", (json.dumps(request_data, ensure_ascii=False), rid))
++    audit("volumes_lanes_saved", rid, lanes=lanes)
+     db().commit()
+     _start_volume_calculation(rid)
+     return jsonify(ok=True)
+@@ -3679,6 +3823,7 @@ def accept_volume_freeflow(rid):
+             workflow["freeflow_job_id"],
+         ),
+     )
++    audit("volumes_freeflow_accepted", rid, freeflow_speed=workflow["freeflow_speed"], used_anyway=use_anyway)
+     db().commit()
+     started = _start_volume_calculation(rid)
+     return jsonify(
+@@ -3705,6 +3850,7 @@ def retry_volumes_calculation(rid):
+         "UPDATE volumes_workflows SET status='waiting_for_inputs', error=NULL, updated_at=? WHERE request_id=?",
+         (_timestamp_now(), rid),
+     )
++    audit("volumes_retry_requested", rid)
+     db().commit()
+     started = _start_volume_calculation(rid)
+     current = db().execute(
+@@ -3859,7 +4005,14 @@ def confirm_volumes_result(rid):
+         f"The administrator approved the results for request REQ-{rid}." if sent_directions
+         else f"The administrator approved the traffic volume results for request REQ-{rid}.",
+     )
++    audit(
++        "volumes_approved", rid,
++        lanes=workflow["lanes"], freeflow_speed=workflow["freeflow_speed"],
++        sent_values=[{"hour": item["hour"], "value": item["value"], "tolerance": item["tolerance"]} for item in volume_data["rows"]],
++        warnings_shown=result.get("warnings") or [],
++    )
+     d.commit()
++    _cleanup_superseded_volume_runs(rid)
+     return jsonify(
+         ok=True,
+         status="sent",
+@@ -3950,6 +4103,7 @@ def confirm_request_directions(rid):
+                 "Request results are ready",
+                 f"The administrator approved {', '.join(visible_services)} for request REQ-{rid}. Traffic volumes are still being prepared.",
+             )
++        audit("directions_confirmed", rid, services=sorted({"travel", "speed"}.intersection(requested_services)), with_volumes=True)
+         d.commit()
+         if volume_workflow["status"] != "sent":
+             if volume_workflow["freeflow_result_json"]:
+@@ -4016,6 +4170,7 @@ def confirm_request_directions(rid):
+         "Request results are ready",
+         f"The administrator approved the directions results for request REQ-{rid}.",
+     )
++    audit("directions_confirmed", rid, with_volumes=False)
+     d.commit()
+     return jsonify(ok=True, status="confirmed", confirmed_at=now, result_url=url_for("result", rid=rid))
+ 
+@@ -4112,7 +4267,9 @@ def save_service(rid, service):
+             saved[context_key] = data[service][context_key]
+             saved["outscraper_job_id"] = data[service].get("outscraper_job_id")
+     data[service] = saved
+-    db().execute("UPDATE requests SET data=? WHERE id=?", (json.dumps(data), rid)); db().commit()
++    db().execute("UPDATE requests SET data=? WHERE id=?", (json.dumps(data), rid))
++    audit("service_saved", rid, service=service, rows=saved["rows"], note=saved["note"][:200])
++    db().commit()
+     return jsonify(ok=True, rows=len(data[service]["rows"]))
+ 
+ @app.post("/api/requests/<int:rid>/save-all")
+@@ -4184,6 +4341,10 @@ def save_request_changes(rid):
+         db().execute(f"UPDATE requests SET {', '.join(updates)} WHERE id=?", params)
+         if reply is not None:
+             _notify_request_owner_reply(rid, row["user_id"], row["reply"] or "", reply)
++        audit(
++            "request_saved", rid, services={name: values["rows"] for name, values in clean_services.items()},
++            status=status, old_status=row["status"], reply_changed=reply is not None and reply != (row["reply"] or ""),
++        )
+         db().commit()
+     return jsonify(ok=True, saved_services=list(clean_services), status=status or row["status"])
+ 
+@@ -4197,7 +4358,10 @@ def set_status(rid):
+         json.loads(row["services"] or "[]"), json.loads(row["data"] or "{}")
+     ):
+         return jsonify(error="A request cannot be marked Completed until every selected service has a result ready for the client."), 409
+-    db().execute("UPDATE requests SET status=? WHERE id=?", (s, rid)); db().commit()
++    previous = db().execute("SELECT status FROM requests WHERE id=?", (rid,)).fetchone()["status"]
++    db().execute("UPDATE requests SET status=? WHERE id=?", (s, rid))
++    audit("status_changed", rid, old_status=previous, new_status=s)
++    db().commit()
+     return jsonify(ok=True, status=s)
+ 
+ @app.post("/api/requests/<int:rid>/reply")
+@@ -4484,5 +4648,9 @@ if app.config["OUTSCRAPER_AUTO_POLL"]:
+     for recoverable in recoverable_jobs:
+         _start_outscraper_monitor(recoverable["job_id"])
+ 
++# "python app.py" runs the code twice under the debug reloader; only the child process does the upkeep.
++if app.config["MAINTENANCE_AUTO_START"] and (__name__ != "__main__" or os.environ.get("WERKZEUG_RUN_MAIN") == "true"):
++    start_maintenance()
++
+ if __name__ == "__main__":
+     app.run(debug=True)
+\ No newline at end of file
+diff --git a/backup.py b/backup.py
+new file mode 100644
+index 0000000..89c4722
+--- /dev/null
++++ b/backup.py
+@@ -0,0 +1,97 @@
++"""Back up the TrafficLens database and the per-client MATLAB workbooks.
++
++Run it by hand or from Windows Task Scheduler / cron:
++
++    python backup.py                 # one backup now, keep the newest 7
++    python backup.py --keep 14 --dest D:\\Backups\\trafficlens
++
++The app also calls run_backup() on a schedule (TRAFFICLENS_BACKUP_EVERY_HOURS).
++"""
++
++import argparse
++import datetime as dt
++import os
++import sqlite3
++import zipfile
++from pathlib import Path
++
++APP_DIR = Path(__file__).resolve().parent
++BACKUP_PREFIX = "trafficlens-backup-"
++
++
++def default_db_path():
++    return Path(os.environ.get("TRAFFICLENS_DB") or APP_DIR / "mobility.db")
++
++
++def default_runs_dir():
++    return APP_DIR / "instance" / "volume_runs"
++
++
++def default_backup_dir():
++    return Path(os.environ.get("TRAFFICLENS_BACKUP_DIR") or APP_DIR / "backups")
++
++
++def list_backups(dest_dir):
++    return sorted(Path(dest_dir).glob(f"{BACKUP_PREFIX}*.zip"))
++
++
++def latest_backup_time(dest_dir):
++    backups = list_backups(dest_dir)
++    if not backups:
++        return None
++    return dt.datetime.fromtimestamp(max(path.stat().st_mtime for path in backups))
++
++
++def run_backup(db_path=None, runs_dir=None, dest_dir=None, keep=7, now=None):
++    """Write one zip with a consistent database snapshot plus every volume_runs file."""
++    db_path = Path(db_path or default_db_path())
++    runs_dir = Path(runs_dir or default_runs_dir())
++    dest_dir = Path(dest_dir or default_backup_dir())
++    if not db_path.is_file():
++        raise FileNotFoundError(f"Database not found: {db_path}")
++    dest_dir.mkdir(parents=True, exist_ok=True)
++    stamp = (now or dt.datetime.now()).strftime("%Y%m%d-%H%M%S")
++    snapshot = dest_dir / f".snapshot-{stamp}.sqlite"
++    partial = dest_dir / f".{BACKUP_PREFIX}{stamp}.zip.part"
++    target = dest_dir / f"{BACKUP_PREFIX}{stamp}.zip"
++    try:
++        # SQLite's backup API copies a consistent snapshot even while the app is writing.
++        source = sqlite3.connect(db_path)
++        copy = sqlite3.connect(snapshot)
++        try:
++            source.backup(copy)
++        finally:
++            copy.close()
++            source.close()
++        with zipfile.ZipFile(partial, "w", zipfile.ZIP_DEFLATED) as archive:
++            archive.write(snapshot, "database.sqlite")
++            if runs_dir.is_dir():
++                for path in sorted(runs_dir.rglob("*")):
++                    if path.is_file() and not path.name.startswith("."):
++                        archive.write(path, f"volume_runs/{path.relative_to(runs_dir).as_posix()}")
++        os.replace(partial, target)
++    finally:
++        for leftover in (snapshot, partial):
++            try:
++                leftover.unlink()
++            except FileNotFoundError:
++                pass
++    keep = max(1, int(keep))
++    for old in list_backups(dest_dir)[:-keep]:
++        try:
++            old.unlink()
++        except OSError:
++            pass
++    return target
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
++    parser.add_argument("--dest", default=None, help="folder for the backup zips (default: ./backups)")
++    parser.add_argument("--keep", type=int, default=7, help="how many backups to keep (default: 7)")
++    args = parser.parse_args()
++    print(run_backup(dest_dir=args.dest, keep=args.keep))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/templates/admin_request.html b/templates/admin_request.html
+index 76db886..e490e04 100644
+--- a/templates/admin_request.html
++++ b/templates/admin_request.html
+@@ -77,7 +77,7 @@
+ <div class="svc-h"><h3>Traffic volumes · MATLAB workflow</h3><span id="volumesWorkflowBadge" class="b {{volumes_workflow.status}}">{{volumes_workflow.status|replace('_',' ')|title}}</span></div>
+ <p id="volumesWorkflowMessage" class="hint" aria-live="polite">{% if volumes_workflow.error %}{{volumes_workflow.error}}{% elif volumes_workflow.status=='ready_for_review' %}MATLAB finished. Review the hourly volumes and RMSE tolerance before sending them to the client.{% if 'speed' in r.services or 'travel' in r.services %} Speed / Travel results are sent in the same step.{% endif %}{% elif volumes_workflow.status=='sent' %}Approved volume results have been sent to the client.{% else %}Provide lane count, confirm actual speeds, and accept a valid free-flow speed. MATLAB starts only after all required inputs are ready.{% endif %}</p>
+ <div class="grid2">
+-<div><label for="volumeLaneCount">Number of lanes</label><input id="volumeLaneCount" type="number" min="1" max="12" step="1" value="{{volumes_workflow.lanes or ''}}" {% if volumes_workflow.status in ('running','ready_for_review','sent') %}disabled{% endif %}></div>
++<div><label for="volumeLaneCount">Number of lanes</label><input id="volumeLaneCount" type="number" min="1" max="12" step="1" value="{{volumes_workflow.lanes or volumes_workflow.suggested_lanes or ''}}" {% if volumes_workflow.status in ('running','ready_for_review','sent') %}disabled{% endif %}>{% if not volumes_workflow.lanes and volumes_workflow.suggested_lanes %}<small class="hint">Suggested from the road network: {{volumes_workflow.suggested_lanes}}. Confirm it or change it before saving.</small>{% endif %}</div>
+ <div><label for="volumeFreeflowSpeed">Free-flow speed · weekly weekend reference</label><input id="volumeFreeflowSpeed" readonly value="{{'%.2f'|format(volumes_workflow.freeflow_speed) if volumes_workflow.freeflow_speed is not none else 'Waiting for API result'}}"><small id="volumeFreeflowContext" class="hint">{% if volumes_workflow.freeflow_context %}{{volumes_workflow.freeflow_context.weekend_day}} {{volumes_workflow.freeflow_context.weekend_date}} · selected local time window {{volumes_workflow.freeflow_context.timezone}}{% endif %}</small></div>
+ </div>
+ <div id="freeflowValidationPanel" class="note-box" {% if not volumes_workflow.freeflow_validation %}hidden{% endif %}>
+@@ -111,8 +111,12 @@
+ {% if r.point_c %}<div class="card point-c-visibility"><label class="cf"><input type="checkbox" id="showPointC" {{ 'checked' if r.show_point_c }}> Show calculated point C to the client on the result page and Excel report</label><p class="hint">Point C is hidden from the client until you enable this option and save.</p></div>{% endif %}
+ <div class="service-heading"><h2 class="t">Service data</h2><p>Update any values, status, or reply, then save them together.</p></div><div id="svcs"></div>
+ <div class="save-all-bar"><span id="saveAllMsg" role="status" aria-live="polite"></span><button class="btn" id="saveAll" type="button">Save all changes</button></div>
++<details class="card" id="requestHistory"><summary><b>Request history</b> · who changed what{% if audit_entries %} ({{audit_entries|length}}){% endif %}</summary>
++{% if audit_entries %}<div class="tw"><table><thead><tr><th>When</th><th>Who</th><th>Action</th><th>Details</th></tr></thead><tbody>{% for entry in audit_entries %}<tr><td>{{entry.when}}</td><td>{{entry.who}}</td><td>{{entry.action}}</td><td><small>{{entry.details}}</small></td></tr>{% endfor %}</tbody></table></div>{% else %}<p class="hint">No admin actions have been recorded for this request yet.</p>{% endif %}
++</details>
+ {% endblock %}
+ {% block js %}<script>
++document.addEventListener('click',e=>{const b=e.target.closest('.use-suggested');if(!b)return;const input=b.closest('.svc').querySelector('input[data-i="0"]');input.value=b.dataset.value;input.dispatchEvent(new Event('input',{bubbles:true}));input.focus();});
+ const REQ={{ r|tojson }},FORMS={{ forms|tojson }},SV={{ SERVICES|tojson }},SVI={{ SVINFO|tojson }};
+ const VOLUMES_ALREADY_SENT={{ 'true' if volumes_workflow and volumes_workflow.status=='sent' else 'false' }};
+ const HAS_CLIENT_DIRECTIONS={{ 'true' if 'speed' in r.services or 'travel' in r.services else 'false' }};
+@@ -147,7 +151,7 @@ REQ.services.forEach(s=>{
+  const el=document.createElement('div');el.className='card svc';
+  el.innerHTML=`<div class="svc-h"><h3>${SVI[s].icon} ${esc(SV[s])} ${saved.source==='network'?'<span class="pill">🗺️ From road network</span>':''}</h3><span class="b badge"></span></div><p class="hint">${esc(F.hint)}${s==='volumes'?' Calculated by MATLAB and released only after explicit review; manual entry is disabled.':directionsManaged?' Values are extracted automatically from the Scraper response; manual entry is disabled.':''}${s==='length'&&REQ.road_km?` The length of the route on the map is ${REQ.road_km} km.`:''}</p>
+  ${hourly?`<div class="tw"><table class="ed"><thead><tr><th>Hour</th><th>${esc(F.label)}${unit}</th></tr></thead><tbody>${rows.map((r,i)=>`<tr><td><b>${pad(r.hour)}:00 to ${pad(r.hour+1)}:00</b></td><td><input type="${inputType}" ${inputType==='number'?'step="any"':''} ${directionsDisabled} data-i="${i}" value="${esc(r.value)}"></td></tr>`).join('')||'<tr><td colspan="2">No hours were selected for this request.</td></tr>'}</tbody></table></div>`
+-  :`<label>${esc(F.label)}${unit}</label><input type="${inputType}" ${inputType==='number'?'step="any"':''} ${directionsDisabled} data-i="0" value="${esc(rows[0].value)}" style="max-width:240px">`}
++  :`<label>${esc(F.label)}${unit}</label><input type="${inputType}" ${inputType==='number'?'step="any"':''} ${directionsDisabled} data-i="0" value="${esc(rows[0].value)}" style="max-width:240px">${s==='freeflow_time'&&saved.suggested_minutes!=null&&!sr.length?`<p><button type="button" class="btn alt use-suggested" data-value="${Math.round(saved.suggested_minutes*100)/100}">Use suggested value (${Math.round(saved.suggested_minutes*100)/100} min)</button> <small class="hint">Review it, then save as usual.</small></p>`:''}`}
+  <label>Admin answer / notes for this service</label><textarea class="note" rows="3" ${directionsDisabled}>${esc(saved.note)}</textarea>
+  <p class="service-save-msg msg" aria-live="polite"></p>`;
+  document.getElementById('svcs').appendChild(el);
+diff --git a/tests/test_backup.py b/tests/test_backup.py
+new file mode 100644
+index 0000000..7088ecd
+--- /dev/null
++++ b/tests/test_backup.py
+@@ -0,0 +1,59 @@
++import datetime as dt
++import sqlite3
++import tempfile
++import unittest
++import zipfile
++from pathlib import Path
++
++import backup
++
++
++class BackupTests(unittest.TestCase):
++    def make_database(self, root):
++        db_path = root / "app.db"
++        connection = sqlite3.connect(db_path)
++        connection.execute("CREATE TABLE sample(value INTEGER)")
++        connection.execute("INSERT INTO sample VALUES (42)")
++        connection.commit()
++        connection.close()
++        return db_path
++
++    def test_backup_holds_a_database_snapshot_and_run_files_and_prunes_old_ones(self):
++        with tempfile.TemporaryDirectory() as temp:
++            root = Path(temp)
++            db_path = self.make_database(root)
++            runs = root / "runs"
++            (runs / "client-1" / "REQ-1").mkdir(parents=True)
++            (runs / "client-1" / "REQ-1" / "result.xlsx").write_bytes(b"workbook")
++            dest = root / "backups"
++
++            created = [
++                backup.run_backup(db_path, runs, dest, keep=2, now=dt.datetime(2026, 10, day, 10, 0, 0))
++                for day in (1, 2, 3)
++            ]
++
++            remaining = backup.list_backups(dest)
++            self.assertEqual(remaining, created[1:])
++            self.assertEqual([path.name for path in dest.iterdir() if path.name.startswith(".")], [])
++            with zipfile.ZipFile(created[-1]) as archive:
++                self.assertEqual(
++                    sorted(archive.namelist()),
++                    ["database.sqlite", "volume_runs/client-1/REQ-1/result.xlsx"],
++                )
++                restored = root / "restored.sqlite"
++                restored.write_bytes(archive.read("database.sqlite"))
++            connection = sqlite3.connect(restored)
++            self.assertEqual(connection.execute("SELECT value FROM sample").fetchone()[0], 42)
++            connection.close()
++            self.assertIsNotNone(backup.latest_backup_time(dest))
++
++    def test_missing_database_is_reported_and_leaves_nothing_behind(self):
++        with tempfile.TemporaryDirectory() as temp:
++            root = Path(temp)
++            with self.assertRaises(FileNotFoundError):
++                backup.run_backup(root / "missing.db", root / "runs", root / "backups")
++            self.assertEqual(backup.list_backups(root / "backups"), [])
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_outscraper.py b/tests/test_outscraper.py
+index a474d9a..785d44a 100644
+--- a/tests/test_outscraper.py
++++ b/tests/test_outscraper.py
+@@ -19,8 +19,10 @@ os.environ["TRAFFICLENS_DB"] = os.path.join(_database_dir.name, "test.db")
+ os.environ["OUTSCRAPER_API_KEY"] = "unit-test-api-key"
+ os.environ["SECRET_KEY"] = "unit-test-session-secret-that-is-long-enough"
+ os.environ["TRAFFICLENS_OUTSCRAPER_AUTO_POLL"] = "0"
++os.environ["TRAFFICLENS_MAINTENANCE"] = "0"
+ 
+ import app as traffic
++_REAL_GET_SETTING = traffic.get_setting
+ import outscraper_integration as integration
+ 
+ 
+@@ -710,6 +712,19 @@ class OutscraperWorkflowTests(unittest.TestCase):
+             time.sleep(0.01)
+         self.fail(f"Job {job_id} did not reach {states}")
+ 
++    def wait_for_directions_workflow(self, job_id, states):
++        """The job is marked completed a moment before its request workflow is updated by the same worker."""
++        deadline = time.monotonic() + 3
++        while time.monotonic() < deadline:
++            with traffic.app.app_context():
++                row = traffic.db().execute(
++                    "SELECT status FROM request_directions_workflows WHERE job_id=?", (job_id,)
++                ).fetchone()
++            if row and row["status"] in states:
++                return row["status"]
++            time.sleep(0.01)
++        self.fail(f"Directions workflow for {job_id} did not reach {states}")
++
+     def approve(self, preview, configuration=None):
+         return self.client.post(
+             f"/api/outscraper/{preview['id']}/approve",
+@@ -790,6 +805,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
+             approved = self.approve(preview)
+             self.assertEqual(approved.status_code, 202, approved.get_json())
+             job = self.wait_for(preview["id"], {"completed"})
++        self.wait_for_directions_workflow(preview["id"], {"ready", "failed"})
+         sent_route = submit.call_args.args[0]
+         self.assertEqual(sent_route["origin"], "30.138239, 31.395698")
+         self.assertEqual(sent_route["destination"], "30.129997, 31.383281")
+@@ -1211,6 +1227,146 @@ class OutscraperWorkflowTests(unittest.TestCase):
+             set_workflow("sent", outside_path)
+             self.assertEqual(admin.get(url).status_code, 404)
+ 
++    def _browser(self, user_id, role):
++        test_client = traffic.app.test_client()
++        with test_client.session_transaction() as session:
++            session.update(uid=user_id, name="Tester", role=role)
++        return test_client
++
++    def test_network_lane_count_is_only_a_suggestion(self):
++        request_id = self.insert_volume_request(services=["lanes", "volumes"])
++        lookup = {"values": {"lanes": {"value": 3, "note": "network"}}, "coverage": 1.0}
++        with mock.patch.object(traffic.network, "HAVE_GEO", True), \
++                mock.patch.object(traffic, "get_setting", return_value={"file": "network.shp"}), \
++                mock.patch.object(traffic.network, "lookup", return_value=lookup):
++            with traffic.app.app_context():
++                traffic.apply_network(request_id)
++        with traffic.app.app_context():
++            row = traffic.db().execute(
++                "SELECT lanes,suggested_lanes FROM volumes_workflows WHERE request_id=?", (request_id,)
++            ).fetchone()
++        self.assertIsNone(row["lanes"])
++        self.assertEqual(row["suggested_lanes"], 3)
++        page = self.client.get(f"/admin/requests/{request_id}").data
++        self.assertIn(b"Suggested from the road network: 3", page)
++        self.assertIn(b'id="volumeLaneCount" type="number" min="1" max="12" step="1" value="3"', page)
++
++        implausible = {"values": {"lanes": {"value": 40, "note": "network"}}, "coverage": 1.0}
++        other_id = self.insert_volume_request(services=["volumes"])
++        with mock.patch.object(traffic.network, "HAVE_GEO", True), \
++                mock.patch.object(traffic, "get_setting", return_value={"file": "network.shp"}), \
++                mock.patch.object(traffic.network, "lookup", return_value=implausible):
++            with traffic.app.app_context():
++                traffic.apply_network(other_id)
++        with traffic.app.app_context():
++            ignored = traffic.db().execute(
++                "SELECT suggested_lanes FROM volumes_workflows WHERE request_id=?", (other_id,)
++            ).fetchone()["suggested_lanes"]
++        self.assertIsNone(ignored)
++
++    def test_older_requests_get_a_lane_suggestion_once_when_the_admin_opens_them(self):
++        usable = self.insert_volume_request(services=["volumes"])
++        unusable = self.insert_volume_request(services=["volumes"])
++        broken = self.insert_volume_request(services=["volumes"])
++        cfg = {"file": "network.shp"}
++
++        def lanes_for(request_id):
++            with traffic.app.app_context():
++                return traffic.db().execute(
++                    "SELECT suggested_lanes FROM volumes_workflows WHERE request_id=?", (request_id,)
++                ).fetchone()["suggested_lanes"]
++
++        def settings(key, default=None):
++            return cfg if key == "network" else _REAL_GET_SETTING(key, default)
++
++        with mock.patch.object(traffic.network, "HAVE_GEO", True), \
++                mock.patch.object(traffic, "get_setting", side_effect=settings), \
++                mock.patch.object(traffic.network, "lookup") as lookup:
++            lookup.return_value = {"values": {"lanes": {"value": 3, "note": "n"}}, "coverage": 1.0}
++            page = self.client.get(f"/admin/requests/{usable}")
++            self.assertIn(b"Suggested from the road network: 3", page.data)
++            self.client.get(f"/admin/requests/{usable}")
++            self.assertEqual(lookup.call_count, 1)
++            self.assertEqual(lanes_for(usable), 3)
++
++            lookup.reset_mock()
++            lookup.return_value = {"values": {"lanes": {"value": 0, "note": "n"}}, "coverage": 1.0}
++            page = self.client.get(f"/admin/requests/{unusable}")
++            self.assertNotIn(b"Suggested from the road network", page.data)
++            self.client.get(f"/admin/requests/{unusable}")
++            self.assertEqual(lookup.call_count, 1)
++            self.assertEqual(lanes_for(unusable), 0)
++
++            lookup.reset_mock()
++            lookup.side_effect = RuntimeError("corrupt network file")
++            self.assertEqual(self.client.get(f"/admin/requests/{broken}").status_code, 200)
++            self.assertIsNone(lanes_for(broken))
++
++    def test_restart_marks_interrupted_matlab_runs_as_failed(self):
++        request_id = self.insert_volume_request(services=["volumes"])
++        with traffic.app.app_context():
++            traffic.db().execute("UPDATE volumes_workflows SET status='running' WHERE request_id=?", (request_id,))
++            traffic.db().commit()
++        traffic.init()
++        with traffic.app.app_context():
++            workflow = traffic.db().execute(
++                "SELECT status,error FROM volumes_workflows WHERE request_id=?", (request_id,)
++            ).fetchone()
++            logged = traffic.db().execute(
++                "SELECT user_name FROM audit_log WHERE request_id=? AND action='volumes_run_interrupted'", (request_id,)
++            ).fetchone()
++        self.assertEqual(workflow["status"], "failed")
++        self.assertIn("restarted", workflow["error"])
++        self.assertEqual(logged["user_name"], "system")
++        retry = self.client.post(f"/api/requests/{request_id}/volumes/run")
++        self.assertNotEqual(retry.status_code, 409)
++
++    def test_admin_actions_are_recorded_and_shown_in_request_history(self):
++        request_id = self.insert_volume_request(services=["lanes", "volumes"])
++        self.assertEqual(self.client.post(f"/api/requests/{request_id}/volumes/lanes", json={"lanes": 2}).status_code, 200)
++        self.assertEqual(self.client.post(f"/api/requests/{request_id}/status", json={"status": "Processing"}).status_code, 200)
++        page = self.client.get(f"/admin/requests/{request_id}").data
++        self.assertIn(b"Request history", page)
++        self.assertIn(b"Lane count saved", page)
++        self.assertIn(b"Status changed", page)
++        self.assertIn(b"lanes: 2", page)
++
++    def test_approval_is_audited_and_removes_superseded_run_files(self):
++        request_id = self.insert_volume_request(services=["volumes"])
++        with tempfile.TemporaryDirectory() as temp_dir, \
++                mock.patch.object(traffic.volumes_runner, "APP_DIR", Path(temp_dir)):
++            run_dir = traffic.volumes_runner.request_run_dir(self.client_id, request_id)
++            run_dir.mkdir(parents=True)
++            kept = [run_dir / "REQ-1-keep.xlsx", run_dir / "REQ-1-keep-results.xlsx"]
++            old = [run_dir / "REQ-1-old.xlsx", run_dir / "REQ-1-old-results.xlsx"]
++            for path in kept + old:
++                path.write_bytes(b"x")
++            result = {
++                "hourly": [
++                    {"hour": 7, "value": 812.5, "tolerance": 38.64},
++                    {"hour": 8, "value": 790.2, "tolerance": 40.0},
++                ],
++                "inputs": {"lanes": 2, "freeflow_speed": 60.0, "actual_speed_by_hour": []},
++                "warnings": [],
++            }
++            with traffic.app.app_context():
++                traffic.db().execute(
++                    "UPDATE volumes_workflows SET status='ready_for_review', lanes=2, freeflow_speed=60, "
++                    "result_json=?, workbook_path=? WHERE request_id=?",
++                    (json.dumps(result), str(kept[1]), request_id),
++                )
++                traffic.db().commit()
++            response = self.client.post(f"/api/requests/{request_id}/volumes/confirm", json={})
++            self.assertEqual(response.status_code, 200, response.get_json())
++            self.assertTrue(all(path.exists() for path in kept))
++            self.assertFalse(any(path.exists() for path in old))
++        with traffic.app.app_context():
++            details = traffic.db().execute(
++                "SELECT details FROM audit_log WHERE request_id=? AND action='volumes_approved'", (request_id,)
++            ).fetchone()["details"]
++        sent = json.loads(details)["sent_values"]
++        self.assertEqual([item["value"] for item in sent], [813, 790])
++
+     def test_startup_backfills_workflows_for_existing_volume_requests(self):
+         request_id = self.insert_volume_request()
+         with traffic.app.app_context():
+diff --git a/tests/test_request_groups.py b/tests/test_request_groups.py
+index 3072885..182d876 100644
+--- a/tests/test_request_groups.py
++++ b/tests/test_request_groups.py
+@@ -11,6 +11,7 @@ os.environ.setdefault("TRAFFICLENS_DB", os.path.join(_database_dir.name, "groups
+ os.environ.setdefault("OUTSCRAPER_API_KEY", "unit-test-api-key")
+ os.environ.setdefault("SECRET_KEY", "unit-test-session-secret-that-is-long-enough")
+ os.environ.setdefault("TRAFFICLENS_OUTSCRAPER_AUTO_POLL", "0")
++os.environ.setdefault("TRAFFICLENS_MAINTENANCE", "0")  # no scheduled backups or cleanup during tests
+ 
+ import app as traffic
+ 
+diff --git a/tests/test_volumes_runner.py b/tests/test_volumes_runner.py
+index 7db6da7..0e411c7 100644
+--- a/tests/test_volumes_runner.py
++++ b/tests/test_volumes_runner.py
+@@ -1,3 +1,5 @@
++import os
++import time
+ import tempfile
+ import unittest
+ from pathlib import Path
+@@ -106,6 +108,42 @@ class VolumeRunnerTests(unittest.TestCase):
+         self.assertIsNotNone(runner.find_existing_volume_result(7, self.request_rows(), 5))
+         self.assertIsNone(runner.find_existing_volume_result(7, self.request_rows(), 6))
+ 
++    def test_cleanup_keeps_only_the_approved_run_of_that_request(self):
++        run_dir = runner.request_run_dir(5, 7)
++        run_dir.mkdir(parents=True)
++        for name in ("REQ-7-keep.xlsx", "REQ-7-keep-results.xlsx", "REQ-7-old.xlsx", "REQ-7-old-results.xlsx"):
++            (run_dir / name).write_bytes(b"x")
++        other_dir = runner.request_run_dir(6, 8)
++        other_dir.mkdir(parents=True)
++        (other_dir / "REQ-8-a.xlsx").write_bytes(b"x")
++
++        removed = runner.cleanup_request_runs(5, 7, [str(run_dir / "REQ-7-keep-results.xlsx")])
++
++        self.assertEqual(removed, 2)
++        self.assertEqual(sorted(path.name for path in run_dir.iterdir()), ["REQ-7-keep-results.xlsx", "REQ-7-keep.xlsx"])
++        self.assertTrue((other_dir / "REQ-8-a.xlsx").exists())
++        self.assertEqual(runner.cleanup_request_runs(5, 99, []), 0)
++
++    def test_purge_removes_only_old_unreferenced_run_files(self):
++        run_dir = runner.request_run_dir(5, 7)
++        run_dir.mkdir(parents=True)
++        old_unreferenced = run_dir / "REQ-7-old.xlsx"
++        old_referenced = run_dir / "REQ-7-ref-results.xlsx"
++        old_referenced_input = run_dir / "REQ-7-ref.xlsx"
++        recent = run_dir / "REQ-7-recent.xlsx"
++        for path in (old_unreferenced, old_referenced, old_referenced_input, recent):
++            path.write_bytes(b"x")
++        forty_days_ago = time.time() - 40 * 86400
++        for path in (old_unreferenced, old_referenced, old_referenced_input):
++            os.utime(path, (forty_days_ago, forty_days_ago))
++
++        self.assertEqual(runner.purge_stale_runs([str(old_referenced)], 0), 0)
++        removed = runner.purge_stale_runs([str(old_referenced)], 30)
++
++        self.assertEqual(removed, 1)
++        self.assertFalse(old_unreferenced.exists())
++        self.assertTrue(old_referenced.exists() and old_referenced_input.exists() and recent.exists())
++
+     def test_client_id_is_required(self):
+         for bad in (None, 0, -1, True, "5"):
+             with self.assertRaisesRegex(ValueError, "client ID"):
+diff --git a/volumes_runner.py b/volumes_runner.py
+index ad50084..b13d23d 100644
+--- a/volumes_runner.py
++++ b/volumes_runner.py
+@@ -4,6 +4,7 @@ import math
+ import os
+ import shutil
+ import subprocess
++import time
+ import uuid
+ from pathlib import Path
+ 
+@@ -76,6 +77,59 @@ def request_run_dir(client_id, request_id):
+     return volume_runs_root() / f"client-{client_id}" / f"REQ-{request_id}"
+ 
+ 
++def _paired_input_name(path):
++    """The input workbook that belongs to a ...-results.xlsx file."""
++    path = Path(path)
++    if path.name.endswith("-results.xlsx"):
++        return path.with_name(path.name[: -len("-results.xlsx")] + ".xlsx")
++    return path
++
++
++def cleanup_request_runs(client_id, request_id, keep_paths):
++    """Delete the superseded run workbooks of one request, keeping only the given results."""
++    run_dir = request_run_dir(client_id, request_id)
++    if not run_dir.is_dir():
++        return 0
++    keep = set()
++    for path in keep_paths:
++        if path:
++            keep.add(Path(path).resolve())
++            keep.add(_paired_input_name(path).resolve())
++    removed = 0
++    for path in run_dir.iterdir():
++        if path.is_file() and path.suffix == ".xlsx" and path.resolve() not in keep:
++            try:
++                path.unlink()
++                removed += 1
++            except OSError:
++                pass
++    return removed
++
++
++def purge_stale_runs(referenced_paths, max_age_days, now=None):
++    """Delete run workbooks older than max_age_days that no workflow still points to."""
++    if not max_age_days or max_age_days <= 0:
++        return 0
++    root = volume_runs_root()
++    if not root.is_dir():
++        return 0
++    keep = set()
++    for path in referenced_paths:
++        if path:
++            keep.add(Path(path).resolve())
++            keep.add(_paired_input_name(path).resolve())
++    cutoff = (now if now is not None else time.time()) - max_age_days * 86400
++    removed = 0
++    for path in root.rglob("*.xlsx"):
++        try:
++            if path.is_file() and path.resolve() not in keep and path.stat().st_mtime < cutoff:
++                path.unlink()
++                removed += 1
++        except OSError:
++            continue
++    return removed
++
++
+ def _normalize_rows(request_id, rows):
+     if isinstance(request_id, bool) or not isinstance(request_id, int) or request_id <= 0:
+         raise ValueError("A valid request ID is required for the MATLAB input.")

@@ -19,8 +19,10 @@ os.environ["TRAFFICLENS_DB"] = os.path.join(_database_dir.name, "test.db")
 os.environ["OUTSCRAPER_API_KEY"] = "unit-test-api-key"
 os.environ["SECRET_KEY"] = "unit-test-session-secret-that-is-long-enough"
 os.environ["TRAFFICLENS_OUTSCRAPER_AUTO_POLL"] = "0"
+os.environ["TRAFFICLENS_MAINTENANCE"] = "0"
 
 import app as traffic
+_REAL_GET_SETTING = traffic.get_setting
 import outscraper_integration as integration
 
 
@@ -710,6 +712,19 @@ class OutscraperWorkflowTests(unittest.TestCase):
             time.sleep(0.01)
         self.fail(f"Job {job_id} did not reach {states}")
 
+    def wait_for_directions_workflow(self, job_id, states):
+        """The job is marked completed a moment before its request workflow is updated by the same worker."""
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            with traffic.app.app_context():
+                row = traffic.db().execute(
+                    "SELECT status FROM request_directions_workflows WHERE job_id=?", (job_id,)
+                ).fetchone()
+            if row and row["status"] in states:
+                return row["status"]
+            time.sleep(0.01)
+        self.fail(f"Directions workflow for {job_id} did not reach {states}")
+
     def approve(self, preview, configuration=None):
         return self.client.post(
             f"/api/outscraper/{preview['id']}/approve",
@@ -790,6 +805,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
             approved = self.approve(preview)
             self.assertEqual(approved.status_code, 202, approved.get_json())
             job = self.wait_for(preview["id"], {"completed"})
+        self.wait_for_directions_workflow(preview["id"], {"ready", "failed"})
         sent_route = submit.call_args.args[0]
         self.assertEqual(sent_route["origin"], "30.138239, 31.395698")
         self.assertEqual(sent_route["destination"], "30.129997, 31.383281")
@@ -1210,6 +1226,146 @@ class OutscraperWorkflowTests(unittest.TestCase):
 
             set_workflow("sent", outside_path)
             self.assertEqual(admin.get(url).status_code, 404)
+
+    def _browser(self, user_id, role):
+        test_client = traffic.app.test_client()
+        with test_client.session_transaction() as session:
+            session.update(uid=user_id, name="Tester", role=role)
+        return test_client
+
+    def test_network_lane_count_is_only_a_suggestion(self):
+        request_id = self.insert_volume_request(services=["lanes", "volumes"])
+        lookup = {"values": {"lanes": {"value": 3, "note": "network"}}, "coverage": 1.0}
+        with mock.patch.object(traffic.network, "HAVE_GEO", True), \
+                mock.patch.object(traffic, "get_setting", return_value={"file": "network.shp"}), \
+                mock.patch.object(traffic.network, "lookup", return_value=lookup):
+            with traffic.app.app_context():
+                traffic.apply_network(request_id)
+        with traffic.app.app_context():
+            row = traffic.db().execute(
+                "SELECT lanes,suggested_lanes FROM volumes_workflows WHERE request_id=?", (request_id,)
+            ).fetchone()
+        self.assertIsNone(row["lanes"])
+        self.assertEqual(row["suggested_lanes"], 3)
+        page = self.client.get(f"/admin/requests/{request_id}").data
+        self.assertIn(b"Suggested from the road network: 3", page)
+        self.assertIn(b'id="volumeLaneCount" type="number" min="1" max="12" step="1" value="3"', page)
+
+        implausible = {"values": {"lanes": {"value": 40, "note": "network"}}, "coverage": 1.0}
+        other_id = self.insert_volume_request(services=["volumes"])
+        with mock.patch.object(traffic.network, "HAVE_GEO", True), \
+                mock.patch.object(traffic, "get_setting", return_value={"file": "network.shp"}), \
+                mock.patch.object(traffic.network, "lookup", return_value=implausible):
+            with traffic.app.app_context():
+                traffic.apply_network(other_id)
+        with traffic.app.app_context():
+            ignored = traffic.db().execute(
+                "SELECT suggested_lanes FROM volumes_workflows WHERE request_id=?", (other_id,)
+            ).fetchone()["suggested_lanes"]
+        self.assertIsNone(ignored)
+
+    def test_older_requests_get_a_lane_suggestion_once_when_the_admin_opens_them(self):
+        usable = self.insert_volume_request(services=["volumes"])
+        unusable = self.insert_volume_request(services=["volumes"])
+        broken = self.insert_volume_request(services=["volumes"])
+        cfg = {"file": "network.shp"}
+
+        def lanes_for(request_id):
+            with traffic.app.app_context():
+                return traffic.db().execute(
+                    "SELECT suggested_lanes FROM volumes_workflows WHERE request_id=?", (request_id,)
+                ).fetchone()["suggested_lanes"]
+
+        def settings(key, default=None):
+            return cfg if key == "network" else _REAL_GET_SETTING(key, default)
+
+        with mock.patch.object(traffic.network, "HAVE_GEO", True), \
+                mock.patch.object(traffic, "get_setting", side_effect=settings), \
+                mock.patch.object(traffic.network, "lookup") as lookup:
+            lookup.return_value = {"values": {"lanes": {"value": 3, "note": "n"}}, "coverage": 1.0}
+            page = self.client.get(f"/admin/requests/{usable}")
+            self.assertIn(b"Suggested from the road network: 3", page.data)
+            self.client.get(f"/admin/requests/{usable}")
+            self.assertEqual(lookup.call_count, 1)
+            self.assertEqual(lanes_for(usable), 3)
+
+            lookup.reset_mock()
+            lookup.return_value = {"values": {"lanes": {"value": 0, "note": "n"}}, "coverage": 1.0}
+            page = self.client.get(f"/admin/requests/{unusable}")
+            self.assertNotIn(b"Suggested from the road network", page.data)
+            self.client.get(f"/admin/requests/{unusable}")
+            self.assertEqual(lookup.call_count, 1)
+            self.assertEqual(lanes_for(unusable), 0)
+
+            lookup.reset_mock()
+            lookup.side_effect = RuntimeError("corrupt network file")
+            self.assertEqual(self.client.get(f"/admin/requests/{broken}").status_code, 200)
+            self.assertIsNone(lanes_for(broken))
+
+    def test_restart_marks_interrupted_matlab_runs_as_failed(self):
+        request_id = self.insert_volume_request(services=["volumes"])
+        with traffic.app.app_context():
+            traffic.db().execute("UPDATE volumes_workflows SET status='running' WHERE request_id=?", (request_id,))
+            traffic.db().commit()
+        traffic.init()
+        with traffic.app.app_context():
+            workflow = traffic.db().execute(
+                "SELECT status,error FROM volumes_workflows WHERE request_id=?", (request_id,)
+            ).fetchone()
+            logged = traffic.db().execute(
+                "SELECT user_name FROM audit_log WHERE request_id=? AND action='volumes_run_interrupted'", (request_id,)
+            ).fetchone()
+        self.assertEqual(workflow["status"], "failed")
+        self.assertIn("restarted", workflow["error"])
+        self.assertEqual(logged["user_name"], "system")
+        retry = self.client.post(f"/api/requests/{request_id}/volumes/run")
+        self.assertNotEqual(retry.status_code, 409)
+
+    def test_admin_actions_are_recorded_and_shown_in_request_history(self):
+        request_id = self.insert_volume_request(services=["lanes", "volumes"])
+        self.assertEqual(self.client.post(f"/api/requests/{request_id}/volumes/lanes", json={"lanes": 2}).status_code, 200)
+        self.assertEqual(self.client.post(f"/api/requests/{request_id}/status", json={"status": "Processing"}).status_code, 200)
+        page = self.client.get(f"/admin/requests/{request_id}").data
+        self.assertIn(b"Request history", page)
+        self.assertIn(b"Lane count saved", page)
+        self.assertIn(b"Status changed", page)
+        self.assertIn(b"lanes: 2", page)
+
+    def test_approval_is_audited_and_removes_superseded_run_files(self):
+        request_id = self.insert_volume_request(services=["volumes"])
+        with tempfile.TemporaryDirectory() as temp_dir, \
+                mock.patch.object(traffic.volumes_runner, "APP_DIR", Path(temp_dir)):
+            run_dir = traffic.volumes_runner.request_run_dir(self.client_id, request_id)
+            run_dir.mkdir(parents=True)
+            kept = [run_dir / "REQ-1-keep.xlsx", run_dir / "REQ-1-keep-results.xlsx"]
+            old = [run_dir / "REQ-1-old.xlsx", run_dir / "REQ-1-old-results.xlsx"]
+            for path in kept + old:
+                path.write_bytes(b"x")
+            result = {
+                "hourly": [
+                    {"hour": 7, "value": 812.5, "tolerance": 38.64},
+                    {"hour": 8, "value": 790.2, "tolerance": 40.0},
+                ],
+                "inputs": {"lanes": 2, "freeflow_speed": 60.0, "actual_speed_by_hour": []},
+                "warnings": [],
+            }
+            with traffic.app.app_context():
+                traffic.db().execute(
+                    "UPDATE volumes_workflows SET status='ready_for_review', lanes=2, freeflow_speed=60, "
+                    "result_json=?, workbook_path=? WHERE request_id=?",
+                    (json.dumps(result), str(kept[1]), request_id),
+                )
+                traffic.db().commit()
+            response = self.client.post(f"/api/requests/{request_id}/volumes/confirm", json={})
+            self.assertEqual(response.status_code, 200, response.get_json())
+            self.assertTrue(all(path.exists() for path in kept))
+            self.assertFalse(any(path.exists() for path in old))
+        with traffic.app.app_context():
+            details = traffic.db().execute(
+                "SELECT details FROM audit_log WHERE request_id=? AND action='volumes_approved'", (request_id,)
+            ).fetchone()["details"]
+        sent = json.loads(details)["sent_values"]
+        self.assertEqual([item["value"] for item in sent], [813, 790])
 
     def test_startup_backfills_workflows_for_existing_volume_requests(self):
         request_id = self.insert_volume_request()

@@ -12,3 +12,5 @@ outscraper_exports/
 *.lock
 ~$*.xlsx
 *.asv
+instance/
+backups/

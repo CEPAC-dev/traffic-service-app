@@ -2,13 +2,14 @@ import csv, hashlib, io, json, math, os, re, secrets, sqlite3, threading, time, 
 from functools import lru_cache, wraps
 from pathlib import Path
 from flask import Flask, g, render_template, request, redirect, url_for, session, jsonify, abort, flash
-from flask import send_file
+from flask import send_file, has_request_context
 from werkzeug.security import generate_password_hash, check_password_hash
 from dotenv import load_dotenv
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import urllib.error
 from urllib.parse import urlencode
 from urllib.request import Request as UrlRequest, urlopen
+import backup as backup_tool
 import volumes_runner
 try:
     import holidays
@@ -37,6 +38,7 @@ if not configured_secret:
     app.logger.warning("SECRET_KEY is not configured; using an ephemeral key for this local run.")
 app.config["MAX_CONTENT_LENGTH"] = 300 * 1024 * 1024   # network files can be large
 app.config["OUTSCRAPER_AUTO_POLL"] = os.environ.get("TRAFFICLENS_OUTSCRAPER_AUTO_POLL", "1") != "0"
+app.config["MAINTENANCE_AUTO_START"] = os.environ.get("TRAFFICLENS_MAINTENANCE", "1") != "0"
 DB = os.environ.get("TRAFFICLENS_DB") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "mobility.db")
 SERVICES = {"lanes": "Number of lanes", "speed": "Speed", "travel": "Travel time", "length": "Length",
             "freeflow_time": "Free flow time", "freeflow_speed": "Free flow speed", "capacity": "Capacity",
@@ -87,6 +89,11 @@ CREATE TABLE IF NOT EXISTS requests(id INTEGER PRIMARY KEY, user_id INTEGER, cre
   start_time TEXT, end_time TEXT, point_c TEXT, point_c_distance_km REAL,
   show_point_c INTEGER NOT NULL DEFAULT 0, title TEXT,
   junction_quality_ack INTEGER NOT NULL DEFAULT 0, junction_quality_ack_at TEXT);
+CREATE TABLE IF NOT EXISTS audit_log(
+  id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, user_id INTEGER, user_name TEXT,
+  role TEXT, action TEXT NOT NULL, request_id INTEGER, details TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_audit_request ON audit_log(request_id, id);
 CREATE TABLE IF NOT EXISTS service_info(key TEXT PRIMARY KEY, description TEXT);
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS notifications(
@@ -196,6 +203,99 @@ def _create_notification(user_id, request_id, kind, title, message):
         "INSERT INTO notifications(user_id,request_id,kind,title,message,created_at) VALUES(?,?,?,?,?,?)",
         (user_id, request_id, kind, title, message, dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
     )
+
+def audit(action, request_id=None, **details):
+    """Record who did what to a request. The caller commits together with its own change."""
+    actor = (session.get("uid"), session.get("name"), session.get("role")) if has_request_context() else (None, "system", "system")
+    try:
+        db().execute(
+            "INSERT INTO audit_log(created_at,user_id,user_name,role,action,request_id,details) VALUES(?,?,?,?,?,?,?)",
+            (_timestamp_now(), *actor, action, request_id, json.dumps(details, default=str, ensure_ascii=False)),
+        )
+    except sqlite3.Error as exc:
+        app.logger.warning("audit log write failed: %s", exc)
+
+AUDIT_LABELS = {
+    "request_saved": "Request saved",
+    "status_changed": "Status changed",
+    "service_saved": "Service value saved",
+    "directions_confirmed": "Directions result approved",
+    "volumes_lanes_saved": "Lane count saved",
+    "volumes_freeflow_accepted": "Free-flow speed accepted",
+    "volumes_retry_requested": "MATLAB retry requested",
+    "volumes_approved": "Volumes approved and sent to the client",
+    "volumes_run_interrupted": "MATLAB run interrupted by an app restart",
+}
+
+def _audit_details_text(raw):
+    try:
+        details = json.loads(raw or "{}")
+    except ValueError:
+        return str(raw or "")[:400]
+    if not isinstance(details, dict):
+        return str(details)[:400]
+    text = "; ".join(f"{key}: {json.dumps(value, ensure_ascii=False) if isinstance(value, (list, dict)) else value}" for key, value in details.items())
+    return text if len(text) <= 600 else text[:597] + "..."
+
+def _audit_entries_for_request(rid, limit=200):
+    rows = db().execute(
+        "SELECT created_at,user_name,role,action,details FROM audit_log WHERE request_id=? ORDER BY id DESC LIMIT ?",
+        (rid, limit),
+    ).fetchall()
+    return [
+        {
+            "when": row["created_at"],
+            "who": f"{row['user_name'] or 'unknown'} ({row['role'] or '-'})",
+            "action": AUDIT_LABELS.get(row["action"], row["action"]),
+            "details": _audit_details_text(row["details"]),
+        }
+        for row in rows
+    ]
+
+def _cleanup_superseded_volume_runs(rid):
+    """After a result is approved, keep only that run's workbooks for the request."""
+    try:
+        row = db().execute(
+            "SELECT r.user_id, w.workbook_path FROM requests r JOIN volumes_workflows w ON w.request_id=r.id WHERE r.id=?",
+            (rid,),
+        ).fetchone()
+        if row and row["workbook_path"]:
+            volumes_runner.cleanup_request_runs(row["user_id"], rid, [row["workbook_path"]])
+    except (OSError, ValueError, sqlite3.Error) as exc:
+        app.logger.warning("could not clean old volume runs for request %s: %s", rid, exc)
+
+def _run_maintenance_once():
+    """Purge stale run files and take a backup if one is due. Safe to call repeatedly."""
+    retention_days = int(os.environ.get("VOLUME_RUN_RETENTION_DAYS", "30") or 0)
+    backup_hours = float(os.environ.get("TRAFFICLENS_BACKUP_EVERY_HOURS", "24") or 0)
+    with app.app_context():
+        if retention_days > 0:
+            referenced = [row["workbook_path"] for row in db().execute("SELECT workbook_path FROM volumes_workflows WHERE workbook_path IS NOT NULL")]
+            removed = volumes_runner.purge_stale_runs(referenced, retention_days)
+            if removed:
+                app.logger.info("removed %s stale MATLAB run workbook(s)", removed)
+    if backup_hours > 0:
+        dest = backup_tool.default_backup_dir()
+        last = backup_tool.latest_backup_time(dest)
+        if last is None or (dt.datetime.now() - last).total_seconds() >= backup_hours * 3600:
+            keep = int(os.environ.get("TRAFFICLENS_BACKUP_KEEP", "7") or 7)
+            path = backup_tool.run_backup(
+                db_path=DB, runs_dir=volumes_runner.volume_runs_root(), dest_dir=dest, keep=keep,
+            )
+            app.logger.info("backup written: %s", path)
+
+def _maintenance_loop():
+    while True:
+        try:
+            _run_maintenance_once()
+        except Exception:
+            app.logger.exception("scheduled maintenance failed")
+        time.sleep(3600)
+
+def start_maintenance():
+    thread = threading.Thread(target=_maintenance_loop, name="trafficlens-maintenance", daemon=True)
+    thread.start()
+    return thread
 
 def _notify_admins_new_request(request_id, client_name):
     admins = db().execute("SELECT id FROM users WHERE role='admin'").fetchall()
@@ -310,9 +410,22 @@ def init():
         ("freeflow_validation_json", "TEXT"),
         ("freeflow_override", "INTEGER NOT NULL DEFAULT 0"),
         ("freeflow_accepted_at", "TEXT"),
+        ("suggested_lanes", "INTEGER"),
     ):
         if column not in volume_cols:
             c.execute(f"ALTER TABLE volumes_workflows ADD COLUMN {column} {definition}")
+    interrupted = [row[0] for row in c.execute("SELECT request_id FROM volumes_workflows WHERE status='running'")]
+    if interrupted:
+        stamp = _timestamp_now()
+        for interrupted_id in interrupted:
+            c.execute(
+                "UPDATE volumes_workflows SET status='failed', error=?, updated_at=? WHERE request_id=? AND status='running'",
+                ("The app restarted while MATLAB was running. Use Retry to run the calculation again.", stamp, interrupted_id),
+            )
+            c.execute(
+                "INSERT INTO audit_log(created_at,user_id,user_name,role,action,request_id,details) VALUES(?,NULL,'system','system','volumes_run_interrupted',?,?)",
+                (stamp, interrupted_id, json.dumps({"reason": "app restart"})),
+            )
     c.execute(
         "UPDATE volumes_workflows SET freeflow_accepted=1 "
         "WHERE freeflow_speed IS NOT NULL AND freeflow_accepted=0 AND freeflow_result_json IS NULL"
@@ -1556,6 +1669,28 @@ def net_services():
     if cfg.get("capacity"): out.append("capacity")
     return out
 
+def _network_lane_suggestion(lookup_result):
+    """A usable lane count from a road-network lookup, or None (0 lanes in the file means 'unknown')."""
+    try:
+        lanes = int(((lookup_result or {}).get("values", {}).get("lanes") or {}).get("value"))
+    except (TypeError, ValueError):
+        return None
+    return lanes if 1 <= lanes <= MAX_VOLUME_LANES else None
+
+def _backfill_suggested_lanes(rid, path_json):
+    """Requests created before lane suggestions existed: look the link up once. 0 = looked up, nothing usable."""
+    cfg = get_setting("network", {})
+    if not (network.HAVE_GEO and cfg.get("file")):
+        return None
+    try:
+        lanes = _network_lane_suggestion(network.lookup(cfg, json.loads(path_json or "[]")))
+    except Exception as exc:  # a bad network file must never break the admin page
+        app.logger.warning("lane suggestion lookup failed for request %s: %s", rid, exc)
+        return None
+    db().execute("UPDATE volumes_workflows SET suggested_lanes=? WHERE request_id=?", (lanes or 0, rid))
+    db().commit()
+    return lanes
+
 def apply_network(rid):
     """Fill the services the network can answer. Pending request: all answered -> Completed, some answered -> Processing."""
     cfg = get_setting("network", {})
@@ -1572,6 +1707,10 @@ def apply_network(rid):
         if v and not (cur.get("rows") and cur.get("source") != "network"):     # never overwrite what the admin entered
             data[s] = {"rows": [{"value": v["value"]}], "note": v["note"], "source": "network", "updated": now}
             filled.append(s)
+    if "volumes" in d["services"]:
+        suggested_lanes = _network_lane_suggestion(res)
+        if suggested_lanes:
+            db().execute("UPDATE volumes_workflows SET suggested_lanes=? WHERE request_id=?", (suggested_lanes, rid))
     status, reply, reply_at = row["status"], row["reply"], row["reply_at"]
     if status == "Pending" and filled:
         answered = [s for s in d["services"] if data.get(s, {}).get("rows")]
@@ -2674,6 +2813,9 @@ def admin_request(rid):
         "SELECT * FROM volumes_workflows WHERE request_id=?", (rid,)
     ).fetchone()
     volumes_workflow = dict(volumes_row) if volumes_row else None
+    if (volumes_workflow and volumes_workflow.get("lanes") is None
+            and volumes_workflow.get("suggested_lanes") is None and volumes_workflow["status"] != "sent"):
+        volumes_workflow["suggested_lanes"] = _backfill_suggested_lanes(rid, r["path"]) or 0
     if volumes_workflow and volumes_workflow.get("result_json"):
         volumes_workflow["result"] = json.loads(volumes_workflow["result_json"])
     if volumes_workflow and volumes_workflow.get("freeflow_result_json"):
@@ -2711,7 +2853,8 @@ def admin_request(rid):
         directions_workflow = dict(workflow_row)
         directions_workflow["result"] = json.loads(directions_workflow.pop("result_json") or "null")
     return render_template("admin_request.html", r=to_dict(r), forms=forms_catalog(), statuses=STATUSES,
-                           directions_workflow=directions_workflow, volumes_workflow=volumes_workflow)
+                           directions_workflow=directions_workflow, volumes_workflow=volumes_workflow,
+                           audit_entries=_audit_entries_for_request(rid))
 
 _timezone_finder = TimezoneFinder() if TimezoneFinder is not None else None
 
@@ -3519,6 +3662,7 @@ def save_volumes_lanes(rid):
     )
     if "lanes" in requested_services:
         db().execute("UPDATE requests SET data=? WHERE id=?", (json.dumps(request_data, ensure_ascii=False), rid))
+    audit("volumes_lanes_saved", rid, lanes=lanes)
     db().commit()
     _start_volume_calculation(rid)
     return jsonify(ok=True)
@@ -3679,6 +3823,7 @@ def accept_volume_freeflow(rid):
             workflow["freeflow_job_id"],
         ),
     )
+    audit("volumes_freeflow_accepted", rid, freeflow_speed=workflow["freeflow_speed"], used_anyway=use_anyway)
     db().commit()
     started = _start_volume_calculation(rid)
     return jsonify(
@@ -3705,6 +3850,7 @@ def retry_volumes_calculation(rid):
         "UPDATE volumes_workflows SET status='waiting_for_inputs', error=NULL, updated_at=? WHERE request_id=?",
         (_timestamp_now(), rid),
     )
+    audit("volumes_retry_requested", rid)
     db().commit()
     started = _start_volume_calculation(rid)
     current = db().execute(
@@ -3859,7 +4005,14 @@ def confirm_volumes_result(rid):
         f"The administrator approved the results for request REQ-{rid}." if sent_directions
         else f"The administrator approved the traffic volume results for request REQ-{rid}.",
     )
+    audit(
+        "volumes_approved", rid,
+        lanes=workflow["lanes"], freeflow_speed=workflow["freeflow_speed"],
+        sent_values=[{"hour": item["hour"], "value": item["value"], "tolerance": item["tolerance"]} for item in volume_data["rows"]],
+        warnings_shown=result.get("warnings") or [],
+    )
     d.commit()
+    _cleanup_superseded_volume_runs(rid)
     return jsonify(
         ok=True,
         status="sent",
@@ -3950,6 +4103,7 @@ def confirm_request_directions(rid):
                 "Request results are ready",
                 f"The administrator approved {', '.join(visible_services)} for request REQ-{rid}. Traffic volumes are still being prepared.",
             )
+        audit("directions_confirmed", rid, services=sorted({"travel", "speed"}.intersection(requested_services)), with_volumes=True)
         d.commit()
         if volume_workflow["status"] != "sent":
             if volume_workflow["freeflow_result_json"]:
@@ -4016,6 +4170,7 @@ def confirm_request_directions(rid):
         "Request results are ready",
         f"The administrator approved the directions results for request REQ-{rid}.",
     )
+    audit("directions_confirmed", rid, with_volumes=False)
     d.commit()
     return jsonify(ok=True, status="confirmed", confirmed_at=now, result_url=url_for("result", rid=rid))
 
@@ -4112,7 +4267,9 @@ def save_service(rid, service):
             saved[context_key] = data[service][context_key]
             saved["outscraper_job_id"] = data[service].get("outscraper_job_id")
     data[service] = saved
-    db().execute("UPDATE requests SET data=? WHERE id=?", (json.dumps(data), rid)); db().commit()
+    db().execute("UPDATE requests SET data=? WHERE id=?", (json.dumps(data), rid))
+    audit("service_saved", rid, service=service, rows=saved["rows"], note=saved["note"][:200])
+    db().commit()
     return jsonify(ok=True, rows=len(data[service]["rows"]))
 
 @app.post("/api/requests/<int:rid>/save-all")
@@ -4184,6 +4341,10 @@ def save_request_changes(rid):
         db().execute(f"UPDATE requests SET {', '.join(updates)} WHERE id=?", params)
         if reply is not None:
             _notify_request_owner_reply(rid, row["user_id"], row["reply"] or "", reply)
+        audit(
+            "request_saved", rid, services={name: values["rows"] for name, values in clean_services.items()},
+            status=status, old_status=row["status"], reply_changed=reply is not None and reply != (row["reply"] or ""),
+        )
         db().commit()
     return jsonify(ok=True, saved_services=list(clean_services), status=status or row["status"])
 
@@ -4197,7 +4358,10 @@ def set_status(rid):
         json.loads(row["services"] or "[]"), json.loads(row["data"] or "{}")
     ):
         return jsonify(error="A request cannot be marked Completed until every selected service has a result ready for the client."), 409
-    db().execute("UPDATE requests SET status=? WHERE id=?", (s, rid)); db().commit()
+    previous = db().execute("SELECT status FROM requests WHERE id=?", (rid,)).fetchone()["status"]
+    db().execute("UPDATE requests SET status=? WHERE id=?", (s, rid))
+    audit("status_changed", rid, old_status=previous, new_status=s)
+    db().commit()
     return jsonify(ok=True, status=s)
 
 @app.post("/api/requests/<int:rid>/reply")
@@ -4483,6 +4647,10 @@ if app.config["OUTSCRAPER_AUTO_POLL"]:
         ).fetchall()
     for recoverable in recoverable_jobs:
         _start_outscraper_monitor(recoverable["job_id"])
+
+# "python app.py" runs the code twice under the debug reloader; only the child process does the upkeep.
+if app.config["MAINTENANCE_AUTO_START"] and (__name__ != "__main__" or os.environ.get("WERKZEUG_RUN_MAIN") == "true"):
+    start_maintenance()
 
 if __name__ == "__main__":
     app.run(debug=True)
