@@ -165,7 +165,19 @@ CREATE TABLE IF NOT EXISTS volume_freeflow_attempts(
 );
 CREATE INDEX IF NOT EXISTS idx_volume_freeflow_attempts_request
   ON volume_freeflow_attempts(request_id,submitted_at);
+CREATE TABLE IF NOT EXISTS request_groups(
+  id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), title TEXT,
+  created TEXT NOT NULL, study_date TEXT NOT NULL, services TEXT NOT NULL,
+  mode TEXT NOT NULL, sent_at TEXT
+);
+CREATE TABLE IF NOT EXISTS periods(
+  id INTEGER PRIMARY KEY, label TEXT NOT NULL UNIQUE,
+  is_active INTEGER NOT NULL DEFAULT 1, sort_order INTEGER NOT NULL DEFAULT 0
+);
 """
+
+MAX_GROUP_LINKS = 10
+GROUP_MODES = ("single", "multi_period", "multi_link")
 
 def db():
     if "db" not in g:
@@ -173,6 +185,13 @@ def db():
     return g.db
 
 def _create_notification(user_id, request_id, kind, title, message):
+    hidden_child = kind != "group_ready" and db().execute(
+        "SELECT 1 FROM requests r JOIN request_groups g ON g.id=r.group_id "
+        "JOIN users u ON u.id=? WHERE r.id=? AND g.sent_at IS NULL AND u.role!='admin'",
+        (user_id, request_id),
+    ).fetchone()
+    if hidden_child:
+        return   # a client hears about a grouped order once, when the admin sends the whole report
     db().execute(
         "INSERT INTO notifications(user_id,request_id,kind,title,message,created_at) VALUES(?,?,?,?,?,?)",
         (user_id, request_id, kind, title, message, dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
@@ -330,8 +349,11 @@ def init():
         "WHERE execution_status='queued' AND job_id IN (SELECT id FROM outscraper_jobs WHERE execution_status='unknown' AND error LIKE 'The app restarted while submission is in progress%')"
     )
     cols = [x[1] for x in c.execute("PRAGMA table_info(requests)")]
-    for col, ddl in (("type", "TEXT DEFAULT 'area'"), ("reply", "TEXT"), ("reply_at", "TEXT"), ("data", "TEXT"), ("hours", "TEXT"), ("path", "TEXT"), ("road_km", "REAL"), ("junctions", "INTEGER"), ("start_time", "TEXT"), ("end_time", "TEXT"), ("point_c", "TEXT"), ("point_c_distance_km", "REAL"), ("show_point_c", "INTEGER NOT NULL DEFAULT 0"), ("title", "TEXT"), ("junction_quality_ack", "INTEGER NOT NULL DEFAULT 0"), ("junction_quality_ack_at", "TEXT")):
+    for col, ddl in (("type", "TEXT DEFAULT 'area'"), ("reply", "TEXT"), ("reply_at", "TEXT"), ("data", "TEXT"), ("hours", "TEXT"), ("path", "TEXT"), ("road_km", "REAL"), ("junctions", "INTEGER"), ("start_time", "TEXT"), ("end_time", "TEXT"), ("point_c", "TEXT"), ("point_c_distance_km", "REAL"), ("show_point_c", "INTEGER NOT NULL DEFAULT 0"), ("title", "TEXT"), ("junction_quality_ack", "INTEGER NOT NULL DEFAULT 0"), ("junction_quality_ack_at", "TEXT"), ("group_id", "INTEGER"), ("period_label", "TEXT")):
         if col not in cols: c.execute(f"ALTER TABLE requests ADD COLUMN {col} {ddl}")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_requests_group ON requests(group_id)")
+    if not c.execute("SELECT 1 FROM periods").fetchone():
+        c.executemany("INSERT INTO periods(label,sort_order) VALUES(?,?)", [("AM", 1), ("MD", 2), ("PM", 3)])
     workflow_now = _timestamp_now()
     for request_id, services_json in c.execute("SELECT id,services FROM requests"):
         if "volumes" in json.loads(services_json or "[]"):
@@ -1985,14 +2007,19 @@ def study():
             "services": original["services"],
             "start_time": original.get("start_time") or (f"{original['hours'][0]:02d}:00:00" if original["hours"] else ""),
             "end_time": original.get("end_time") or legacy_end_time,
+            "period_label": original.get("period_label"),
         }
     selected_service = request.args.get("service", "")
     if selected_service not in active_services():
         selected_service = ""
+    period_labels = [row["label"] for row in db().execute(
+        "SELECT label FROM periods WHERE is_active=1 ORDER BY sort_order,id").fetchall()]
     return render_template(
         "study.html",
         repeat_request=repeat_request,
         selected_service=selected_service if not repeat_request else "",
+        period_labels=period_labels,
+        max_links=MAX_GROUP_LINKS,
     )
 
 @app.get("/api/network/links")
@@ -2100,6 +2127,341 @@ def create_request():
     return jsonify(id=rid, status=st, filled=(info or {}).get("filled", []))
 
 
+# ---------------------------------------------------------------------------
+# Grouped orders: several links and/or several periods submitted as one order.
+# Every (link x period) is still an ordinary row in `requests`, so the whole
+# existing admin workflow (volumes, directions, free flow...) keeps working;
+# `request_groups` ties the rows together for intake, review and one report.
+# ---------------------------------------------------------------------------
+def _parse_local_time(value):
+    t = dt.time.fromisoformat(str(value or ""))
+    if t.tzinfo or t.microsecond:
+        raise ValueError
+    return t
+
+def _clean_group_period(raw, active_labels):
+    if not isinstance(raw, dict):
+        return None, "Invalid period."
+    label = str(raw.get("label") or "").strip()
+    if label not in active_labels:
+        return None, f"Period '{label[:20]}' is not available."
+    try:
+        start, end = _parse_local_time(raw.get("start_time")), _parse_local_time(raw.get("end_time"))
+    except ValueError:
+        return None, f"Period {label}: choose a valid start and end time (whole seconds only)."
+    start_s = start.hour * 3600 + start.minute * 60 + start.second
+    end_s = end.hour * 3600 + end.minute * 60 + end.second
+    if end_s <= start_s:
+        return None, f"Period {label}: end time must be later than start time."
+    return {"label": label, "start_time": start.strftime("%H:%M:%S"), "end_time": end.strftime("%H:%M:%S"),
+            "hours": list(range(start_s // 3600, (end_s - 1) // 3600 + 1))}, None
+
+def _clean_group_link(raw, services, number):
+    name = f"Link {number}"
+    if not isinstance(raw, dict):
+        return None, f"{name}: invalid data."
+    try:
+        coords = raw.get("coords") or []
+        if len(coords) != 2:
+            return None, f"{name}: select the start and the end of the link."
+        coords = [[round(float(c[0]), 6), round(float(c[1]), 6)] for c in coords]
+        path = [[round(float(p[0]), 6), round(float(p[1]), 6)] for p in (raw.get("path") or [])[:2000]]
+        road_km = round(float(raw["road_km"]), 2) if raw.get("road_km") is not None else None
+        junctions = int(raw["junctions"]) if raw.get("junctions") is not None else None
+    except (TypeError, ValueError, IndexError, KeyError):
+        return None, f"{name}: the road route could not be verified. Adjust points A and B and add the link again."
+    if junctions is None or junctions < 0 or len(path) < 2:
+        return None, f"{name}: the road route could not be verified for intersections."
+    ack = junctions > 0 and raw.get("accept_intersection_quality_impact") is True
+    if junctions == 0 and raw.get("no_junctions") is not True:
+        return None, f"{name}: confirm that the link has no intersections, entrances or exits."
+    if junctions > 0 and not ack:
+        return None, f"{name}: confirm that you accept the possible intersection quality impact."
+    point_c = point_c_distance_km = None
+    if {"speed", "travel", "volumes"}.intersection(services):
+        try:
+            rc = raw.get("point_c")
+            if not isinstance(rc, list) or len(rc) != 2:
+                raise ValueError
+            point_c = [round(float(rc[0]), 6), round(float(rc[1]), 6)]
+            if not (-90 <= point_c[0] <= 90 and -180 <= point_c[1] <= 180):
+                raise ValueError
+            point_c_distance_km = float(raw.get("point_c_distance_km"))
+            if not math.isfinite(point_c_distance_km) or point_c_distance_km <= 1.5:
+                raise ValueError
+        except (TypeError, ValueError):
+            return None, f"{name}: a valid road point C more than 1.5 km from A is required for Time, Speed or Volumes."
+    lats, lngs = [c[0] for c in coords], [c[1] for c in coords]
+    return {"coords": coords, "path": path, "road_km": road_km, "junctions": junctions, "ack": ack,
+            "point_c": point_c, "point_c_distance_km": point_c_distance_km,
+            "bbox": [min(lats), min(lngs), max(lats), max(lngs)]}, None
+
+@app.post("/api/request-groups")
+@login_required
+def create_request_group():
+    j = request.get_json(force=True, silent=True) or {}
+    enabled = active_services()
+    sv = list(dict.fromkeys(x for x in j.get("services", []) if x in enabled))
+    if not sv:
+        return jsonify(error="Choose at least one service"), 400
+    try: day = dt.date.fromisoformat(str(j.get("date") or "")).isoformat()
+    except ValueError: return jsonify(error="Choose a valid date"), 400
+    mode = j.get("mode")
+    if mode not in GROUP_MODES:
+        return jsonify(error="Choose the order type first"), 400
+    raw_links, raw_periods = j.get("links"), j.get("periods")
+    if not isinstance(raw_links, list) or not isinstance(raw_periods, list):
+        return jsonify(error="Add at least one link and one period"), 400
+    if not raw_links:
+        return jsonify(error="Add at least one link"), 400
+    if not raw_periods:
+        return jsonify(error="Choose at least one period"), 400
+    if len(raw_links) > MAX_GROUP_LINKS:
+        return jsonify(error=f"An order can contain at most {MAX_GROUP_LINKS} links"), 400
+    if mode in ("single", "multi_period") and len(raw_links) != 1:
+        return jsonify(error="This order type allows exactly one link"), 400
+    if mode in ("single", "multi_link") and len(raw_periods) != 1:
+        return jsonify(error="This order type allows exactly one period"), 400
+    active_labels = {row["label"] for row in db().execute("SELECT label FROM periods WHERE is_active=1").fetchall()}
+    periods, seen = [], set()
+    for raw in raw_periods:
+        period, error = _clean_group_period(raw, active_labels)
+        if error: return jsonify(error=error), 400
+        if period["label"] in seen: return jsonify(error=f"Period {period['label']} was chosen twice"), 400
+        seen.add(period["label"]); periods.append(period)
+    links = []
+    for number, raw in enumerate(raw_links, start=1):
+        link, error = _clean_group_link(raw, sv, number)
+        if error: return jsonify(error=error), 400
+        links.append(link)
+    title = _clean_request_title(j.get("title"))
+    now_day, total = dt.date.today().isoformat(), len(links) * len(periods)
+    d = db()
+    group_id = None
+    try:
+        if total > 1:
+            group_id = d.execute(
+                "INSERT INTO request_groups(user_id,title,created,study_date,services,mode) VALUES(?,?,?,?,?,?)",
+                (session["uid"], title, now_day, day, json.dumps(sv), mode)).lastrowid
+        request_ids = []
+        for number, link in enumerate(links, start=1):
+            for period in periods:
+                child_title = title if total == 1 else _clean_request_title(
+                    " · ".join(x for x in (title, f"Link {number}", period["label"]) if x))
+                cur = d.execute(
+                    "INSERT INTO requests(user_id,created,d1,d2,services,area,bbox,coords,type,hours,path,road_km,junctions,start_time,end_time,point_c,point_c_distance_km,title,junction_quality_ack,junction_quality_ack_at,group_id,period_label) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (session["uid"], now_day, day, day, json.dumps(sv),
+                     f"Link {number} A to B (~{link['road_km']} km by road)" if total > 1 else f"Link A to B (~{link['road_km']} km by road)",
+                     json.dumps(link["bbox"]), json.dumps(link["coords"]), "link", json.dumps(period["hours"]),
+                     json.dumps(link["path"]), link["road_km"], link["junctions"], period["start_time"], period["end_time"],
+                     json.dumps(link["point_c"]) if link["point_c"] else None, link["point_c_distance_km"],
+                     child_title, int(link["ack"]), _timestamp_now() if link["ack"] else None, group_id, period["label"]))
+                request_ids.append(cur.lastrowid)
+                if "volumes" in sv:
+                    now = _timestamp_now()
+                    d.execute("INSERT INTO volumes_workflows(request_id,status,created_at,updated_at) VALUES(?,'waiting_for_inputs',?,?)",
+                              (cur.lastrowid, now, now))
+        if session.get("role") != "admin":
+            if group_id:
+                for admin_user in d.execute("SELECT id FROM users WHERE role='admin'").fetchall():
+                    _create_notification(admin_user["id"], request_ids[0], "new_request", "New grouped request",
+                        f"{session.get('name', 'A client')} submitted order GRP-{group_id}: {len(links)} link(s) x {len(periods)} period(s) = {total} requests.")
+            else:
+                _notify_admins_new_request(request_ids[0], session.get("name", "A client"))
+        d.commit()
+    except sqlite3.Error:
+        d.rollback()
+        app.logger.exception("Could not save the grouped order")
+        return jsonify(error="The order could not be saved. Nothing was created; please try again."), 500
+    for rid in request_ids:
+        try: apply_network(rid)
+        except Exception as e: app.logger.warning("network lookup failed: %s", e)
+    status = d.execute("SELECT status FROM requests WHERE id=?", (request_ids[0],)).fetchone()["status"]
+    return jsonify(group_id=group_id, request_ids=request_ids, count=total, id=request_ids[0], status=status)
+
+def _group_children(gid):
+    rows = db().execute("SELECT * FROM requests WHERE group_id=? ORDER BY id", (gid,)).fetchall()
+    return [to_dict(row) for row in rows]
+
+def _group_status(group_row, children):
+    if group_row["sent_at"]:
+        return "Completed"
+    active = [c for c in children if c["status"] != "Rejected"]
+    if not active:
+        return "Rejected"
+    if any(c["status"] in ("Processing", "Completed") for c in active):
+        return "Processing"
+    return "Pending"
+
+def _group_ready_to_send(children):
+    active = [c for c in children if c["status"] != "Rejected"]
+    return bool(active) and all(c["status"] == "Completed" for c in active)
+
+def _group_card(group_row):
+    children = _group_children(group_row["id"])
+    return {"id": group_row["id"], "title": group_row["title"], "created": group_row["created"],
+            "d1": group_row["study_date"], "services": [x for x in json.loads(group_row["services"]) if x in service_catalog()],
+            "count": len(children), "periods": sorted({c["period_label"] for c in children if c.get("period_label")}),
+            "links": len({json.dumps(c["coords"]) for c in children}),
+            "status": _group_status(group_row, children), "sent": bool(group_row["sent_at"])}
+
+def _load_group(gid, admin_view):
+    row = db().execute(
+        "SELECT g.*, u.name AS client, u.email AS email FROM request_groups g JOIN users u ON u.id=g.user_id WHERE g.id=?",
+        (gid,)).fetchone()
+    if not row or (not admin_view and row["user_id"] != session["uid"]):
+        abort(404)
+    children = _group_children(gid)
+    # label every child by its link and period, preserving the order links were added
+    link_index = {}
+    for c in children:
+        key = json.dumps(c["coords"])
+        link_index.setdefault(key, len(link_index) + 1)
+        c["link_no"] = link_index[key]
+    return row, children
+
+@app.get("/groups/<int:gid>")
+@login_required
+def client_group(gid):
+    if session.get("role") == "admin":
+        return redirect(url_for("admin_group", gid=gid))
+    row, children = _load_group(gid, admin_view=False)
+    return render_template("group.html", g=row, children=children, card=_group_card(row), admin_view=False,
+                           ready=_group_ready_to_send(children))
+
+@app.get("/admin/groups/<int:gid>")
+@admin_required
+def admin_group(gid):
+    row, children = _load_group(gid, admin_view=True)
+    return render_template("group.html", g=row, children=children, card=_group_card(row), admin_view=True,
+                           ready=_group_ready_to_send(children))
+
+@app.post("/api/groups/<int:gid>/send")
+@admin_required
+def send_group_report(gid):
+    row = db().execute("SELECT * FROM request_groups WHERE id=?", (gid,)).fetchone()
+    if not row:
+        return jsonify(error="Order not found"), 404
+    if row["sent_at"]:
+        return jsonify(error="This report was already sent."), 409
+    children = _group_children(gid)
+    if not _group_ready_to_send(children):
+        return jsonify(error="Every request in the order must be Completed (or Rejected) before the report can be sent."), 409
+    stamp = _timestamp_now()
+    db().execute("UPDATE request_groups SET sent_at=? WHERE id=?", (stamp, gid))
+    first = children[0]["id"]
+    _create_notification(row["user_id"], first, "group_ready", "Your report is ready",
+                         f"All results for order GRP-{gid} are ready in one report.")
+    db().commit()
+    return jsonify(ok=True, sent_at=stamp)
+
+@app.get("/groups/<int:gid>/export.xlsx")
+@login_required
+def export_group_excel(gid):
+    admin_view = session.get("role") == "admin"
+    row, children = _load_group(gid, admin_view=admin_view)
+    if not admin_view and not row["sent_at"]:
+        abort(404)
+    forms = forms_catalog()
+    services = [x for x in json.loads(row["services"]) if x in service_catalog()]
+    workbook = Workbook()
+    summary = workbook.active
+    summary.title = "Order Summary"
+    summary.append(["Field", "Value"])
+    link_count = len({json.dumps(c["coords"]) for c in children})
+    for label, value in (
+        ("Order ID", f"GRP-{gid}"), ("Name", row["title"] or ""), ("Client", row["client"]),
+        ("Status", _group_status(row, children)), ("Study date", row["study_date"]),
+        ("Links", link_count), ("Periods", ", ".join(sorted({c["period_label"] for c in children if c.get("period_label")}))),
+        ("Requests in this order", len(children)),
+        ("Requested services", ", ".join(SERVICES.get(x, x) for x in services)),
+    ):
+        summary.append([_excel_safe_text(label), value if isinstance(value, (int, float)) else _excel_safe_text(value)])
+    _style_excel_sheet(summary)
+
+    links_sheet = workbook.create_sheet("Links and Periods")
+    links_sheet.append(["Request", "Link", "Period", "Time range", "Status", "Point A", "Point B", "Point C", "Road length (km)"])
+    for c in children:
+        show_c = admin_view or c.get("show_point_c")
+        links_sheet.append([
+            f"REQ-{c['id']}", f"Link {c['link_no']}", _excel_safe_text(c.get("period_label") or ""),
+            _excel_safe_text(c["time_range_label"]), c["status"],
+            ", ".join(map(str, c["coords"][0])), ", ".join(map(str, c["coords"][-1])),
+            ", ".join(map(str, c["point_c"])) if (c.get("point_c") and show_c) else "", c.get("road_km")])
+    _style_excel_sheet(links_sheet)
+
+    details = workbook.create_sheet("Service Details")
+    details.append(["Link", "Period", "Time range", "Service", "Hour", "Value", "Tolerance", "Unit", "Source", "Notes"])
+    for c in children:
+        if c["status"] == "Rejected":
+            continue
+        for service in c["services"]:
+            saved = c["data"].get(service, {})
+            unit = (forms.get(service) or {}).get("unit", "")
+            source = ("Road network" if saved.get("source") == "network" else "MATLAB" if saved.get("source") == "matlab"
+                      else "Admin" if (saved.get("rows") or saved.get("note")) else "")
+            rows = saved.get("rows") or [{}]
+            for service_row in rows:
+                hour = service_row.get("hour")
+                hour_label = f"{int(hour):02d}:00-{int(hour) + 1:02d}:00" if hour is not None else ""
+                value = service_row.get("value")
+                if value is not None and not isinstance(value, (int, float)) or isinstance(value, bool):
+                    value = _excel_safe_text(value)
+                tol = service_row.get("tolerance")
+                if tol is not None and not isinstance(tol, (int, float)):
+                    tol = _excel_safe_text(tol)
+                details.append([f"Link {c['link_no']}", _excel_safe_text(c.get("period_label") or ""), _excel_safe_text(c["time_range_label"]),
+                                _excel_safe_text(SERVICES.get(service, service)), hour_label, value, tol,
+                                _excel_safe_text(unit), _excel_safe_text(source), _excel_safe_text(saved.get("note") or "")])
+    _style_excel_sheet(details)
+
+    route_rows = []
+    for c in children:
+        directions = (c["data"].get("travel") or c["data"].get("speed") or {}).get("directions_result")
+        if directions and c["status"] != "Rejected":
+            route_rows.append([f"Link {c['link_no']}", _excel_safe_text(c.get("period_label") or ""),
+                               directions.get("distance_meters"), directions.get("time_seconds"), directions.get("speed_kmh")])
+    if route_rows:
+        routes = workbook.create_sheet("A-to-B Results")
+        routes.append(["Link", "Period", "A-to-B distance (m)", "A-to-B time (s)", "A-to-B speed (km/h)"])
+        for item in route_rows:
+            routes.append(item)
+        _style_excel_sheet(routes)
+    output = io.BytesIO()
+    workbook.save(output)
+    output.seek(0)
+    return app.response_class(
+        output.getvalue(),
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="trafficlens-order-{gid}.xlsx"'},
+    )
+
+@app.post("/api/periods")
+@admin_required
+def add_period():
+    label = " ".join(str((request.get_json(silent=True) or {}).get("label") or "").split())[:12].upper()
+    if not label:
+        return jsonify(error="Enter a period name, e.g. EVE"), 400
+    if db().execute("SELECT 1 FROM periods WHERE label=?", (label,)).fetchone():
+        return jsonify(error="This period already exists"), 409
+    order = db().execute("SELECT COALESCE(MAX(sort_order),0)+1 FROM periods").fetchone()[0]
+    db().execute("INSERT INTO periods(label,sort_order) VALUES(?,?)", (label, order)); db().commit()
+    return jsonify(ok=True)
+
+@app.post("/api/periods/<int:pid>/availability")
+@admin_required
+def set_period_availability(pid):
+    enabled = (request.get_json(silent=True) or {}).get("enabled")
+    if not isinstance(enabled, bool):
+        return jsonify(error="Invalid"), 400
+    if not enabled and db().execute("SELECT COUNT(*) FROM periods WHERE is_active=1 AND id!=?", (pid,)).fetchone()[0] == 0:
+        return jsonify(error="At least one period must stay available"), 409
+    if not db().execute("UPDATE periods SET is_active=? WHERE id=?", (int(enabled), pid)).rowcount:
+        return jsonify(error="Period not found"), 404
+    db().commit()
+    return jsonify(ok=True)
+
+
 @app.post("/api/requests/<int:rid>/title")
 @login_required
 def rename_request(rid):
@@ -2118,13 +2480,15 @@ def rename_request(rid):
 @app.route("/requests")
 @login_required
 def my_requests():
-    rows = db().execute("SELECT * FROM requests WHERE user_id=? ORDER BY id DESC", (session["uid"],)).fetchall()
+    rows = db().execute("SELECT * FROM requests WHERE user_id=? AND group_id IS NULL ORDER BY id DESC", (session["uid"],)).fetchall()
     reqs = [to_dict(row) for row in rows]
     for item in reqs:
         item["results_available"] = (
             item["status"] == "Completed"
             or (item["status"] == "Processing" and item["progress"][0] > 0)
         )
+    groups = [_group_card(row) for row in db().execute(
+        "SELECT * FROM request_groups WHERE user_id=? ORDER BY id DESC", (session["uid"],)).fetchall()]
     initial_status = request.args.get("status", "")
     if initial_status not in STATUSES:
         initial_status = ""
@@ -2134,6 +2498,7 @@ def my_requests():
     return render_template(
         "requests.html",
         reqs=reqs,
+        groups=groups,
         statuses=STATUSES,
         initial_status=initial_status,
         initial_results=initial_results,
@@ -2180,9 +2545,14 @@ def open_notification(notification_id):
             (dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), notification_id, session["uid"]),
         )
         db().commit()
-    if session.get("role") == "admin":
-        return redirect(url_for("admin_request", rid=notification["request_id"]))
-    return redirect(url_for("result", rid=notification["request_id"]))
+    return redirect(_notification_destination(notification["request_id"], session.get("role") == "admin"))
+
+def _notification_destination(request_id, is_admin):
+    row = db().execute("SELECT group_id FROM requests WHERE id=?", (request_id,)).fetchone()
+    group_id = row["group_id"] if row else None
+    if group_id:
+        return url_for("admin_group", gid=group_id) if is_admin else url_for("client_group", gid=group_id)
+    return url_for("admin_request", rid=request_id) if is_admin else url_for("result", rid=request_id)
 
 @app.get("/api/notifications/unread-count")
 @login_required
@@ -2209,11 +2579,7 @@ def notification_device_feed():
     ).fetchall()
     notifications_out = []
     for row in rows:
-        destination = (
-            url_for("admin_request", rid=row["request_id"])
-            if session.get("role") == "admin"
-            else url_for("result", rid=row["request_id"])
-        )
+        destination = _notification_destination(row["request_id"], session.get("role") == "admin")
         notifications_out.append({
             "id": row["id"],
             "title": row["title"],
@@ -2251,10 +2617,11 @@ def admin():
              "by_service": {v: sum(1 for r in reqs if k in r["services"]) for k, v in all_service_names().items()},
              "by_hour": {"labels": [f"{h:02d}" for h in range(24)], "values": [sum(1 for r in reqs if h in r["hours"]) for h in range(24)]},
              "per_day": {"labels": days, "values": [counts.get(d, 0) for d in days]}}
+    period_rows = [dict(x) for x in db().execute("SELECT * FROM periods ORDER BY sort_order,id").fetchall()]
     users = [dict(u) for u in db().execute(
         "SELECT u.id,u.name,u.email,u.role,COUNT(r.id) AS n,COALESCE(SUM(r.status='Completed'),0) AS done,MAX(r.created) AS last "
         "FROM users u LEFT JOIN requests r ON r.user_id=u.id GROUP BY u.id ORDER BY n DESC, u.id").fetchall()]
-    return render_template("admin.html", reqs=reqs, stats=stats, users=users, statuses=STATUSES,
+    return render_template("admin.html", reqs=reqs, stats=stats, users=users, statuses=STATUSES, periods=period_rows,
                            net={"have_geo": network.HAVE_GEO, "cfg": get_setting("network", {}), "services": net_services()})
 
 def _delete_requests(request_ids=None):
@@ -2277,6 +2644,7 @@ def _delete_requests(request_ids=None):
     d.execute(f"DELETE FROM volumes_workflows WHERE request_id IN ({placeholders})", ids)
     d.execute(f"DELETE FROM request_directions_workflows WHERE request_id IN ({placeholders})", ids)
     d.execute(f"DELETE FROM requests WHERE id IN ({placeholders})", ids)
+    d.execute("DELETE FROM request_groups WHERE id NOT IN (SELECT DISTINCT group_id FROM requests WHERE group_id IS NOT NULL)")
     d.commit()
     return len(ids)
 
@@ -3954,6 +4322,11 @@ def _redact_client_directions_context(result_request):
 def result(rid):
     r = db().execute("SELECT r.*, u.name AS client FROM requests r JOIN users u ON u.id=r.user_id WHERE r.id=?", (rid,)).fetchone()
     if not r or (r["user_id"] != session["uid"] and session["role"] != "admin"): abort(404)
+    if r["group_id"] and session["role"] != "admin":
+        grp = db().execute("SELECT sent_at FROM request_groups WHERE id=?", (r["group_id"],)).fetchone()
+        if grp and not grp["sent_at"]:
+            flash("This order is still being prepared. All its results will be sent together in one report.")
+            return redirect(url_for("client_group", gid=r["group_id"]))
     if r["status"] == "Pending" and session["role"] != "admin": flash("Your request is still pending. Results will appear here soon."); return redirect(url_for("my_requests"))
     result_request = to_dict(r)
     if session.get("role") != "admin" and not result_request.get("show_point_c"):

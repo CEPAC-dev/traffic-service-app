@@ -3,14 +3,21 @@
 <div class="search"><input id="q" placeholder="Search for a place, e.g. Nasr City"><button class="btn"
     id="go">Search</button></div>
 {% if repeat_request %}<div class="tip source-request-tip"><b>Repeating request REQ-{{repeat_request.id}}</b><br>Its date, times, services and A/B locations have been copied below. You can edit them before submitting. This creates a new request; the original remains unchanged. Please confirm the route condition again, including any quality-impact acknowledgment if intersections are detected.</div>{% endif %}
-<div class="callout"><b>🔗 Select your link.</b> Click the map to choose the <b>start (A)</b> and the <b>end (B)</b> of
-  the link.
-  Choose one road section without intersections, entrances or exits whenever possible. If the route check finds intersections, you can continue only after explicitly acknowledging that they may affect result quality.</div>
+<div class="callout"><b>🔗 Build your order.</b> First choose the order type. Then click the map to choose the <b>start (A)</b> and the <b>end (B)</b> of each link and press <b>Add link to order</b>.
+  Choose road sections without intersections, entrances or exits whenever possible. If the route check finds intersections, you can continue only after explicitly acknowledging that they may affect result quality.</div>
 <div class="study">
   <div id="map"></div>
   <div class="side">
     <div class="card">
-      <h3>Selected link</h3>
+      <h3>1. Order type</h3>
+      <div class="chk" id="modeList">
+        <label><input type="radio" name="mode" value="single" checked><span><b>One link, one period</b><span class="hint" style="display:block">A single link for a single study period.</span></span></label>
+        <label><input type="radio" name="mode" value="multi_period"><span><b>One link, several periods</b><span class="hint" style="display:block">The same link for AM, MD, PM... in one order.</span></span></label>
+        <label><input type="radio" name="mode" value="multi_link"><span><b>Several links, one period</b><span class="hint" style="display:block">Up to {{ max_links }} links (for example every entry and exit of an intersection) for one period.</span></span></label>
+      </div>
+    </div>
+    <div class="card">
+      <h3>2. Select a link</h3>
       <div id="info" class="coord"></div>
       <div class="coordinate-readout" aria-live="polite">
         <div><b>Point A</b><code id="pointACoordinates">Not selected</code></div>
@@ -20,22 +27,19 @@
       <p style="margin:8px 0 0"><button class="btn alt" id="reset" type="button">Reset points</button></p>
       <label class="cf" id="noJunctionDeclaration"><input type="checkbox" id="nj"> I confirm this link has no intersections, entrances or exits.</label>
       <label class="cf" id="junctionQualityConsent" hidden><input type="checkbox" id="acceptJunctionQuality"> I agree to submit this link despite the detected intersections, knowing they may affect the quality of the results.</label>
+      <p style="margin:10px 0 0"><button class="btn" id="addLink" type="button" disabled>Add link to order</button></p>
+      <h3 style="margin-top:16px">Links in this order <span class="pill" id="linkCount">0</span></h3>
+      <ul id="linkList" class="hint" style="padding-left:18px;margin:6px 0"></ul>
     </div>
     <div class="card">
-      <h3>Request name</h3><label for="reqTitle">Name (optional)</label><input type="text" id="reqTitle" maxlength="80" placeholder="e.g. Gulf Road – morning peak" autocomplete="off">
-      <h3>Date and time</h3><label>Date (one day only)</label><input type="date" id="d1">
-      <label for="startTime">Start time (hour:minute:second)</label><input type="time" id="startTime" step="1">
-      <label for="endTime">End time (hour:minute:second)</label><input type="time" id="endTime" step="1">
-      <p id="timeRangeSummary" class="hint" aria-live="polite">Choose a start and end time. Hourly services will include every hour touched by this time range.</p>
-      <div class="qbtns">
-        <button type="button" class="btn alt q" data-start="07:00:00" data-end="09:00:00">AM peak</button>
-        <button type="button" class="btn alt q" data-start="16:00:00" data-end="18:00:00">PM peak</button>
-        <button type="button" class="btn alt q" data-start="00:00:00" data-end="23:59:59">All day</button>
-        <button type="button" class="btn alt q" data-start="" data-end="">Clear</button>
-      </div>
+      <h3>3. Name, date and periods</h3><label for="reqTitle">Order name (optional)</label><input type="text" id="reqTitle" maxlength="80" placeholder="e.g. Gulf Road junction" autocomplete="off">
+      <label>Date (one day only)</label><input type="date" id="d1">
+      <p class="hint" id="periodHint" style="margin-bottom:4px"></p>
+      <div id="periodRows"></div>
+      <p id="orderSummary" class="hint" aria-live="polite"></p>
     </div>
     <div class="card">
-      <h3>Services</h3>
+      <h3>4. Services</h3>
       <div class="chk svl" id="svl">
         {% for k,v in ACTIVE_SERVICES.items() %}<label><input type="checkbox" value="{{k}}" {{ 'checked' if (selected_service==k if selected_service else k in ('speed','travel')) }}><span><b>{{ SVINFO[k].icon }} {{v}}</b>{% if k=='freeflow_time' %}<span class="pill"
               style="margin-left:6px">Public holiday · 07:00</span>{% elif k=='freeflow_speed' %}<span class="pill"
@@ -47,8 +51,9 @@
       {% if 'volumes' in ACTIVE_SERVICES %}<p class="hint">Traffic volumes can be requested with other services. The administrator calculates volumes using lane count, actual speed, and a reviewed free-flow speed. Supporting inputs stay internal; only the services you selected and their approved results are shared.</p>{% endif %}
       {% if NET_SERVICES %}<p class="hint">⚡ Instant services are answered right away from our road network when your
         link is covered by it.</p>{% endif %}
+      <p class="hint">The same services and the same periods apply to every link in the order. All results are sent together in one report.</p>
       <div class="order-actions">
-        <button class="btn" id="ok" disabled type="button">Confirm link</button>
+        <button class="btn" id="ok" disabled type="button">Submit order</button>
         <button class="btn alt" id="resetOrder" type="button">Reset order</button>
       </div>
       <div id="msg"></div>
@@ -63,8 +68,12 @@
   const noJunctionDeclaration = document.getElementById('noJunctionDeclaration');
   const junctionQualityConsent = document.getElementById('junctionQualityConsent');
   const acceptJunctionQuality = document.getElementById('acceptJunctionQuality');
+  const PERIOD_LABELS = {{ period_labels|tojson }}, MAX_LINKS = {{ max_links }};
+  const LINK_COLORS = ['#2563eb', '#9333ea', '#ea580c', '#0891b2', '#be185d', '#65a30d', '#b45309', '#4f46e5', '#0f766e', '#dc2626'];
   let pts = [], line = null, extensionLine = null, markerC = null, route = null, seq = 0;
-  const map = L.map('map').setView([30.0444, 31.2357], 11); tiles(map); const rg = L.featureGroup().addTo(map);
+  let mode = 'single', links = [], periodState = {};
+  PERIOD_LABELS.forEach(label => periodState[label] = { checked: false, start: '', end: '' });
+  const map = L.map('map').setView([30.0444, 31.2357], 11); tiles(map); const rg = L.featureGroup().addTo(map); const savedGroup = L.featureGroup().addTo(map);
   const fmt = p => [+p.lat.toFixed(6), +p.lng.toFixed(6)];
   d1.value = new Date().toISOString().slice(0, 10);
   function updateCoordinates() {
@@ -75,26 +84,82 @@
       pointCCoordinates.textContent = route?.pointC ? fmt({ lat: route.pointC[0], lng: route.pointC[1] }).join(', ') : 'Not calculated';
     }
   }
-  function hourSlots() {
-    const start = startTime.value.split(':').map(Number), end = endTime.value.split(':').map(Number);
-    if (start.length < 2 || end.length < 2 || !startTime.value || !endTime.value) return [];
-    const startSeconds = start[0] * 3600 + start[1] * 60 + (start[2] || 0);
-    const endSeconds = end[0] * 3600 + end[1] * 60 + (end[2] || 0);
-    if (endSeconds <= startSeconds) return [];
-    return Array.from({ length: Math.floor((endSeconds - 1) / 3600) - Math.floor(startSeconds / 3600) + 1 },
-      (_, index) => Math.floor(startSeconds / 3600) + index);
+  const maxLinksForMode = () => mode === 'multi_link' ? MAX_LINKS : 1;
+  const maxPeriodsForMode = () => mode === 'multi_period' ? PERIOD_LABELS.length : 1;
+  const selectedServices = () => [...document.querySelectorAll('#svl input:checked')].map(input => input.value);
+  const needsPointCForServices = () => selectedServices().some(value => ['speed', 'travel', 'volumes'].includes(value));
+  function timeToSeconds(value) {
+    const parts = (value || '').split(':').map(Number);
+    return parts.length < 2 || parts.some(Number.isNaN) ? null : parts[0] * 3600 + parts[1] * 60 + (parts[2] || 0);
   }
-  function check() {
-    const hours = hourSlots();
-    timeRangeSummary.textContent = hours.length
-      ? `Exact range: ${startTime.value}–${endTime.value}. Included hourly periods: ${hours.map(hour => `${String(hour).padStart(2, '0')}:00-${String(hour + 1).padStart(2, '0')}:00`).join(', ')}.`
-      : 'Choose a valid start and end time on the same day.';
-    const needsPointC = [...document.querySelectorAll('#svl input:checked')].some(input => ['speed', 'travel', 'volumes'].includes(input.value));
+  function chosenPeriods() {
+    return PERIOD_LABELS.filter(label => periodState[label].checked)
+      .map(label => ({ label, start_time: periodState[label].start, end_time: periodState[label].end }));
+  }
+  function periodsValid() {
+    const chosen = chosenPeriods();
+    if (!chosen.length || chosen.length > maxPeriodsForMode()) return false;
+    return chosen.every(period => {
+      const start = timeToSeconds(period.start_time), end = timeToSeconds(period.end_time);
+      return start !== null && end !== null && end > start;
+    });
+  }
+  function renderPeriods() {
+    const multiple = mode === 'multi_period';
+    periodHint.textContent = multiple
+      ? 'Tick every period you need and enter its exact start and end time. Peak hours differ by country, so you decide them.'
+      : 'Choose the period and enter its exact start and end time. Peak hours differ by country, so you decide them.';
+    periodRows.replaceChildren();
+    PERIOD_LABELS.forEach(label => {
+      const state = periodState[label], row = document.createElement('div');
+      row.className = 'period-row'; row.style.cssText = 'display:grid;grid-template-columns:auto 1fr 1fr;gap:8px;align-items:end;margin:6px 0';
+      const pick = document.createElement('label'); pick.className = 'cf'; pick.style.margin = '0';
+      const input = document.createElement('input'); input.type = multiple ? 'checkbox' : 'radio'; input.name = 'periodPick'; input.checked = state.checked;
+      input.onchange = () => {
+        if (!multiple) PERIOD_LABELS.forEach(other => periodState[other].checked = false);
+        state.checked = input.checked; renderPeriods(); check();
+      };
+      const text = document.createElement('b'); text.textContent = ' ' + label; pick.append(input, text);
+      const start = document.createElement('input'), end = document.createElement('input');
+      [start, end].forEach(field => { field.type = 'time'; field.step = 1; field.disabled = !state.checked; });
+      start.value = state.start; end.value = state.end; start.title = 'Start time'; end.title = 'End time';
+      start.setAttribute('aria-label', label + ' start time'); end.setAttribute('aria-label', label + ' end time');
+      start.oninput = () => { state.start = start.value; check(); }; end.oninput = () => { state.end = end.value; check(); };
+      row.append(pick, start, end); periodRows.append(row);
+    });
+  }
+  function currentLinkReady() {
     const verifiedRoute = route?.road && Number.isInteger(route.junctions) && route.junctions >= 0;
     const routeAcknowledged = route?.junctions === 0 ? nj.checked : route?.junctions > 0 && acceptJunctionQuality.checked;
+    return pts.length == 2 && verifiedRoute && (!needsPointCForServices() || route.pointC) && routeAcknowledged;
+  }
+  function renderLinks() {
+    savedGroup.clearLayers();
+    linkList.replaceChildren();
+    links.forEach((link, index) => {
+      const color = LINK_COLORS[index % LINK_COLORS.length];
+      L.polyline(link.path, { color, weight: 5 }).addTo(savedGroup).bindTooltip(`Link ${index + 1}`, { permanent: true, direction: 'top' });
+      const item = document.createElement('li');
+      item.textContent = `Link ${index + 1} · ~${link.road_km} km${link.junctions ? ` · ${link.junctions} intersection(s) acknowledged` : ''} `;
+      const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'btn alt btn-small'; remove.textContent = 'Remove';
+      remove.onclick = () => { links.splice(index, 1); renderLinks(); check(); };
+      item.append(remove); linkList.append(item);
+    });
+    linkCount.textContent = `${links.length} / ${maxLinksForMode()}`;
+  }
+  function check() {
+    const verifiedRoute = route?.road && Number.isInteger(route.junctions) && route.junctions >= 0;
     noJunctionDeclaration.hidden = !verifiedRoute || route.junctions !== 0;
     junctionQualityConsent.hidden = !verifiedRoute || route.junctions === 0;
-    ok.disabled = !(pts.length == 2 && verifiedRoute && (!needsPointC || route.pointC) && routeAcknowledged && hours.length && d1.value && document.querySelector('#svl input:checked'))
+    addLink.disabled = !(currentLinkReady() && links.length < maxLinksForMode());
+    addLink.textContent = links.length >= maxLinksForMode() ? (mode === 'multi_link' ? `Limit of ${MAX_LINKS} links reached` : 'Link added (this order type allows one link)') : 'Add link to order';
+    const chosen = chosenPeriods(), total = links.length * chosen.length;
+    orderSummary.textContent = links.length && chosen.length
+      ? `${links.length} link${links.length === 1 ? '' : 's'} × ${chosen.length} period${chosen.length === 1 ? '' : 's'} = ${total} request${total === 1 ? '' : 's'}, delivered in one report.`
+      : 'Add at least one link and choose a period.';
+    const pointCMissing = needsPointCForServices() && links.some(link => !link.pointC);
+    if (pointCMissing) orderSummary.textContent += ' A selected service needs point C: remove and re-add the links added before you chose it.';
+    ok.disabled = !(links.length && periodsValid() && d1.value && selectedServices().length && !pointCMissing);
   }
   function draw() {
     if (line) { rg.removeLayer(line); line = null }
@@ -205,26 +270,45 @@
       : `${route.error || `Road not found, straight-line distance: ~${route.km} km`}<br><b style="color:#92400E">The link could not be checked for intersections or point C, so it cannot be submitted.</b>`); check()
   }
   map.on('click', e => { if (pts.length >= 2) return; const m = L.marker(e.latlng, { draggable: true }).addTo(rg).bindTooltip(pts.length ? 'B' : 'A', { permanent: true, direction: 'top' }); m.on('dragend', solve); pts.push(m); updateCoordinates(); solve() });
-  reset.onclick = () => {   rg.clearLayers(); pts = []; line = null; extensionLine = null; markerC = null; route = null; seq++;   nj.checked = false; acceptJunctionQuality.checked = false; msg.innerHTML = ''; updateCoordinates(); solve() };
-  resetOrder.onclick = () => {
+  function clearCurrentLink() {
     rg.clearLayers(); pts = []; line = null; extensionLine = null; markerC = null; route = null; seq++;
-    nj.checked = false; acceptJunctionQuality.checked = false; msg.replaceChildren(); q.value = ''; updateCoordinates();
-    startTime.value = ''; endTime.value = '';
+    nj.checked = false; acceptJunctionQuality.checked = false; updateCoordinates();
+  }
+  reset.onclick = () => { clearCurrentLink(); msg.innerHTML = ''; solve() };
+  resetOrder.onclick = () => {
+    clearCurrentLink(); links = []; renderLinks(); msg.replaceChildren(); q.value = '';
+    PERIOD_LABELS.forEach(label => periodState[label] = { checked: false, start: '', end: '' });
+    mode = 'single'; document.querySelector('input[name="mode"][value="single"]').checked = true;
+    renderPeriods();
     document.querySelectorAll('#svl input[type="checkbox"]').forEach(input => {
       input.checked = input.value === 'speed' || input.value === 'travel';
     });
     d1.value = new Date().toISOString().slice(0, 10);
     solve();
   };
-  document.querySelectorAll('.q').forEach(b => b.onclick = () => {
-    startTime.value = b.dataset.start; endTime.value = b.dataset.end; check()
+  addLink.onclick = () => {
+    if (!currentLinkReady() || links.length >= maxLinksForMode()) return;
+    links.push({
+      coords: [fmt(pts[0].getLatLng()), fmt(pts[1].getLatLng())], path: route.path, road_km: route.km, junctions: route.junctions,
+      no_junctions: route.junctions === 0 && nj.checked, accept_intersection_quality_impact: route.junctions > 0 && acceptJunctionQuality.checked,
+      pointC: route.pointC ? fmt({ lat: route.pointC[0], lng: route.pointC[1] }) : null,
+      point_c_distance_km: route.routeDistanceToC ? route.routeDistanceToC / 1000 : null,
+    });
+    clearCurrentLink(); renderLinks(); solve();
+  };
+  document.querySelectorAll('input[name="mode"]').forEach(input => input.onchange = () => {
+    mode = input.value;
+    if (links.length > maxLinksForMode()) { links = links.slice(0, maxLinksForMode()); }
+    const chosen = PERIOD_LABELS.filter(label => periodState[label].checked);
+    if (mode !== 'multi_period') chosen.slice(1).forEach(label => periodState[label].checked = false);
+    renderLinks(); renderPeriods(); check();
   });
-  nj.onchange = check; acceptJunctionQuality.onchange = check; d1.onchange = check; startTime.oninput = check; endTime.oninput = check;
+  nj.onchange = check; acceptJunctionQuality.onchange = check; d1.onchange = check;
   svl.onchange = solve;
   if (repeatRequest) {
     d1.value = repeatRequest.date;
-    startTime.value = repeatRequest.start_time;
-    endTime.value = repeatRequest.end_time;
+    const repeatLabel = PERIOD_LABELS.includes(repeatRequest.period_label) ? repeatRequest.period_label : PERIOD_LABELS[0];
+    if (repeatLabel) periodState[repeatLabel] = { checked: true, start: repeatRequest.start_time, end: repeatRequest.end_time };
     document.querySelectorAll('#svl input[type="checkbox"]').forEach(input => {
       input.checked = repeatRequest.services.includes(input.value);
     });
@@ -246,24 +330,25 @@
   };
   q.onkeydown = e => { if (e.key === 'Enter') go.click() };
   ok.onclick = async () => {
-    if (!route?.road || !Number.isInteger(route.junctions) || route.junctions < 0) return;
-    const acceptsQualityImpact = route.junctions > 0 && acceptJunctionQuality.checked;
-    if (acceptsQualityImpact && !window.confirm(
-      `This route has ${route.junctions} possible intersection(s) between A and B. I agree to submit it knowing this may affect the quality of the results. Continue?`
-    )) return;
+    if (!links.length || !periodsValid()) return;
     const body = {
-      type: 'link', services: [...document.querySelectorAll('#svl input:checked')].map(i => i.value), date: d1.value,
-      start_time: startTime.value, end_time: endTime.value, hours: hourSlots(),
-      coords: [fmt(pts[0].getLatLng()), fmt(pts[1].getLatLng())], path: route.path, road_km: route.km, junctions: route.junctions, no_junctions: route.junctions === 0 && nj.checked,
-      accept_intersection_quality_impact: acceptsQualityImpact,
-      point_c: route.pointC ? fmt({lat:route.pointC[0],lng:route.pointC[1]}) : null,
-      point_c_distance_km: route.routeDistanceToC ? route.routeDistanceToC / 1000 : null,
-      area: `Link A to B (~${route.km} km${route.road ? ' by road' : ', straight line'})`,
-      title: document.getElementById('reqTitle').value.trim()
+      mode, title: document.getElementById('reqTitle').value.trim(), date: d1.value, services: selectedServices(),
+      links: links.map(link => ({
+        coords: link.coords, path: link.path, road_km: link.road_km, junctions: link.junctions, no_junctions: link.no_junctions,
+        accept_intersection_quality_impact: link.accept_intersection_quality_impact,
+        point_c: link.pointC, point_c_distance_km: link.point_c_distance_km,
+      })),
+      periods: chosenPeriods(),
     };
-    const r = await fetch('/api/requests', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    const j = await r.json(); if (!r.ok) return alert(j.error); ok.disabled = true;
+    ok.disabled = true;
+    const r = await fetch('/api/request-groups', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const j = await r.json(); if (!r.ok) { check(); return alert(j.error); }
+    if (j.group_id) {
+      msg.innerHTML = `<p class="ok">Order GRP-${j.group_id} created with ${j.count} requests. All results will be sent to you together in one report.</p><a class="btn" href="/groups/${j.group_id}">View order</a> <a class="btn alt" href="/requests">My requests</a>`;
+      return;
+    }
     const m = { Completed: 'Your results are ready. All the data came from our road network.', Processing: 'Part of your data is ready now. The rest is being prepared.', Pending: 'We will prepare your data and update this request.' }[j.status];
     msg.innerHTML = `<p class="ok">Request REQ-${j.id} created. ${m}</p>` + (j.status === 'Pending' ? '' : `<a class="btn" href="/results/${j.id}">View available results</a> `) + `<a class="btn alt" href="/requests">My requests</a>`
   };
+  renderPeriods(); renderLinks(); check();
 </script>{% endblock %}
