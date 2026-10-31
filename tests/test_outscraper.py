@@ -2308,6 +2308,9 @@ class OutscraperWorkflowTests(unittest.TestCase):
         try:
             traffic.DB = legacy_db
             legacy_schema = traffic.SCHEMA.replace(
+                ",\n  junction_quality_ack INTEGER NOT NULL DEFAULT 0, junction_quality_ack_at TEXT",
+                "",
+            ).replace(
                 "last_polled_at TEXT,\n  request_details_json TEXT, ",
                 "",
             ).replace(",\n  start_time TEXT, end_time TEXT, point_c TEXT", "")
@@ -2341,6 +2344,8 @@ class OutscraperWorkflowTests(unittest.TestCase):
             self.assertIn("start_time", request_columns)
             self.assertIn("end_time", request_columns)
             self.assertIn("point_c", request_columns)
+            self.assertIn("junction_quality_ack", request_columns)
+            self.assertIn("junction_quality_ack_at", request_columns)
             migrated.close()
 
             with mock.patch.object(traffic.outscraper, "fetch_request", return_value={
@@ -2722,22 +2727,49 @@ class OutscraperWorkflowTests(unittest.TestCase):
         self.assertIn(b"service=freeflow_time", freeflow_page.data)
         self.assertIn(b"service=freeflow_speed", freeflow_page.data)
 
-    def test_study_request_is_rejected_when_route_has_junctions_or_cannot_be_verified(self):
+    def test_study_request_requires_quality_ack_for_junctions_but_rejects_unverified_route(self):
         request_data = {
             "services": ["travel"], "date": "2026-10-21", "start_time": "07:00:00",
             "end_time": "08:00:00", "hours": [7],
             "coords": [[29.3, 47.9], [29.4, 48.0]],
             "path": [[29.3, 47.9], [29.4, 48.0]], "road_km": 1.2,
-            "no_junctions": True, "point_c": [29.41, 48.01], "point_c_distance_km": 1.6,
+            "no_junctions": False, "point_c": [29.41, 48.01], "point_c_distance_km": 1.6,
         }
         with self.subTest(reason="junction"):
             response = self.client.post("/api/requests", json={**request_data, "junctions": 1})
             self.assertEqual(response.status_code, 400)
             self.assertIn("intersections", response.get_json()["error"])
+        with self.subTest(reason="explicit quality-impact acknowledgment"):
+            with mock.patch.object(traffic, "apply_network", return_value=None):
+                accepted = self.client.post(
+                    "/api/requests",
+                    json={
+                        **request_data,
+                        "junctions": 1,
+                        "accept_intersection_quality_impact": True,
+                    },
+                )
+            self.assertEqual(accepted.status_code, 200, accepted.get_json())
+            with traffic.app.app_context():
+                saved = traffic.db().execute(
+                    "SELECT junctions,junction_quality_ack,junction_quality_ack_at "
+                    "FROM requests WHERE id=?",
+                    (accepted.get_json()["id"],),
+                ).fetchone()
+            self.assertEqual(saved["junctions"], 1)
+            self.assertEqual(saved["junction_quality_ack"], 1)
+            self.assertTrue(saved["junction_quality_ack_at"])
         with self.subTest(reason="unverified route"):
             response = self.client.post("/api/requests", json={**request_data, "junctions": None})
             self.assertEqual(response.status_code, 400)
             self.assertIn("could not be verified", response.get_json()["error"])
+
+    def test_study_page_explains_intersection_quality_acknowledgment(self):
+        response = self.client.get("/study")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"acceptJunctionQuality", response.data)
+        self.assertIn(b"may affect the quality of the results", response.data)
+        self.assertIn(b"I agree to submit this link despite the detected intersections", response.data)
 
     def test_traffic_volumes_can_be_requested_with_other_services(self):
         with self.client.session_transaction() as session:
