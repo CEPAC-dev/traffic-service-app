@@ -6,15 +6,36 @@
   <button class="btn" id="enableDeviceNotifications" type="button">Enable device notifications</button>
   <span id="deviceNotificationStatus" class="msg" role="status" aria-live="polite"></span>
 </div>
-<section class="notification-list">
+<div class="card" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+  <button class="btn alt" id="pageReadAll" type="button">Mark all read</button>
+  <button class="btn alt" id="pageClear" type="button">Clear all</button>
+  <button class="btn alt" id="pageRefresh" type="button">Refresh</button>
+</div>
+<section class="notification-list" id="pageList">
   {% for item in notifications %}
-  <a class="card notification-item {{'unread' if not item.read_at}}" href="{{url_for('open_notification',notification_id=item.id)}}">
-    <span class="notification-item-icon" aria-hidden="true">{{'📨' if item.kind=='new_request' else '💬'}}</span>
-    <span class="notification-item-body"><b>{{item.title}}</b><span>{{item.message}}</span><small>{{item.created_at}}</small></span>
+  <div class="card notification-item {{'unread' if not item.read_at}}" data-id="{{item.id}}" data-read="{{ '1' if item.read_at else '0' }}">
+    <a class="notification-item-link" href="{{url_for('open_notification',notification_id=item.id)}}">
+      <span class="notification-item-icon" aria-hidden="true">{{'📨' if item.kind=='new_request' else '📊' if item.kind=='group_ready' else '💬'}}</span>
+      <span class="notification-item-body"><b>{{item.title}}</b><span>{{item.message}}</span><small>{{item.created_at}}</small></span>
+    </a>
     {% if not item.read_at %}<span class="notification-unread-label">New</span>{% endif %}
-  </a>
+    <span class="notification-item-actions"><button class="btn alt btn-small" data-act="toggle" type="button">{{ 'Mark unread' if item.read_at else 'Mark read' }}</button><button class="btn alt btn-small" data-act="delete" type="button">Delete</button></span>
+  </div>
   {% else %}
   <div class="card">No notifications yet.</div>
   {% endfor %}
 </section>
-{% endblock %}
+{% endblock %}{% block js %}<script>
+const pageApi=(url,body)=>fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined}).then(async r=>{const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||'Request failed');return j});
+const setPageBadge=n=>{const b=document.getElementById('notificationBadge');if(b){b.textContent=n;b.hidden=!n}};
+document.getElementById('pageRefresh').onclick=()=>location.reload();
+document.getElementById('pageReadAll').onclick=async()=>{try{await pageApi('/api/notifications/read-all');location.reload()}catch(e){alert(e.message)}};
+document.getElementById('pageClear').onclick=async()=>{if(!confirm('Delete all your notifications?'))return;try{await pageApi('/api/notifications/clear');location.reload()}catch(e){alert(e.message)}};
+document.querySelectorAll('#pageList [data-act]').forEach(button=>button.onclick=async()=>{
+ const card=button.closest('.notification-item'),id=card.dataset.id;
+ try{
+  if(button.dataset.act==='delete'){const j=await pageApi(`/api/notifications/${id}/delete`);card.remove();setPageBadge(j.unread)}
+  else{const read=card.dataset.read!=='1';const j=await pageApi(`/api/notifications/${id}/read`,{read});card.dataset.read=read?'1':'0';card.classList.toggle('unread',!read);button.textContent=read?'Mark unread':'Mark read';const label=card.querySelector('.notification-unread-label');if(label)label.hidden=read;setPageBadge(j.unread)}
+ }catch(e){alert(e.message)}
+});
+</script>{% endblock %}

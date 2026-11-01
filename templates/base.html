@@ -43,7 +43,19 @@
     <button class="sidebar-toggle" id="sidebarToggle" type="button" aria-label="Toggle sidebar" aria-expanded="true"><span>☰</span></button>
     <div class="topbar-context"><b>{% if me.get('role')=='admin' %}Admin workspace{% else %}Traffic services{% endif %}</b><small>{% if me.get('role')=='admin' %}Requests · Processing · Review{% else %}Services · Requests · Results{% endif %}</small></div>
     <div class="topbar-actions">
-      <a class="topbar-notifications" href="{{url_for('notifications')}}" aria-label="Notifications">♧<span id="notificationBadge" class="notification-badge" {% if not unread_notifications %}hidden{% endif %}>{{unread_notifications}}</span></a>
+      <div class="notif-menu" id="notifMenu">
+        <button class="topbar-notifications" id="notifToggle" type="button" aria-label="Notifications" aria-haspopup="dialog" aria-expanded="false" aria-controls="notifPanel">♧<span id="notificationBadge" class="notification-badge" {% if not unread_notifications %}hidden{% endif %}>{{unread_notifications}}</span></button>
+        <section class="notif-panel" id="notifPanel" role="dialog" aria-label="Notifications" hidden>
+          <div class="notif-head"><b>Notifications</b>
+            <div class="notif-tools">
+              <button type="button" id="notifRefresh" title="Refresh" aria-label="Refresh notifications">⟳</button>
+              <button type="button" id="notifReadAll">Mark all read</button>
+              <button type="button" id="notifClear" class="danger-text">Clear all</button>
+            </div></div>
+          <ul class="notif-items" id="notifItems" aria-live="polite"></ul>
+          <div class="notif-foot"><a href="{{url_for('notifications')}}">View all notifications</a></div>
+        </section>
+      </div>
       <details class="profile-menu"><summary><span class="account-avatar">{% if me.get('profile_image') %}<img src="{{url_for('profile_photo')}}" alt="">{% else %}{{me.get('name','U')[:1]|upper}}{% endif %}</span><span class="profile-menu-name">{{me.get('name')}}</span><span class="profile-menu-caret">⌄</span></summary><div class="profile-menu-popover"><small>Signed in as</small><b>{{me.get('name')}}</b><a href="{{url_for('admin_profile') if me.get('role')=='admin' else url_for('profile')}}">View profile</a></div></details>
     </div>
   </header>
@@ -107,5 +119,41 @@ if(notificationBadge){
  });
  if(Notification.permission==='granted')startDeviceNotifications();
  window.setInterval(pollDeviceNotifications,15000);
+}
+
+const notifToggle=document.getElementById('notifToggle');
+if(notifToggle){
+ const panel=document.getElementById('notifPanel'),list=document.getElementById('notifItems'),badge=document.getElementById('notificationBadge');
+ const icons={new_request:'📨',group_ready:'📊'};
+ const api=(url,method='POST',body)=>fetch(url,{method,headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined}).then(async r=>{const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||`HTTP ${r.status}`);return j});
+ const setBadge=n=>{badge.textContent=n;badge.hidden=!n};
+ const empty=text=>{const li=document.createElement('li');li.className='notif-empty';li.textContent=text;list.replaceChildren(li)};
+ const render=items=>{
+  if(!items.length)return empty('No notifications.');
+  list.replaceChildren(...items.map(item=>{
+   const li=document.createElement('li');li.className='notif-item'+(item.read?'':' unread');
+   const link=document.createElement('a');link.className='notif-link';link.href=item.url;
+   const icon=document.createElement('span');icon.className='notif-icon';icon.textContent=icons[item.kind]||'💬';
+   const body=document.createElement('span');body.className='notif-body';
+   const title=document.createElement('b');title.textContent=item.title;
+   const msg=document.createElement('span');msg.textContent=item.message;
+   const when=document.createElement('small');when.textContent=item.created_at;
+   body.append(title,msg,when);link.append(icon,body);
+   const actions=document.createElement('div');actions.className='notif-actions';
+   const toggle=document.createElement('button');toggle.type='button';toggle.textContent=item.read?'Mark unread':'Mark read';
+   toggle.onclick=async()=>{try{const j=await api(`/api/notifications/${item.id}/read`,'POST',{read:!item.read});setBadge(j.unread);item.read=!item.read;li.classList.toggle('unread',!item.read);toggle.textContent=item.read?'Mark unread':'Mark read'}catch(e){alert(e.message)}};
+   const del=document.createElement('button');del.type='button';del.className='danger-text';del.textContent='Delete';del.setAttribute('aria-label','Delete notification');
+   del.onclick=async()=>{try{const j=await api(`/api/notifications/${item.id}/delete`);setBadge(j.unread);li.remove();if(!list.children.length)empty('No notifications.')}catch(e){alert(e.message)}};
+   actions.append(toggle,del);li.append(link,actions);return li}));
+ };
+ const load=async()=>{try{const r=await fetch('{{url_for("notification_menu_items")}}',{cache:'no-store'});if(!r.ok)throw new Error(`HTTP ${r.status}`);const j=await r.json();setBadge(j.unread);render(j.notifications)}catch(e){empty('Could not load notifications. Try Refresh.')}};
+ const setOpen=open=>{panel.hidden=!open;notifToggle.setAttribute('aria-expanded',String(open));if(open)load()};
+ notifToggle.addEventListener('click',e=>{e.stopPropagation();setOpen(panel.hidden)});
+ document.addEventListener('click',e=>{if(!panel.hidden&&!document.getElementById('notifMenu').contains(e.target))setOpen(false)});
+ document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!panel.hidden){setOpen(false);notifToggle.focus()}});
+ document.getElementById('notifRefresh').onclick=load;
+ document.getElementById('notifReadAll').onclick=async()=>{try{await api('/api/notifications/read-all');await load()}catch(e){alert(e.message)}};
+ document.getElementById('notifClear').onclick=async()=>{if(!confirm('Delete all your notifications?'))return;try{await api('/api/notifications/clear');setBadge(0);empty('No notifications.')}catch(e){alert(e.message)}};
+ window.setInterval(()=>{if(!panel.hidden)load()},20000);
 }
 </script>{% block js %}{% endblock %}</body></html>

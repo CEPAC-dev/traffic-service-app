@@ -2272,6 +2272,66 @@ def create_request():
 # existing admin workflow (volumes, directions, free flow...) keeps working;
 # `request_groups` ties the rows together for intake, review and one report.
 # ---------------------------------------------------------------------------
+SHARED_FLOW_SERVICES = ("freeflow_time", "freeflow_speed")
+
+def _flow_is_shared(services, service):
+    """Free flow time/speed describe the link, not the study period, so one API result serves every period of a link.
+    The only exception is free-flow speed requested together with Volumes: that A-to-C window depends on the period."""
+    return service in SHARED_FLOW_SERVICES and not (service == "freeflow_speed" and "volumes" in services)
+
+def _link_siblings(request_row):
+    """Requests of the same grouped order that cover the same link (one per period), oldest first."""
+    if not request_row["group_id"]:
+        return []
+    key = json.loads(request_row["coords"] or "[]")
+    rows = db().execute("SELECT * FROM requests WHERE group_id=? ORDER BY id", (request_row["group_id"],)).fetchall()
+    return [row for row in rows if json.loads(row["coords"] or "[]") == key]
+
+def _shared_flow_leader(request_row, service):
+    """Id of the sibling that owns the free-flow API result for this link; None if this request owns it or it is not shared."""
+    services = json.loads(request_row["services"] or "[]")
+    if not request_row["group_id"] or service not in services or not _flow_is_shared(services, service):
+        return None
+    owners = [row["id"] for row in _link_siblings(request_row)
+              if service in json.loads(row["services"] or "[]") and _flow_is_shared(json.loads(row["services"] or "[]"), service)]
+    return owners[0] if owners and owners[0] != request_row["id"] else None
+
+def _propagate_shared_services(rid, saved_services):
+    """Copy the owner's confirmed free-flow values to the other periods of the same link, so the API is paid for once."""
+    row = db().execute("SELECT * FROM requests WHERE id=?", (rid,)).fetchone()
+    if not row or not row["group_id"]:
+        return 0
+    owner_services = json.loads(row["services"] or "[]")
+    shared = [name for name in saved_services if _flow_is_shared(owner_services, name) and _shared_flow_leader(row, name) is None]
+    if not shared:
+        return 0
+    owner_data, stamp, touched = json.loads(row["data"] or "{}"), dt.datetime.now().strftime("%Y-%m-%d %H:%M"), 0
+    for sibling in _link_siblings(row):
+        if sibling["id"] == rid:
+            continue
+        sibling_services = json.loads(sibling["services"] or "[]")
+        sibling_data, changed = json.loads(sibling["data"] or "{}"), False
+        for name in shared:
+            if name not in sibling_services or not _flow_is_shared(sibling_services, name):
+                continue
+            source = owner_data.get(name) or {}
+            rows = source.get("rows") or []
+            if rows:
+                value = {"rows": json.loads(json.dumps(rows)), "note": source.get("note") or "", "source": "shared",
+                         "shared_from": rid, "updated": stamp}
+                for key in ("holiday_context", "reference_context", "outscraper_job_id"):
+                    if source.get(key):
+                        value[key] = source[key]
+                sibling_data[name], changed = value, True
+            elif (sibling_data.get(name) or {}).get("source") == "shared":
+                sibling_data.pop(name, None); changed = True
+        if changed:
+            db().execute("UPDATE requests SET data=?, status=CASE WHEN status='Pending' THEN 'Processing' ELSE status END WHERE id=?",
+                         (json.dumps(sibling_data, ensure_ascii=False), sibling["id"]))
+            touched += 1
+    db().commit()
+    return touched
+
 def _parse_local_time(value):
     t = dt.time.fromisoformat(str(value or ""))
     if t.tzinfo or t.microsecond:
@@ -2472,8 +2532,32 @@ def client_group(gid):
 @admin_required
 def admin_group(gid):
     row, children = _load_group(gid, admin_view=True)
+    period_order = list(dict.fromkeys(c["period_label"] for c in children if c.get("period_label")))
+    matrix = {}
+    for c in children:
+        matrix.setdefault(c["link_no"], {})[c.get("period_label")] = c
+    shared = []
+    for name in SHARED_FLOW_SERVICES:
+        holders = [c for c in children if name in c["services"] and _flow_is_shared(c["services"], name)]
+        if not holders:
+            continue
+        owners = {}
+        for c in holders:
+            owners.setdefault(c["link_no"], c["id"])
+        if len(holders) > len(owners):
+            shared.append({"service": name, "api_calls": len(owners), "without": len(holders), "owners": owners})
     return render_template("group.html", g=row, children=children, card=_group_card(row), admin_view=True,
-                           ready=_group_ready_to_send(children))
+                           ready=_group_ready_to_send(children), matrix=matrix, period_order=period_order, shared=shared)
+
+@app.post("/api/groups/<int:gid>/delete")
+@admin_required
+def delete_group(gid):
+    ids = [r["id"] for r in db().execute("SELECT id FROM requests WHERE group_id=?", (gid,)).fetchall()]
+    if not ids and not db().execute("SELECT 1 FROM request_groups WHERE id=?", (gid,)).fetchone():
+        return jsonify(error="Order not found"), 404
+    _delete_requests(ids)
+    db().execute("DELETE FROM request_groups WHERE id=?", (gid,)); db().commit()
+    return jsonify(ok=True, deleted=len(ids))
 
 @app.post("/api/groups/<int:gid>/send")
 @admin_required
@@ -2510,7 +2594,9 @@ def export_group_excel(gid):
     link_count = len({json.dumps(c["coords"]) for c in children})
     for label, value in (
         ("Order ID", f"GRP-{gid}"), ("Name", row["title"] or ""), ("Client", row["client"]),
-        ("Status", _group_status(row, children)), ("Study date", row["study_date"]),
+        ("Status", _group_status(row, children)),
+        ("Report state", "Sent to client" if row["sent_at"] else "Draft - not sent to the client yet"),
+        ("Study date", row["study_date"]),
         ("Links", link_count), ("Periods", ", ".join(sorted({c["period_label"] for c in children if c.get("period_label")}))),
         ("Requests in this order", len(children)),
         ("Requested services", ", ".join(SERVICES.get(x, x) for x in services)),
@@ -2519,14 +2605,15 @@ def export_group_excel(gid):
     _style_excel_sheet(summary)
 
     links_sheet = workbook.create_sheet("Links and Periods")
-    links_sheet.append(["Request", "Link", "Period", "Time range", "Status", "Point A", "Point B", "Point C", "Road length (km)"])
+    links_sheet.append(["Request", "Link", "Period", "Time range", "Status", "Point A", "Point B", "Point C", "Road length (km)", "Admin note"])
     for c in children:
         show_c = admin_view or c.get("show_point_c")
         links_sheet.append([
             f"REQ-{c['id']}", f"Link {c['link_no']}", _excel_safe_text(c.get("period_label") or ""),
             _excel_safe_text(c["time_range_label"]), c["status"],
             ", ".join(map(str, c["coords"][0])), ", ".join(map(str, c["coords"][-1])),
-            ", ".join(map(str, c["point_c"])) if (c.get("point_c") and show_c) else "", c.get("road_km")])
+            ", ".join(map(str, c["point_c"])) if (c.get("point_c") and show_c) else "", c.get("road_km"),
+            _excel_safe_text(c.get("reply") or "")])
     _style_excel_sheet(links_sheet)
 
     details = workbook.create_sheet("Service Details")
@@ -2538,6 +2625,7 @@ def export_group_excel(gid):
             saved = c["data"].get(service, {})
             unit = (forms.get(service) or {}).get("unit", "")
             source = ("Road network" if saved.get("source") == "network" else "MATLAB" if saved.get("source") == "matlab"
+                      else f"Shared from REQ-{saved.get('shared_from')} (same link)" if saved.get("source") == "shared"
                       else "Admin" if (saved.get("rows") or saved.get("note")) else "")
             rows = saved.get("rows") or [{}]
             for service_row in rows:
@@ -2554,6 +2642,28 @@ def export_group_excel(gid):
                                 _excel_safe_text(unit), _excel_safe_text(source), _excel_safe_text(saved.get("note") or "")])
     _style_excel_sheet(details)
 
+    reference_rows, reference_seen = [], set()
+    for c in children:
+        if c["status"] == "Rejected":
+            continue
+        for service in c["services"]:
+            context = ((c["data"].get(service) or {}).get("reference_context") or (c["data"].get(service) or {}).get("holiday_context"))
+            if not context or (c["link_no"], service) in reference_seen:
+                continue
+            reference_seen.add((c["link_no"], service))
+            reference_rows.append([
+                f"Link {c['link_no']}", _excel_safe_text(SERVICES.get(service, service)),
+                _excel_safe_text("Weekly weekend" if (context.get("reference_type") == "weekly_weekend" or context.get("weekend_date")) else "Public holiday"),
+                _excel_safe_text(context.get("weekend_date") or context.get("holiday_date") or ""),
+                _excel_safe_text(context.get("weekend_day") or context.get("holiday_name") or ""),
+                _excel_safe_text(f'{context.get("country_name", "")} ({context.get("country_code", "")})'),
+                _excel_safe_text(context.get("timezone", "")), "07:00 local time"])
+    if reference_rows:
+        references = workbook.create_sheet("Free Flow References")
+        references.append(["Link", "Service", "Reference type", "Date", "Day / holiday", "Country", "Time zone", "Departure"])
+        for item in reference_rows:
+            references.append(item)
+        _style_excel_sheet(references)
     route_rows = []
     for c in children:
         directions = (c["data"].get("travel") or c["data"].get("speed") or {}).get("directions_result")
@@ -2693,6 +2803,62 @@ def _notification_destination(request_id, is_admin):
         return url_for("admin_group", gid=group_id) if is_admin else url_for("client_group", gid=group_id)
     return url_for("admin_request", rid=request_id) if is_admin else url_for("result", rid=request_id)
 
+def _unread_notification_count():
+    return db().execute("SELECT COUNT(*) FROM notifications WHERE user_id=? AND read_at IS NULL", (session["uid"],)).fetchone()[0]
+
+@app.get("/api/notifications")
+@login_required
+def notification_menu_items():
+    rows = db().execute(
+        "SELECT id,kind,title,message,created_at,read_at FROM notifications WHERE user_id=? ORDER BY id DESC LIMIT 30",
+        (session["uid"],)).fetchall()
+    total = db().execute("SELECT COUNT(*) FROM notifications WHERE user_id=?", (session["uid"],)).fetchone()[0]
+    return jsonify(
+        notifications=[{
+            "id": row["id"], "kind": row["kind"], "title": row["title"], "message": row["message"],
+            "created_at": row["created_at"], "read": row["read_at"] is not None,
+            "url": url_for("open_notification", notification_id=row["id"]),
+        } for row in rows],
+        unread=_unread_notification_count(), total=total)
+
+@app.post("/api/notifications/<int:notification_id>/read")
+@login_required
+def set_notification_read(notification_id):
+    read = (request.get_json(silent=True) or {}).get("read", True)
+    if not isinstance(read, bool):
+        return jsonify(error="Invalid value"), 400
+    stamp = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S") if read else None
+    updated = db().execute("UPDATE notifications SET read_at=? WHERE id=? AND user_id=?",
+                           (stamp, notification_id, session["uid"])).rowcount
+    if not updated:
+        return jsonify(error="Notification not found"), 404
+    db().commit()
+    return jsonify(ok=True, unread=_unread_notification_count())
+
+@app.post("/api/notifications/read-all")
+@login_required
+def mark_all_notifications_read():
+    db().execute("UPDATE notifications SET read_at=? WHERE user_id=? AND read_at IS NULL",
+                 (dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), session["uid"]))
+    db().commit()
+    return jsonify(ok=True, unread=0)
+
+@app.post("/api/notifications/<int:notification_id>/delete")
+@login_required
+def delete_notification(notification_id):
+    deleted = db().execute("DELETE FROM notifications WHERE id=? AND user_id=?", (notification_id, session["uid"])).rowcount
+    if not deleted:
+        return jsonify(error="Notification not found"), 404
+    db().commit()
+    return jsonify(ok=True, unread=_unread_notification_count())
+
+@app.post("/api/notifications/clear")
+@login_required
+def clear_notifications():
+    db().execute("DELETE FROM notifications WHERE user_id=?", (session["uid"],))
+    db().commit()
+    return jsonify(ok=True, unread=0)
+
 @app.get("/api/notifications/unread-count")
 @login_required
 def notification_unread_count():
@@ -2745,6 +2911,28 @@ def admin():
     for item in reqs:
         item["waiting_for_review"] = item["id"] in review_request_ids
         item["dashboard_status"] = "Waiting for review" if item["waiting_for_review"] else item["status"]
+    entries, seen_groups = [], set()
+    group_rows = {row["id"]: row for row in db().execute(
+        "SELECT g.*, u.name AS client FROM request_groups g JOIN users u ON u.id=g.user_id").fetchall()}
+    for item in reqs:   # newest first; a grouped order appears once, at the position of its newest request
+        group_id = item.get("group_id")
+        if not group_id or group_id not in group_rows:
+            entries.append({"kind": "request", "r": item}); continue
+        if group_id in seen_groups:
+            continue
+        seen_groups.add(group_id)
+        group_row = group_rows[group_id]
+        children = [c for c in reqs if c.get("group_id") == group_id]
+        status = _group_status(group_row, children)
+        needs_review = any(c["waiting_for_review"] for c in children) or (not group_row["sent_at"] and _group_ready_to_send(children))
+        entries.append({"kind": "group", "g": {
+            "id": group_id, "title": group_row["title"], "client": group_row["client"], "created": group_row["created"],
+            "services": [x for x in json.loads(group_row["services"]) if x in service_catalog()],
+            "count": len(children), "links": len({json.dumps(c["coords"]) for c in children}),
+            "periods": sorted({c["period_label"] for c in children if c.get("period_label")}),
+            "status": status, "waiting_for_review": needs_review,
+            "dashboard_status": "Ready to send" if (needs_review and not any(c["waiting_for_review"] for c in children)) else
+                                ("Waiting for review" if needs_review else status)}})
     today = dt.date.today(); counts = {}
     for r in reqs: counts[r["created"]] = counts.get(r["created"], 0) + 1
     days = [(today - dt.timedelta(days=i)).isoformat() for i in range(29, -1, -1)]
@@ -2760,7 +2948,7 @@ def admin():
     users = [dict(u) for u in db().execute(
         "SELECT u.id,u.name,u.email,u.role,COUNT(r.id) AS n,COALESCE(SUM(r.status='Completed'),0) AS done,MAX(r.created) AS last "
         "FROM users u LEFT JOIN requests r ON r.user_id=u.id GROUP BY u.id ORDER BY n DESC, u.id").fetchall()]
-    return render_template("admin.html", reqs=reqs, stats=stats, users=users, statuses=STATUSES, periods=period_rows,
+    return render_template("admin.html", reqs=reqs, entries=entries, stats=stats, users=users, statuses=STATUSES, periods=period_rows,
                            net={"have_geo": network.HAVE_GEO, "cfg": get_setting("network", {}), "services": net_services()})
 
 def _delete_requests(request_ids=None):
@@ -2852,7 +3040,8 @@ def admin_request(rid):
     if workflow_row:
         directions_workflow = dict(workflow_row)
         directions_workflow["result"] = json.loads(directions_workflow.pop("result_json") or "null")
-    return render_template("admin_request.html", r=to_dict(r), forms=forms_catalog(), statuses=STATUSES,
+    shared_leaders = {name: owner for name in SHARED_FLOW_SERVICES if (owner := _shared_flow_leader(r, name))}
+    return render_template("admin_request.html", r=to_dict(r), forms=forms_catalog(), statuses=STATUSES, shared_leaders=shared_leaders,
                            directions_workflow=directions_workflow, volumes_workflow=volumes_workflow,
                            audit_entries=_audit_entries_for_request(rid))
 
@@ -2946,6 +3135,9 @@ def _validate_holiday_source_request(configuration):
     row = db().execute("SELECT * FROM requests WHERE id=?", (context["source_request_id"],)).fetchone()
     if not row:
         raise ValueError("The TrafficLens request associated with this reference preview no longer exists.")
+    owner = _shared_flow_leader(row, context.get("service"))
+    if owner:
+        raise ValueError(f"This free-flow service is shared by every period of the link. Use the Directions result of REQ-{owner}.")
     source = to_dict(row)
     try:
         expected_origin = ", ".join(f"{float(value):.6f}" for value in source["coords"][0])
@@ -3078,6 +3270,9 @@ def _request_directions_location(request_row):
     }
 
 def _outscraper_prefill_from_request(request_row, service="travel"):
+    owner = _shared_flow_leader(request_row, service)
+    if owner:
+        abort(409, f"{SERVICES.get(service, service)} is shared by every period of this link. Run the Directions API on REQ-{owner}; its confirmed value is copied here automatically.")
     source = to_dict(request_row)
     service_requested = service in source["services"]
     service_for_volumes = service in {"travel", "freeflow_speed"} and "volumes" in source["services"]
@@ -4270,6 +4465,7 @@ def save_service(rid, service):
     db().execute("UPDATE requests SET data=? WHERE id=?", (json.dumps(data), rid))
     audit("service_saved", rid, service=service, rows=saved["rows"], note=saved["note"][:200])
     db().commit()
+    _propagate_shared_services(rid, [service])
     return jsonify(ok=True, rows=len(data[service]["rows"]))
 
 @app.post("/api/requests/<int:rid>/save-all")
@@ -4346,6 +4542,8 @@ def save_request_changes(rid):
             status=status, old_status=row["status"], reply_changed=reply is not None and reply != (row["reply"] or ""),
         )
         db().commit()
+    if clean_services:
+        _propagate_shared_services(rid, list(clean_services))
     return jsonify(ok=True, saved_services=list(clean_services), status=status or row["status"])
 
 @app.post("/api/requests/<int:rid>/status")
@@ -4614,6 +4812,7 @@ def export_result_excel(rid):
                     _excel_safe_text(
                         "Road network" if saved.get("source") == "network"
                         else "MATLAB" if saved.get("source") == "matlab"
+                        else f"Shared from REQ-{saved.get('shared_from')}" if saved.get("source") == "shared"
                         else "Admin"
                     ),
                     _excel_safe_text(saved.get("note") or ""), _excel_safe_text(saved.get("updated") or ""),
