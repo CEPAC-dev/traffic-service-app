@@ -2478,6 +2478,39 @@ def create_request_group():
     status = d.execute("SELECT status FROM requests WHERE id=?", (request_ids[0],)).fetchone()["status"]
     return jsonify(group_id=group_id, request_ids=request_ids, count=total, id=request_ids[0], status=status)
 
+def _volume_input_rows(request_id):
+    """What the Traffic volumes model used for one request: actual speed, free-flow speed and lanes per hour, next to the result.
+    Admin reports only: the client report keeps these supporting inputs internal."""
+    workflow = db().execute("SELECT * FROM volumes_workflows WHERE request_id=?", (request_id,)).fetchone()
+    request_row = db().execute("SELECT data FROM requests WHERE id=?", (request_id,)).fetchone()
+    if not workflow or not request_row:
+        return []
+    def load(text):
+        try:
+            return json.loads(text or "null") or {}
+        except (TypeError, ValueError):
+            return {}
+    result, actual = load(workflow["result_json"]), load(workflow["actual_result_json"])
+    volume_data = (load(request_row["data"]).get("volumes") or {})
+    inputs = result.get("inputs") or {}
+    speeds = {item["hour"]: item.get("speed_kmh") for item in (inputs.get("actual_speed_by_hour") or actual.get("hourly") or [])
+              if isinstance(item, dict) and "hour" in item}
+    sent = {item.get("hour"): item for item in (volume_data.get("rows") or []) if isinstance(item, dict)}
+    drafted = {item.get("hour"): item for item in (result.get("hourly") or []) if isinstance(item, dict)}
+    context = inputs.get("freeflow_context") or volume_data.get("freeflow_context") or {}
+    reference = " ".join(str(part) for part in (context.get("weekend_day"), context.get("weekend_date")) if part)
+    freeflow = inputs.get("freeflow_speed", workflow["freeflow_speed"])
+    lanes = inputs.get("lanes", workflow["lanes"])
+    state = {"sent": "Approved and sent", "ready_for_review": "Awaiting admin review"}.get(workflow["status"], str(workflow["status"]).replace("_", " ").capitalize())
+    rows = []
+    for hour in sorted(set(speeds) | set(sent) | set(drafted)):
+        output = sent.get(hour) or drafted.get(hour) or {}
+        value = output.get("value")
+        rows.append({"hour": hour, "actual_speed": speeds.get(hour), "freeflow_speed": freeflow, "lanes": lanes,
+                     "volume": round(value) if isinstance(value, (int, float)) and sent.get(hour) is None else value,
+                     "tolerance": output.get("tolerance"), "reference": reference, "state": state})
+    return rows
+
 def _group_children(gid):
     rows = db().execute("SELECT * FROM requests WHERE group_id=? ORDER BY id", (gid,)).fetchall()
     return [to_dict(row) for row in rows]
@@ -2642,6 +2675,22 @@ def export_group_excel(gid):
                                 _excel_safe_text(unit), _excel_safe_text(source), _excel_safe_text(saved.get("note") or "")])
     _style_excel_sheet(details)
 
+    if admin_view:
+        volume_rows = []
+        for c in children:
+            if c["status"] == "Rejected" or "volumes" not in c["services"]:
+                continue
+            for item in _volume_input_rows(c["id"]):
+                volume_rows.append([f"Link {c['link_no']}", _excel_safe_text(c.get("period_label") or ""), f"{item['hour']:02d}:00-{item['hour'] + 1:02d}:00",
+                                    item["actual_speed"], item["freeflow_speed"], item["lanes"], item["volume"], item["tolerance"],
+                                    _excel_safe_text(item["reference"]), _excel_safe_text(item["state"])])
+        if volume_rows:
+            inputs_sheet = workbook.create_sheet("Volume Inputs")
+            inputs_sheet.append(["Link", "Period", "Hour", "Actual speed (km/h)", "Free-flow speed used (km/h)", "Lanes",
+                                 "Traffic volume (veh/h)", "Tolerance", "Free-flow reference day", "Volume status"])
+            for item in volume_rows:
+                inputs_sheet.append(item)
+            _style_excel_sheet(inputs_sheet)
     reference_rows, reference_seen = [], set()
     for c in children:
         if c["status"] == "Rejected":
@@ -4829,6 +4878,17 @@ def export_result_excel(rid):
                 _excel_safe_text(saved.get("note") or ""), _excel_safe_text(saved.get("updated") or ""),
             ])
     _style_excel_sheet(details)
+    if session.get("role") == "admin" and "volumes" in result_request["services"]:
+        volume_rows = _volume_input_rows(rid)
+        if volume_rows:
+            inputs_sheet = workbook.create_sheet("Volume Inputs")
+            inputs_sheet.append(["Hour", "Actual speed (km/h)", "Free-flow speed used (km/h)", "Lanes", "Traffic volume (veh/h)",
+                                 "Tolerance", "Free-flow reference day", "Volume status"])
+            for item in volume_rows:
+                inputs_sheet.append([f"{item['hour']:02d}:00-{item['hour'] + 1:02d}:00", item["actual_speed"], item["freeflow_speed"],
+                                     item["lanes"], item["volume"], item["tolerance"], _excel_safe_text(item["reference"]),
+                                     _excel_safe_text(item["state"])])
+            _style_excel_sheet(inputs_sheet)
     output = io.BytesIO()
     workbook.save(output)
     output.seek(0)

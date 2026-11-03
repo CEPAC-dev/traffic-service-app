@@ -1,62 +1,77 @@
 {% extends "base.html" %}{% block body %}
-<div class="page-heading"><div><span class="eyebrow">SERVICE REQUEST</span><h1>Create a request</h1><p>Choose a road link, schedule, and the service data you need. The system handles processing.</p></div></div>
-<div class="search"><input id="q" placeholder="Search for a place, e.g. Nasr City"><button class="btn"
-    id="go">Search</button></div>
+<div class="wb-head"><h1>New order</h1><p>Mark a road link on the map, set when you need it, and choose the data. We handle the processing.</p></div>
 {% if repeat_request %}<div class="tip source-request-tip"><b>Repeating request REQ-{{repeat_request.id}}</b><br>Its date, times, services and A/B locations have been copied below. You can edit them before submitting. This creates a new request; the original remains unchanged. Please confirm the route condition again, including any quality-impact acknowledgment if intersections are detected.</div>{% endif %}
-<div class="callout"><b>🔗 Build your order.</b> First choose the order type. Then click the map to choose the <b>start (A)</b> and the <b>end (B)</b> of each link and press <b>Add link to order</b>.
-  Choose road sections without intersections, entrances or exits whenever possible. If the route check finds intersections, you can continue only after explicitly acknowledging that they may affect result quality.</div>
-<div class="study">
-  <div id="map"></div>
-  <div class="side">
-    <div class="card">
-      <h3>1. Order type</h3>
-      <div class="chk" id="modeList">
-        <label><input type="radio" name="mode" value="single" checked><span><b>One link, one period</b><span class="hint" style="display:block">A single link for a single study period.</span></span></label>
-        <label><input type="radio" name="mode" value="multi_period"><span><b>One link, several periods</b><span class="hint" style="display:block">The same link for AM, MD, PM... in one order.</span></span></label>
-        <label><input type="radio" name="mode" value="multi_link"><span><b>Several links, one period</b><span class="hint" style="display:block">Up to {{ max_links }} links (for example every entry and exit of an intersection) for one period.</span></span></label>
-      </div>
+<div class="workbench">
+  <div class="wb-map">
+    <div class="map-search" role="search">
+      <input id="q" type="search" aria-label="Search for a place" placeholder="Search for a place, e.g. Nasr City" autocomplete="off">
+      <button class="btn" id="go" type="button">Search</button>
     </div>
-    <div class="card">
-      <h3>2. Select a link</h3>
-      <div id="info" class="coord"></div>
-      <div class="coordinate-readout" aria-live="polite">
-        <div><b>Point A</b><code id="pointACoordinates">Not selected</code></div>
-        <div><b>Point B</b><code id="pointBCoordinates">Not selected</code></div>
-        {% if session.get('role') == 'admin' %}<div id="pointCReadout" hidden><b>Point C · calculated</b><code id="pointCCoordinates">Not calculated</code></div>{% endif %}
+    <div id="map"></div>
+    <div class="map-hint" id="mapHint" aria-live="polite"></div>
+  </div>
+
+  <div class="wb-panel">
+    <section class="step" data-done="true">
+      <div class="step-head"><span class="step-mark"><span>1</span></span><h2>Order type</h2></div>
+      <div class="mode-list" id="modeList">
+        <label class="mode-opt"><input type="radio" name="mode" value="single" checked><span><b>One link, one period</b><small>A single link for a single study period.</small></span></label>
+        <label class="mode-opt"><input type="radio" name="mode" value="multi_period"><span><b>One link, several periods</b><small>The same link for AM, MD, PM and more in one order.</small></span></label>
+        <label class="mode-opt"><input type="radio" name="mode" value="multi_link"><span><b>Several links, one period</b><small>Up to {{ max_links }} links, for example every entry and exit of an intersection, for one period.</small></span></label>
       </div>
-      <p style="margin:8px 0 0"><button class="btn alt" id="reset" type="button">Reset points</button></p>
+    </section>
+
+    <section class="step" id="stepLink" data-done="false">
+      <div class="step-head"><span class="step-mark"><span>2</span></span><h2>Road link</h2></div>
+      <p class="step-help">Choose sections without intersections, entrances or exits whenever possible.</p>
+      <div class="coordinate-readout" aria-live="polite">
+        <div><b><i class="pt-badge">A</i>Start</b><code id="pointACoordinates">Not selected</code></div>
+        <div><b><i class="pt-badge end">B</i>End</b><code id="pointBCoordinates">Not selected</code></div>
+        {% if session.get('role') == 'admin' %}<div id="pointCReadout" hidden><b><i class="pt-badge calc">C</i>Calculated</b><code id="pointCCoordinates">Not calculated</code></div>{% endif %}
+      </div>
+      <div id="info" class="verdict" data-state="idle" aria-live="polite"></div>
       <label class="cf" id="noJunctionDeclaration"><input type="checkbox" id="nj"> I confirm this link has no intersections, entrances or exits.</label>
       <label class="cf" id="junctionQualityConsent" hidden><input type="checkbox" id="acceptJunctionQuality"> I agree to submit this link despite the detected intersections, knowing they may affect the quality of the results.</label>
-      <p style="margin:10px 0 0"><button class="btn" id="addLink" type="button" disabled>Add link to order</button></p>
-      <h3 style="margin-top:16px">Links in this order <span class="pill" id="linkCount">0</span></h3>
-      <ul id="linkList" class="hint" style="padding-left:18px;margin:6px 0"></ul>
-    </div>
-    <div class="card">
-      <h3>3. Name, date and periods</h3><label for="reqTitle">Order name (optional)</label><input type="text" id="reqTitle" maxlength="80" placeholder="e.g. Gulf Road junction" autocomplete="off">
-      <label>Date (one day only)</label><input type="date" id="d1">
-      <p class="hint" id="periodHint" style="margin-bottom:4px"></p>
-      <div id="periodRows"></div>
-      <p id="orderSummary" class="hint" aria-live="polite"></p>
-    </div>
-    <div class="card">
-      <h3>4. Services</h3>
-      <div class="chk svl" id="svl">
-        {% for k,v in ACTIVE_SERVICES.items() %}<label><input type="checkbox" value="{{k}}" {{ 'checked' if (selected_service==k if selected_service else k in ('speed','travel')) }}><span><b>{{ SVINFO[k].icon }} {{v}}</b>{% if k=='freeflow_time' %}<span class="pill"
-              style="margin-left:6px">Public holiday · 07:00</span>{% elif k=='freeflow_speed' %}<span class="pill"
-              style="margin-left:6px">Weekly weekend</span>{% endif %}{% if k in NET_SERVICES %}<span class="pill"
-              style="margin-left:6px">⚡ Instant</span>{% endif %}</span></label>{%
-        endfor %}</div>
-      {% if 'freeflow_time' in ACTIVE_SERVICES %}<p class="hint">Free flow time uses Directions API at 7:00 AM on the nearest public holiday to your study date in the route's country.</p>{% endif %}
-      {% if 'freeflow_speed' in ACTIVE_SERVICES %}<p class="hint">Free flow speed uses the nearest weekly weekend date to the study date that is before today. With Traffic volumes, the administrator reviews an editable A→C time window and the highest returned speed is used for the model.</p>{% endif %}
-      {% if 'volumes' in ACTIVE_SERVICES %}<p class="hint">Traffic volumes can be requested with other services. The administrator calculates volumes using lane count, actual speed, and a reviewed free-flow speed. Supporting inputs stay internal; only the services you selected and their approved results are shared.</p>{% endif %}
-      {% if NET_SERVICES %}<p class="hint">⚡ Instant services are answered right away from our road network when your
-        link is covered by it.</p>{% endif %}
-      <p class="hint">The same services and the same periods apply to every link in the order. All results are sent together in one report.</p>
+      <div class="step-actions">
+        <button class="btn" id="addLink" type="button" disabled>Add link to order</button>
+        <button class="btn-text" id="reset" type="button">Reset points</button>
+      </div>
+      <div class="sub-head"><h3>Links in this order</h3><span class="pill" id="linkCount">0</span></div>
+      <ul id="linkList" class="link-chips"></ul>
+    </section>
+
+    <section class="step" id="stepWhen" data-done="false">
+      <div class="step-head"><span class="step-mark"><span>3</span></span><h2>Date and periods</h2></div>
+      <div class="field-pair">
+        <div><label for="reqTitle">Order name <span class="opt">optional</span></label><input type="text" id="reqTitle" maxlength="80" placeholder="e.g. Gulf Road junction" autocomplete="off"></div>
+        <div><label for="d1">Study date <span class="opt">one day only</span></label><input type="date" id="d1"></div>
+      </div>
+      <p class="step-help" id="periodHint"></p>
+      <div id="periodRows" class="period-list"></div>
+    </section>
+
+    <section class="step" id="stepServices" data-done="false">
+      <div class="step-head"><span class="step-mark"><span>4</span></span><h2>Services</h2></div>
+      <div class="svc-list" id="svl">
+        {% for k,v in ACTIVE_SERVICES.items() %}<label class="svc-tile"><input type="checkbox" value="{{k}}" {{ 'checked' if (selected_service==k if selected_service else k in ('speed','travel')) }}><span class="svc-text"><b>{{ v }}</b>{% if SVINFO[k].desc %}<small>{{ SVINFO[k].desc }}</small>{% endif %}</span><span class="svc-tags">{% if k=='freeflow_time' %}<em>Public holiday, 07:00</em>{% elif k=='freeflow_speed' %}<em>Weekly weekend</em>{% endif %}{% if k in NET_SERVICES %}<em class="instant">Instant</em>{% endif %}</span></label>{% endfor %}
+      </div>
+      <details class="svc-notes">
+        <summary>How these services are calculated</summary>
+        {% if 'freeflow_time' in ACTIVE_SERVICES %}<p>Free flow time uses Directions API at 7:00 AM on the nearest public holiday to your study date in the route's country.</p>{% endif %}
+        {% if 'freeflow_speed' in ACTIVE_SERVICES %}<p>Free flow speed uses the nearest weekly weekend date to the study date that is before today. With Traffic volumes, the administrator reviews an editable A→C time window and the highest returned speed is used for the model.</p>{% endif %}
+        {% if 'volumes' in ACTIVE_SERVICES %}<p>Traffic volumes can be requested with other services. The administrator calculates volumes using lane count, actual speed, and a reviewed free-flow speed. Supporting inputs stay internal; only the services you selected and their approved results are shared.</p>{% endif %}
+        {% if NET_SERVICES %}<p>Instant services are answered right away from our road network when your link is covered by it.</p>{% endif %}
+        <p>The same services and the same periods apply to every link in the order. All results are sent together in one report.</p>
+      </details>
+    </section>
+
+    <div id="msg" class="wb-msg"></div>
+    <div class="wb-footer">
+      <p id="orderSummary" class="summary" aria-live="polite"></p>
       <div class="order-actions">
-        <button class="btn" id="ok" disabled type="button">Submit order</button>
+        <button class="btn submit" id="ok" disabled type="button">Submit order</button>
         <button class="btn alt" id="resetOrder" type="button">Reset order</button>
       </div>
-      <div id="msg"></div>
     </div>
   </div>
 </div>
@@ -73,8 +88,17 @@
   let pts = [], line = null, extensionLine = null, markerC = null, route = null, seq = 0;
   let mode = 'single', links = [], periodState = {};
   PERIOD_LABELS.forEach(label => periodState[label] = { checked: false, start: '', end: '' });
-  const map = L.map('map').setView([30.0444, 31.2357], 11); tiles(map); const rg = L.featureGroup().addTo(map); const savedGroup = L.featureGroup().addTo(map);
+  const map = L.map('map', { zoomControl: false }).setView([30.0444, 31.2357], 11); L.control.zoom({ position: 'bottomright' }).addTo(map); tiles(map); const rg = L.featureGroup().addTo(map); const savedGroup = L.featureGroup().addTo(map);
   const fmt = p => [+p.lat.toFixed(6), +p.lng.toFixed(6)];
+  const esc = value => String(value).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+  const setVerdict = (state, html) => { info.dataset.state = state; info.innerHTML = html; };
+  const setHint = text => { mapHint.textContent = text; };
+  const setDone = (id, done) => document.getElementById(id).dataset.done = String(!!done);
+  const pointMarker = (latlng, label) => {
+    const marker = L.marker(latlng, { draggable: true, icon: L.divIcon({ className: 'pt-marker pt-' + label.toLowerCase(), html: label, iconSize: [30, 30], iconAnchor: [15, 15] }) }).addTo(rg);
+    marker.on('dragend', solve);
+    return marker;
+  };
   d1.value = new Date().toISOString().slice(0, 10);
   function updateCoordinates() {
     pointACoordinates.textContent = pts[0] ? fmt(pts[0].getLatLng()).join(', ') : 'Not selected';
@@ -112,14 +136,14 @@
     periodRows.replaceChildren();
     PERIOD_LABELS.forEach(label => {
       const state = periodState[label], row = document.createElement('div');
-      row.className = 'period-row'; row.style.cssText = 'display:grid;grid-template-columns:auto 1fr 1fr;gap:8px;align-items:end;margin:6px 0';
-      const pick = document.createElement('label'); pick.className = 'cf'; pick.style.margin = '0';
+      row.className = 'period-row' + (state.checked ? ' is-on' : '');
+      const pick = document.createElement('label'); pick.className = 'period-pick';
       const input = document.createElement('input'); input.type = multiple ? 'checkbox' : 'radio'; input.name = 'periodPick'; input.checked = state.checked;
       input.onchange = () => {
         if (!multiple) PERIOD_LABELS.forEach(other => periodState[other].checked = false);
         state.checked = input.checked; renderPeriods(); check();
       };
-      const text = document.createElement('b'); text.textContent = ' ' + label; pick.append(input, text);
+      const text = document.createElement('b'); text.textContent = label; pick.append(input, text);
       const start = document.createElement('input'), end = document.createElement('input');
       [start, end].forEach(field => { field.type = 'time'; field.step = 1; field.disabled = !state.checked; });
       start.value = state.start; end.value = state.end; start.title = 'Start time'; end.title = 'End time';
@@ -139,11 +163,12 @@
     links.forEach((link, index) => {
       const color = LINK_COLORS[index % LINK_COLORS.length];
       L.polyline(link.path, { color, weight: 5 }).addTo(savedGroup).bindTooltip(`Link ${index + 1}`, { permanent: true, direction: 'top' });
-      const item = document.createElement('li');
-      item.textContent = `Link ${index + 1} · ~${link.road_km} km${link.junctions ? ` · ${link.junctions} intersection(s) acknowledged` : ''} `;
-      const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'btn alt btn-small'; remove.textContent = 'Remove';
+      const item = document.createElement('li'); item.className = 'link-chip'; item.style.setProperty('--swatch', color);
+      const label = document.createElement('span');
+      label.textContent = `Link ${index + 1}, about ${link.road_km} km${link.junctions ? `, ${link.junctions} intersection${link.junctions === 1 ? '' : 's'} acknowledged` : ''}`;
+      const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'chip-remove'; remove.textContent = 'Remove';
       remove.onclick = () => { links.splice(index, 1); renderLinks(); check(); };
-      item.append(remove); linkList.append(item);
+      item.append(label, remove); linkList.append(item);
     });
     linkCount.textContent = `${links.length} / ${maxLinksForMode()}`;
   }
@@ -152,11 +177,19 @@
     noJunctionDeclaration.hidden = !verifiedRoute || route.junctions !== 0;
     junctionQualityConsent.hidden = !verifiedRoute || route.junctions === 0;
     addLink.disabled = !(currentLinkReady() && links.length < maxLinksForMode());
-    addLink.textContent = links.length >= maxLinksForMode() ? (mode === 'multi_link' ? `Limit of ${MAX_LINKS} links reached` : 'Link added (this order type allows one link)') : 'Add link to order';
+    addLink.textContent = links.length >= maxLinksForMode() ? (mode === 'multi_link' ? `Limit of ${MAX_LINKS} links reached` : 'Link added') : 'Add link to order';
     const chosen = chosenPeriods(), total = links.length * chosen.length;
-    orderSummary.textContent = links.length && chosen.length
-      ? `${links.length} link${links.length === 1 ? '' : 's'} × ${chosen.length} period${chosen.length === 1 ? '' : 's'} = ${total} request${total === 1 ? '' : 's'}, delivered in one report.`
-      : 'Add at least one link and choose a period.';
+    const todo = [];
+    if (!links.length) todo.push('add a link');
+    if (!d1.value) todo.push('set the date');
+    if (!chosen.length) todo.push('choose a period'); else if (!periodsValid()) todo.push('enter a valid start and end time');
+    if (!selectedServices().length) todo.push('select a service');
+    orderSummary.textContent = todo.length
+      ? `Before you submit: ${todo.join(', ')}.`
+      : `${links.length} link${links.length === 1 ? '' : 's'} × ${chosen.length} period${chosen.length === 1 ? '' : 's'} = ${total} request${total === 1 ? '' : 's'}, delivered in one report.`;
+    setDone('stepLink', links.length > 0);
+    setDone('stepWhen', periodsValid() && !!d1.value);
+    setDone('stepServices', selectedServices().length > 0);
     const pointCMissing = needsPointCForServices() && links.some(link => !link.pointC);
     if (pointCMissing) orderSummary.textContent += ' A selected service needs point C: remove and re-add the links added before you chose it.';
     ok.disabled = !(links.length && periodsValid() && d1.value && selectedServices().length && !pointCMissing);
@@ -236,10 +269,15 @@
   }
   async function solve() {
     route = null; acceptJunctionQuality.checked = false; updateCoordinates(); check(); draw();
-    if (pts.length < 2) { info.textContent = pts.length ? 'Start (A) selected. Click the map to select the end (B).' : 'Click the map to select the start (A) of the link.'; return }
+    if (pts.length < 2) {
+      setHint(pts.length ? 'Click the map to place B, the end of the link' : 'Click the map to place A, the start of the link');
+      setVerdict('idle', pts.length ? 'Point A is set. Place B to check the road.' : 'Place A and B on the map to check the road.');
+      return;
+    }
+    setHint('Drag A or B to adjust the link');
     const a = pts[0].getLatLng(), b = pts[1].getLatLng(), my = ++seq;
     const needsPointC = [...document.querySelectorAll('#svl input:checked')].some(input => ['speed', 'travel', 'volumes'].includes(input.value));
-    info.textContent = needsPointC ? 'Finding the road and calculating point C beyond B...' : 'Finding the road between A and B...';
+    setVerdict('busy', `<b>${needsPointC ? 'Finding the road and calculating point C beyond B' : 'Finding the road between A and B'}</b>`);
     try {
       const computed = needsPointC ? await calculatePointC(a, b, a.distanceTo(b) / 1000) : null;
       const rt = computed ? computed.baseRoute : await fetchRoadRoute(a, b);
@@ -264,12 +302,16 @@
     updateCoordinates();
     draw();
     if (route.road) map.fitBounds(L.latLngBounds([...route.path, ...(canPreviewPointC ? route.extensionPath || [] : [])]), { padding: [25, 25], maxZoom: 16 });
-    const A = fmt(pts[0].getLatLng()), B = fmt(pts[1].getLatLng());
-    const pointCInfo = canPreviewPointC && route.pointC ? `<br>Delta (straight A–B): ${(a.distanceTo(b) / 1000).toFixed(3)} km<br>Ratio: ${route.ratio.toFixed(3)}<br>New Distance beyond B: ${(route.newDistance / 1000).toFixed(3)} km<br>Road distance A→C: ${(route.routeDistanceToC / 1000).toFixed(3)} km<br>Point C: ${fmt({lat:route.pointC[0],lng:route.pointC[1]}).join(', ')}` : '';
-    info.innerHTML = `A: ${A.join(', ')}<br>B: ${B.join(', ')}<br>` + (route.road ? `Road length: ~${route.km} km<br>` + (route.junctions ? `<b style="color:#92400E">⚠ ${route.junctions} possible junction(s) detected. Prefer moving A or B to exclude them; otherwise acknowledge the possible quality impact below.</b>` : '✅ No junctions found along this road.') + pointCInfo
-      : `${route.error || `Road not found, straight-line distance: ~${route.km} km`}<br><b style="color:#92400E">The link could not be checked for intersections or point C, so it cannot be submitted.</b>`); check()
+    const pointCInfo = canPreviewPointC && route.pointC ? `<span>Delta (straight A–B): ${(a.distanceTo(b) / 1000).toFixed(3)} km<br>Ratio: ${route.ratio.toFixed(3)}<br>New distance beyond B: ${(route.newDistance / 1000).toFixed(3)} km<br>Road distance A→C: ${(route.routeDistanceToC / 1000).toFixed(3)} km<br>Point C: ${fmt({lat:route.pointC[0],lng:route.pointC[1]}).join(', ')}</span>` : '';
+    if (route.road) {
+      const found = route.junctions;
+      setVerdict(found ? 'warn' : 'ok', `<b>${found ? `${found} possible junction${found === 1 ? '' : 's'} detected` : 'No junctions found along this road'}</b><span>Road length about ${route.km} km</span>` + (found ? '<span>Move A or B to exclude them, or acknowledge the possible quality impact below.</span>' : '') + pointCInfo);
+    } else {
+      setVerdict('error', `<b>${esc(route.error || 'Road not found')}</b><span>Straight-line distance about ${route.km} km. The link could not be checked for intersections or point C, so it cannot be submitted.</span>`);
+    }
+    check()
   }
-  map.on('click', e => { if (pts.length >= 2) return; const m = L.marker(e.latlng, { draggable: true }).addTo(rg).bindTooltip(pts.length ? 'B' : 'A', { permanent: true, direction: 'top' }); m.on('dragend', solve); pts.push(m); updateCoordinates(); solve() });
+  map.on('click', e => { if (pts.length >= 2) return; pts.push(pointMarker(e.latlng, pts.length ? 'B' : 'A')); updateCoordinates(); solve() });
   function clearCurrentLink() {
     rg.clearLayers(); pts = []; line = null; extensionLine = null; markerC = null; route = null; seq++;
     nj.checked = false; acceptJunctionQuality.checked = false; updateCoordinates();
@@ -313,10 +355,7 @@
       input.checked = repeatRequest.services.includes(input.value);
     });
     repeatRequest.coords.forEach((coordinate, index) => {
-      const marker = L.marker(coordinate, { draggable: true }).addTo(rg)
-        .bindTooltip(index ? 'B' : 'A', { permanent: true, direction: 'top' });
-      marker.on('dragend', solve);
-      pts.push(marker);
+      pts.push(pointMarker(coordinate, index ? 'B' : 'A'));
     });
     map.setView(repeatRequest.coords[0], 14);
     updateCoordinates();
