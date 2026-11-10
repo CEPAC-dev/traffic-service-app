@@ -611,7 +611,10 @@ button.topbar-notifications{border:0;background:none;cursor:pointer;font-family:
 .link-chips:empty::before{content:"No links added yet. Place A and B, then add the link.";color:var(--mut);font-size:13px}
 .link-chip{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--line);border-radius:10px;font-size:13.5px}
 .link-chip::before{content:"";flex:0 0 10px;height:10px;border-radius:3px;background:var(--swatch,var(--teal))}
+.link-chip{flex-wrap:wrap}
 .link-chip span{flex:1;min-width:0}
+.chip-edit{padding:4px 8px;border:0;border-radius:7px;background:none;color:var(--teal);font:inherit;font-size:13px;font-weight:650;cursor:pointer}
+.link-confirm{flex-basis:100%;display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--mut)}
 .chip-remove{padding:4px 8px;border:0;border-radius:7px;background:none;color:var(--danger-text);font:inherit;font-size:13px;font-weight:650;cursor:pointer}
 .chip-remove:hover{background:var(--danger-soft)}
 
@@ -659,3 +662,21 @@ button.topbar-notifications{border:0;background:none;cursor:pointer;font-family:
   .field-pair{grid-template-columns:minmax(0,1fr)}
   .map-search{right:12px;max-width:none}
 }
+
+.manual-coords{display:grid;gap:6px;margin-top:12px}
+.manual-coords>label{font-size:13px;font-weight:650;color:var(--navy)}
+.manual-row{display:flex;align-items:center;gap:8px}
+.manual-row input{flex:1;min-width:0;font:13px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace}
+
+.interval-pick{display:grid;gap:8px;margin-top:14px}
+.interval-pick>label{font-size:13px;font-weight:650;color:var(--navy)}
+.interval-chips{display:flex;flex-wrap:wrap;gap:8px}
+.interval-chip{position:relative;cursor:pointer}
+.interval-chip input{position:absolute;opacity:0;inset:0;cursor:pointer}
+.interval-chip span{display:inline-flex;align-items:center;gap:6px;padding:8px 12px;border:1px solid var(--line);border-radius:10px;background:#fff;font-size:13px;font-weight:600;color:var(--navy)}
+.interval-chip em{font-style:normal;font-size:11px;font-weight:650;color:var(--teal)}
+.interval-chip input:checked+span{border-color:var(--teal);box-shadow:0 0 0 2px rgba(15,118,110,.18)}
+.interval-chip input:focus-visible+span{outline:2px solid var(--teal);outline-offset:2px}
+.svc-toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 0 8px}
+.svc-toolbar #svcCount{font-size:12.5px;color:var(--mut)}
+.svc-toolbar .btn{padding:6px 12px;font-size:13px}

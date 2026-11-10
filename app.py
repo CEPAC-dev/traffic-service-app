@@ -53,6 +53,19 @@ ENGINEERING_SPECIALIZATIONS = (
     "Highway Engineering", "Structural Engineering", "Other",
 )
 HIDDEN_SERVICES_BY_DEFAULT = {"capacity"}
+DATA_INTERVALS = (5, 15, 30, 60)   # minutes between data points the client can ask for
+DEFAULT_DATA_INTERVAL = 15
+
+def _clean_data_interval(raw):
+    """Returns (minutes, error). Missing value -> the 15-minute default."""
+    if raw in (None, ""):
+        return DEFAULT_DATA_INTERVAL, None
+    if isinstance(raw, bool) or not isinstance(raw, (int, str)) or not str(raw).strip().isdigit():
+        return None, "Choose how often you want the data"
+    minutes = int(str(raw).strip())
+    if minutes not in DATA_INTERVALS:
+        return None, "Choose how often you want the data: " + ", ".join(str(x) for x in DATA_INTERVALS) + " minutes"
+    return minutes, None
 STATUSES = ["Pending", "Processing", "Completed", "Rejected"]
 APP_NAME = "TrafficLens"   # change the app name here (shown in the header, page title and landing page)
 
@@ -62,8 +75,8 @@ SERVICE_DEFAULTS = {
  "speed": {"icon": "\u26A1", "desc": "The average speed of vehicles on the link during each hour you selected."},
  "travel": {"icon": "\u23F1\uFE0F", "desc": "How long it takes to drive the whole link during each hour you selected."},
  "length": {"icon": "\U0001F4CF", "desc": "The length of the link, from its start (A) to its end (B)."},
- "freeflow_time": {"icon": "\U0001F552", "desc": "Travel time at 7:00 AM on the nearest public holiday in the route's country."},
- "freeflow_speed": {"icon": "\U0001F680", "desc": "Travel speed at 7:00 AM on the latest weekly weekend date before today in the route's country."},
+ "freeflow_time": {"icon": "\U0001F552", "desc": "Travel time at 7:00 AM on the public holiday nearest to your study date in the route's country."},
+ "freeflow_speed": {"icon": "\U0001F680", "desc": "Travel speed at 7:00 AM on a past weekly-weekend day in the route's country: the one nearest your study date when Traffic volumes is selected, otherwise the most recent one."},
  "capacity": {"icon": "\U0001F699", "desc": "The maximum number of vehicles that can pass through the link in one hour."},
  "volumes": {"icon": "\U0001F4CA", "desc": "Estimated hourly traffic volume calculated from lanes, actual speed, and weekly-weekend free-flow speed using the traffic model."},
 }
@@ -462,7 +475,7 @@ def init():
         "WHERE execution_status='queued' AND job_id IN (SELECT id FROM outscraper_jobs WHERE execution_status='unknown' AND error LIKE 'The app restarted while submission is in progress%')"
     )
     cols = [x[1] for x in c.execute("PRAGMA table_info(requests)")]
-    for col, ddl in (("type", "TEXT DEFAULT 'area'"), ("reply", "TEXT"), ("reply_at", "TEXT"), ("data", "TEXT"), ("hours", "TEXT"), ("path", "TEXT"), ("road_km", "REAL"), ("junctions", "INTEGER"), ("start_time", "TEXT"), ("end_time", "TEXT"), ("point_c", "TEXT"), ("point_c_distance_km", "REAL"), ("show_point_c", "INTEGER NOT NULL DEFAULT 0"), ("title", "TEXT"), ("junction_quality_ack", "INTEGER NOT NULL DEFAULT 0"), ("junction_quality_ack_at", "TEXT"), ("group_id", "INTEGER"), ("period_label", "TEXT")):
+    for col, ddl in (("type", "TEXT DEFAULT 'area'"), ("reply", "TEXT"), ("reply_at", "TEXT"), ("data", "TEXT"), ("hours", "TEXT"), ("path", "TEXT"), ("road_km", "REAL"), ("junctions", "INTEGER"), ("start_time", "TEXT"), ("end_time", "TEXT"), ("point_c", "TEXT"), ("point_c_distance_km", "REAL"), ("show_point_c", "INTEGER NOT NULL DEFAULT 0"), ("title", "TEXT"), ("junction_quality_ack", "INTEGER NOT NULL DEFAULT 0"), ("junction_quality_ack_at", "TEXT"), ("group_id", "INTEGER"), ("period_label", "TEXT"), ("data_interval", "INTEGER")):
         if col not in cols: c.execute(f"ALTER TABLE requests ADD COLUMN {col} {ddl}")
     c.execute("CREATE INDEX IF NOT EXISTS idx_requests_group ON requests(group_id)")
     if not c.execute("SELECT 1 FROM periods").fetchone():
@@ -944,6 +957,11 @@ def _persist_holiday_result_context(job_id):
             if suggested is not None:
                 saved["suggested_minutes"] = suggested
                 saved["note"] += f" Suggested A-to-B free flow time: {suggested:.2f} min (average of the holiday Directions response). Confirm or correct it."
+        elif service == "freeflow_speed":
+            suggested = _suggest_freeflow_speed(job_id, request_row["road_km"])
+            if suggested is not None:
+                saved["suggested_speed"] = suggested
+                saved["note"] += f" Suggested A-to-B free flow speed: {suggested:.2f} km/h (from the weekend Directions response). Confirm or correct it."
     reference_context = {
         key: context[key] for key in (
             "study_date", "country_code", "country_name", "timezone",
@@ -1048,6 +1066,15 @@ def _suggest_freeflow_minutes(job_id, road_km):
         response = json.loads(route_row["raw_response_json"] or "{}") if route_row else {}
         return _mean_route_minutes(response, target_meters) if target_meters > 0 else None
     except (TypeError, ValueError, KeyError, sqlite3.Error):
+        return None
+
+def _suggest_freeflow_speed(job_id, road_km):
+    """A-to-B free flow speed in km/h from the completed weekend Directions response."""
+    minutes = _suggest_freeflow_minutes(job_id, road_km)
+    try:
+        distance_km = float(road_km)
+        return distance_km / (minutes / 60) if minutes and minutes > 0 and distance_km > 0 else None
+    except (TypeError, ValueError):
         return None
 
 def _extract_request_directions_result(job_id):
@@ -2117,12 +2144,49 @@ def change_password():
     flash("Password changed successfully.", "success")
     return _profile_redirect()
 
+def _repeat_group_payload(gid):
+    """Everything needed to prefill a new order from a completed grouped order (None until its report was sent)."""
+    row = db().execute("SELECT * FROM request_groups WHERE id=? AND user_id=?", (gid, session["uid"])).fetchone()
+    if not row:
+        abort(404)
+    if not row["sent_at"]:
+        return None
+    enabled = active_services()
+    periods, links, seen_periods, seen_links = [], [], set(), set()
+    data_interval = DEFAULT_DATA_INTERVAL
+    for child in _group_children(gid):
+        data_interval = child.get("data_interval") or data_interval
+        label = child.get("period_label")
+        if label and label not in seen_periods and child.get("start_time") and child.get("end_time"):
+            seen_periods.add(label)
+            periods.append({"label": label, "start_time": child["start_time"], "end_time": child["end_time"]})
+        key = json.dumps(child["coords"])
+        if key not in seen_links:
+            seen_links.add(key)
+            links.append({"coords": child["coords"], "path": child["path"], "road_km": child["road_km"],
+                          "junctions": child["junctions"], "point_c": child["point_c"],
+                          "point_c_distance_km": child["point_c_distance_km"]})
+    return {"id": gid, "title": row["title"] or "", "date": row["study_date"], "mode": row["mode"],
+            "services": [x for x in json.loads(row["services"]) if x in enabled],
+            "periods": periods, "links": links, "data_interval": data_interval}
+
 @app.route("/study")
 @login_required
 def study():
     repeat_request = None
+    repeat_group = None
+    group_arg = request.args.get("repeat_group_id", "").strip()
+    if group_arg:
+        try:
+            repeat_gid = int(group_arg)
+        except ValueError:
+            abort(400, "Invalid order ID")
+        repeat_group = _repeat_group_payload(repeat_gid)
+        if repeat_group is None:
+            flash("An order can be repeated once its report has been sent.", "error")
+            return redirect(url_for("client_group", gid=repeat_gid))
     request_id = request.args.get("repeat_request_id", "").strip()
-    if request_id:
+    if request_id and not repeat_group:
         try:
             rid = int(request_id)
         except ValueError:
@@ -2147,6 +2211,7 @@ def study():
             "start_time": original.get("start_time") or (f"{original['hours'][0]:02d}:00:00" if original["hours"] else ""),
             "end_time": original.get("end_time") or legacy_end_time,
             "period_label": original.get("period_label"),
+            "data_interval": original.get("data_interval") or DEFAULT_DATA_INTERVAL,
         }
     selected_service = request.args.get("service", "")
     if selected_service not in active_services():
@@ -2156,9 +2221,12 @@ def study():
     return render_template(
         "study.html",
         repeat_request=repeat_request,
-        selected_service=selected_service if not repeat_request else "",
+        repeat_group=repeat_group,
+        selected_service=selected_service if not (repeat_request or repeat_group) else "",
         period_labels=period_labels,
         max_links=MAX_GROUP_LINKS,
+        data_intervals=DATA_INTERVALS,
+        default_data_interval=DEFAULT_DATA_INTERVAL,
     )
 
 @app.get("/api/network/links")
@@ -2210,6 +2278,8 @@ def create_request():
         return jsonify(error="End time must be later than start time on the same study day"), 400
     hours = list(range(start_seconds // 3600, (end_seconds - 1) // 3600 + 1))
     start_time, end_time = start_time.strftime("%H:%M:%S"), end_time.strftime("%H:%M:%S")
+    data_interval, interval_error = _clean_data_interval(j.get("data_interval"))
+    if interval_error: return jsonify(error=interval_error), 400
     if len(coords) != 2: return jsonify(error="Select the start and the end of the link"), 400
     if not sv: return jsonify(error="Choose at least one service"), 400
     if not hours: return jsonify(error="Choose at least one hour"), 400
@@ -2247,9 +2317,9 @@ def create_request():
         except (TypeError, ValueError):
             return jsonify(error="A valid road point C more than 1.5 km from A along the road is required for Time, Speed, or Volumes requests"), 400
     junction_quality_ack_at = _timestamp_now() if junction_quality_ack else None
-    cur = db().execute("INSERT INTO requests(user_id,created,d1,d2,services,area,bbox,coords,type,hours,path,road_km,junctions,start_time,end_time,point_c,point_c_distance_km,title,junction_quality_ack,junction_quality_ack_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    cur = db().execute("INSERT INTO requests(user_id,created,d1,d2,services,area,bbox,coords,type,hours,path,road_km,junctions,start_time,end_time,point_c,point_c_distance_km,title,junction_quality_ack,junction_quality_ack_at,data_interval) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (session["uid"], dt.date.today().isoformat(), day, day, json.dumps(sv), str(j.get("area") or "Link")[:120],
-         json.dumps([min(lats), min(lngs), max(lats), max(lngs)]), json.dumps(coords), "link", json.dumps(hours), json.dumps(path), road_km, junctions, start_time, end_time, json.dumps(point_c) if point_c else None, point_c_distance_km, _clean_request_title(j.get("title")), int(junction_quality_ack), junction_quality_ack_at))
+         json.dumps([min(lats), min(lngs), max(lats), max(lngs)]), json.dumps(coords), "link", json.dumps(hours), json.dumps(path), road_km, junctions, start_time, end_time, json.dumps(point_c) if point_c else None, point_c_distance_km, _clean_request_title(j.get("title")), int(junction_quality_ack), junction_quality_ack_at, data_interval))
     if "volumes" in sv:
         now = _timestamp_now()
         db().execute(
@@ -2405,6 +2475,9 @@ def create_request_group():
         return jsonify(error="Choose at least one service"), 400
     try: day = dt.date.fromisoformat(str(j.get("date") or "")).isoformat()
     except ValueError: return jsonify(error="Choose a valid date"), 400
+    data_interval, interval_error = _clean_data_interval(j.get("data_interval"))
+    if interval_error:
+        return jsonify(error=interval_error), 400
     mode = j.get("mode")
     if mode not in GROUP_MODES:
         return jsonify(error="Choose the order type first"), 400
@@ -2448,13 +2521,13 @@ def create_request_group():
                 child_title = title if total == 1 else _clean_request_title(
                     " · ".join(x for x in (title, f"Link {number}", period["label"]) if x))
                 cur = d.execute(
-                    "INSERT INTO requests(user_id,created,d1,d2,services,area,bbox,coords,type,hours,path,road_km,junctions,start_time,end_time,point_c,point_c_distance_km,title,junction_quality_ack,junction_quality_ack_at,group_id,period_label) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO requests(user_id,created,d1,d2,services,area,bbox,coords,type,hours,path,road_km,junctions,start_time,end_time,point_c,point_c_distance_km,title,junction_quality_ack,junction_quality_ack_at,group_id,period_label,data_interval) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (session["uid"], now_day, day, day, json.dumps(sv),
                      f"Link {number} A to B (~{link['road_km']} km by road)" if total > 1 else f"Link A to B (~{link['road_km']} km by road)",
                      json.dumps(link["bbox"]), json.dumps(link["coords"]), "link", json.dumps(period["hours"]),
                      json.dumps(link["path"]), link["road_km"], link["junctions"], period["start_time"], period["end_time"],
                      json.dumps(link["point_c"]) if link["point_c"] else None, link["point_c_distance_km"],
-                     child_title, int(link["ack"]), _timestamp_now() if link["ack"] else None, group_id, period["label"]))
+                     child_title, int(link["ack"]), _timestamp_now() if link["ack"] else None, group_id, period["label"], data_interval))
                 request_ids.append(cur.lastrowid)
                 if "volumes" in sv:
                     now = _timestamp_now()
@@ -3413,7 +3486,7 @@ def _outscraper_prefill_from_request(request_row, service="travel"):
         "routes": [route],
         "departure_time": int(departure.timestamp()) if service == "travel" or volume_freeflow else None,
         "finish_time": int(finish.timestamp()) if service == "travel" or volume_freeflow else None,
-        "interval": 1 if service == "travel" else 60 if volume_freeflow else None,
+        "interval": (source.get("data_interval") or 1) if service == "travel" else 60 if volume_freeflow else None,
         "travel_mode": "car",
         "language": "en",
         "region": region,

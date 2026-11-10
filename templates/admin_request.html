@@ -5,7 +5,7 @@
 </div>
 <div class="request-detail-grid admin-detail-grid">
   <section class="card request-detail-card"><span class="eyebrow">CUSTOMER</span><h2>{{r.client}}</h2><dl><div><dt>Email</dt><dd>{{r.email}}</dd></div><div><dt>Request ID</dt><dd>REQ-{{r.id}}</dd></div></dl></section>
-  <section class="card request-detail-card"><span class="eyebrow">REQUEST</span><h2>{{r.area}}</h2><dl><div><dt>Services</dt><dd>{% for s in r.services %}<span class="pill">{{SVINFO[s].icon}} {{SERVICES[s]}}</span>{% endfor %}</dd></div><div><dt>Study date</dt><dd>{{r.d1}}</dd></div><div><dt>Time</dt><dd>{{r.time_range_label}} · {{r.hours_label}}</dd></div>{% if r.road_km %}<div><dt>Road length</dt><dd>{{r.road_km}} km</dd></div>{% endif %}{% if r.junctions %}<div><dt>Route check</dt><dd>{{r.junctions}} possible junction(s) detected</dd></div><div><dt>Quality acknowledgment</dt><dd>{% if r.junction_quality_ack %}User agreed that intersections may affect result quality{% if r.junction_quality_ack_at %} · {{r.junction_quality_ack_at}}{% endif %}{% else %}Not acknowledged{% endif %}</dd></div>{% endif %}</dl></section>
+  <section class="card request-detail-card"><span class="eyebrow">REQUEST</span><h2>{{r.area}}</h2><dl><div><dt>Services</dt><dd>{% for s in r.services %}<span class="pill">{{SVINFO[s].icon}} {{SERVICES[s]}}</span>{% endfor %}</dd></div><div><dt>Study date</dt><dd>{{r.d1}}</dd></div><div><dt>Time</dt><dd>{{r.time_range_label}} · {{r.hours_label}}</dd></div>{% if r.data_interval %}<div><dt>Data interval</dt><dd>Every {{r.data_interval}} min</dd></div>{% endif %}{% if r.road_km %}<div><dt>Road length</dt><dd>{{r.road_km}} km</dd></div>{% endif %}{% if r.junctions %}<div><dt>Route check</dt><dd>{{r.junctions}} possible junction(s) detected</dd></div><div><dt>Quality acknowledgment</dt><dd>{% if r.junction_quality_ack %}User agreed that intersections may affect result quality{% if r.junction_quality_ack_at %} · {{r.junction_quality_ack_at}}{% endif %}{% else %}Not acknowledged{% endif %}</dd></div>{% endif %}</dl></section>
 </div>
 {% if 'travel' in r.services or 'speed' in r.services or 'freeflow_time' in r.services or 'freeflow_speed' in r.services or 'volumes' in r.services %}<div class="row-actions directions-actions">
 {% if 'travel' in r.services or 'speed' in r.services or 'volumes' in r.services %}{% if r.point_c %}<button class="btn" id="openDirectionsReview" type="button">API Directions · Review A → C</button>{% endif %}{% endif %}
@@ -116,7 +116,7 @@
 </details>
 {% endblock %}
 {% block js %}<script>
-document.addEventListener('click',e=>{const b=e.target.closest('.use-suggested');if(!b)return;const input=b.closest('.svc').querySelector('input[data-i="0"]');input.value=b.dataset.value;input.dispatchEvent(new Event('input',{bubbles:true}));input.focus();});
+document.addEventListener('click',e=>{const b=e.target.closest('.use-suggested');if(!b)return;const card=b.closest('.svc'),input=card.querySelector('input[data-i="0"]'),note=card.querySelector('.note');input.value=b.dataset.value;if(note&&note.value.startsWith('Directions API response is complete'))note.value='';input.dispatchEvent(new Event('input',{bubbles:true}));b.disabled=true;saveAll.click();});
 const REQ={{ r|tojson }},FORMS={{ forms|tojson }},SV={{ SERVICES|tojson }},SVI={{ SVINFO|tojson }};
 const VOLUMES_ALREADY_SENT={{ 'true' if volumes_workflow and volumes_workflow.status=='sent' else 'false' }};
 const HAS_CLIENT_DIRECTIONS={{ 'true' if 'speed' in r.services or 'travel' in r.services else 'false' }};
@@ -145,13 +145,20 @@ let originalStatus=st.value,originalReply=rp.value,originalPointCVisible=showPoi
 st.addEventListener('change',()=>stMsg.textContent=st.value===originalStatus?'':'Unsaved');
 rp.addEventListener('input',()=>rpMsg.textContent=rp.value===originalReply?'':'Unsaved');
 if(showPointC)showPointC.addEventListener('change',()=>saveAllMsg.textContent=showPointC.checked===originalPointCVisible?'':'Point C visibility has unsaved changes.');
+const apiConfirmBlock=(s,saved,sr)=>{
+ if(!['freeflow_time','freeflow_speed'].includes(s)||sr.length||(s==='freeflow_speed'&&REQ.services.includes('volumes')))return'';
+ const value=s==='freeflow_time'?saved.suggested_minutes:saved.suggested_speed,unit=s==='freeflow_time'?'min':'km/h';
+ if(value==null)return'<p class="hint">When the Directions API response is complete, a <b>Confirm API value</b> button appears here.</p>';
+ const shown=Math.round(value*100)/100;
+ return`<p><button type="button" class="btn use-suggested" data-value="${shown}">Confirm API value (${shown} ${unit})</button> <small class="hint">Takes the value from the Directions API response and saves it.</small></p>`;
+};
 REQ.services.forEach(s=>{
  const F=FORMS[s],saved=(REQ.data||{})[s]||{},hourly=F.kind==='hourly',sr=saved.rows||[],inputType=F.value_type==='mixed'?'text':'number',unit=F.unit?` (${esc(F.unit)})`:'',directionsManaged=(Boolean(REQ.point_c)&&['travel','speed'].includes(s))||s==='volumes',directionsDisabled=directionsManaged?'disabled':'';
  const rows=hourly?REQ.hours.map(h=>{const f=sr.find(r=>r.hour===h);return{hour:h,value:f?f.value:''}}):[{value:sr[0]?sr[0].value:''}];
  const el=document.createElement('div');el.className='card svc';
  el.innerHTML=`<div class="svc-h"><h3>${SVI[s].icon} ${esc(SV[s])} ${saved.source==='network'?'<span class="pill">🗺️ From road network</span>':''}</h3><span class="b badge"></span></div><p class="hint">${esc(F.hint)}${s==='volumes'?' Calculated by MATLAB and released only after explicit review; manual entry is disabled.':directionsManaged?' Values are extracted automatically from the Scraper response; manual entry is disabled.':''}${s==='length'&&REQ.road_km?` The length of the route on the map is ${REQ.road_km} km.`:''}</p>
  ${hourly?`<div class="tw"><table class="ed"><thead><tr><th>Hour</th><th>${esc(F.label)}${unit}</th></tr></thead><tbody>${rows.map((r,i)=>`<tr><td><b>${pad(r.hour)}:00 to ${pad(r.hour+1)}:00</b></td><td><input type="${inputType}" ${inputType==='number'?'step="any"':''} ${directionsDisabled} data-i="${i}" value="${esc(r.value)}"></td></tr>`).join('')||'<tr><td colspan="2">No hours were selected for this request.</td></tr>'}</tbody></table></div>`
-  :`<label>${esc(F.label)}${unit}</label><input type="${inputType}" ${inputType==='number'?'step="any"':''} ${directionsDisabled} data-i="0" value="${esc(rows[0].value)}" style="max-width:240px">${s==='freeflow_time'&&saved.suggested_minutes!=null&&!sr.length?`<p><button type="button" class="btn alt use-suggested" data-value="${Math.round(saved.suggested_minutes*100)/100}">Use suggested value (${Math.round(saved.suggested_minutes*100)/100} min)</button> <small class="hint">Review it, then save as usual.</small></p>`:''}`}
+  :`<label>${esc(F.label)}${unit}</label><input type="${inputType}" ${inputType==='number'?'step="any"':''} ${directionsDisabled} data-i="0" value="${esc(rows[0].value)}" style="max-width:240px">${apiConfirmBlock(s,saved,sr)}`}
  <label>Admin answer / notes for this service</label><textarea class="note" rows="3" ${directionsDisabled}>${esc(saved.note)}</textarea>
  <p class="service-save-msg msg" aria-live="polite"></p>`;
  document.getElementById('svcs').appendChild(el);

@@ -1,6 +1,7 @@
 {% extends "base.html" %}{% block body %}
 <div class="wb-head"><h1>New order</h1><p>Mark a road link on the map, set when you need it, and choose the data. We handle the processing.</p></div>
 {% if repeat_request %}<div class="tip source-request-tip"><b>Repeating request REQ-{{repeat_request.id}}</b><br>Its date, times, services and A/B locations have been copied below. You can edit them before submitting. This creates a new request; the original remains unchanged. Please confirm the route condition again, including any quality-impact acknowledgment if intersections are detected.</div>{% endif %}
+{% if repeat_group %}<div class="tip source-request-tip"><b>Repeating order GRP-{{repeat_group.id}}</b><br>Its links, periods, services, date and name have been copied below. Change anything you like: set the new study date, edit or remove links, add others, or change periods and services. This creates a new order; the original and its report stay unchanged. Please confirm the route condition of every copied link again.</div>{% endif %}
 <div class="workbench">
   <div class="wb-map">
     <div class="map-search" role="search">
@@ -29,6 +30,13 @@
         <div><b><i class="pt-badge end">B</i>End</b><code id="pointBCoordinates">Not selected</code></div>
         {% if session.get('role') == 'admin' %}<div id="pointCReadout" hidden><b><i class="pt-badge calc">C</i>Calculated</b><code id="pointCCoordinates">Not calculated</code></div>{% endif %}
       </div>
+      <div class="manual-coords">
+        <label for="manualA">Or type the coordinates <span class="opt">latitude, longitude</span></label>
+        <div class="manual-row"><i class="pt-badge">A</i><input id="manualA" type="text" inputmode="decimal" placeholder="30.138239, 31.395698" autocomplete="off" aria-label="Point A latitude and longitude"></div>
+        <div class="manual-row"><i class="pt-badge end">B</i><input id="manualB" type="text" inputmode="decimal" placeholder="30.137423, 31.393946" autocomplete="off" aria-label="Point B latitude and longitude"></div>
+        <button class="btn alt" id="drawManual" type="button">Draw link from coordinates</button>
+        <div id="manualMsg" class="msg" role="status" aria-live="polite"></div>
+      </div>
       <div id="info" class="verdict" data-state="idle" aria-live="polite"></div>
       <label class="cf" id="noJunctionDeclaration"><input type="checkbox" id="nj"> I confirm this link has no intersections, entrances or exits.</label>
       <label class="cf" id="junctionQualityConsent" hidden><input type="checkbox" id="acceptJunctionQuality"> I agree to submit this link despite the detected intersections, knowing they may affect the quality of the results.</label>
@@ -48,20 +56,28 @@
       </div>
       <p class="step-help" id="periodHint"></p>
       <div id="periodRows" class="period-list"></div>
+      <div class="interval-pick">
+        <label id="intervalLabel">How often do you want the data? <span class="opt">standard: {{ default_data_interval }} minutes</span></label>
+        <div class="interval-chips" role="radiogroup" aria-labelledby="intervalLabel">
+          {% for m in data_intervals %}<label class="interval-chip"><input type="radio" name="data_interval" value="{{ m }}" {{ 'checked' if m == default_data_interval }}><span>Every {{ m }} min{% if m == default_data_interval %}<em>Standard</em>{% endif %}</span></label>{% endfor %}
+        </div>
+      </div>
     </section>
 
     <section class="step" id="stepServices" data-done="false">
       <div class="step-head"><span class="step-mark"><span>4</span></span><h2>Services</h2></div>
+      <div class="svc-toolbar"><span id="svcCount" aria-live="polite"></span><button type="button" class="btn alt" id="svcAll">Select all</button></div>
       <div class="svc-list" id="svl">
-        {% for k,v in ACTIVE_SERVICES.items() %}<label class="svc-tile"><input type="checkbox" value="{{k}}" {{ 'checked' if (selected_service==k if selected_service else k in ('speed','travel')) }}><span class="svc-text"><b>{{ v }}</b>{% if SVINFO[k].desc %}<small>{{ SVINFO[k].desc }}</small>{% endif %}</span><span class="svc-tags">{% if k=='freeflow_time' %}<em>Public holiday, 07:00</em>{% elif k=='freeflow_speed' %}<em>Weekly weekend</em>{% endif %}{% if k in NET_SERVICES %}<em class="instant">Instant</em>{% endif %}</span></label>{% endfor %}
+        {% for k,v in ACTIVE_SERVICES.items() %}<label class="svc-tile"><input type="checkbox" value="{{k}}" {{ 'checked' if (selected_service==k if selected_service else k in ('speed','travel')) }}><span class="svc-text"><b>{{ v }}</b>{% if SVINFO[k].desc %}<small>{{ SVINFO[k].desc }}</small>{% endif %}</span><span class="svc-tags">{% if k=='freeflow_time' %}<em>Public holiday, 07:00</em>{% elif k=='freeflow_speed' %}<em>Weekend, 07:00</em>{% endif %}{% if k in NET_SERVICES %}<em class="instant">Instant</em>{% endif %}</span></label>{% endfor %}
       </div>
       <details class="svc-notes">
         <summary>How these services are calculated</summary>
-        {% if 'freeflow_time' in ACTIVE_SERVICES %}<p>Free flow time uses Directions API at 7:00 AM on the nearest public holiday to your study date in the route's country.</p>{% endif %}
-        {% if 'freeflow_speed' in ACTIVE_SERVICES %}<p>Free flow speed uses the nearest weekly weekend date to the study date that is before today. With Traffic volumes, the administrator reviews an editable A→C time window and the highest returned speed is used for the model.</p>{% endif %}
-        {% if 'volumes' in ACTIVE_SERVICES %}<p>Traffic volumes can be requested with other services. The administrator calculates volumes using lane count, actual speed, and a reviewed free-flow speed. Supporting inputs stay internal; only the services you selected and their approved results are shared.</p>{% endif %}
-        {% if NET_SERVICES %}<p>Instant services are answered right away from our road network when your link is covered by it.</p>{% endif %}
-        <p>The same services and the same periods apply to every link in the order. All results are sent together in one report.</p>
+        {% if 'freeflow_time' in ACTIVE_SERVICES %}<p><b>Free flow time</b> uses Directions API at 7:00 AM on the public holiday nearest to your study date in the route's country.</p>{% endif %}
+        {% if 'freeflow_speed' in ACTIVE_SERVICES %}<p><b>Free flow speed</b> uses Directions API at 7:00 AM on a weekly-weekend day before today in the route's country. With <b>Traffic volumes</b> it is the weekend day nearest to your study date, and the administrator reviews an editable A→C time window; the highest returned speed is used for the model. Without it, the most recent weekend day is used.</p>{% endif %}
+        {% if 'volumes' in ACTIVE_SERVICES %}<p><b>Traffic volumes</b> can be requested with other services. The administrator calculates volumes using lane count, actual speed, and a reviewed free-flow speed. Supporting inputs stay internal; only the services you selected and their approved results are shared.</p>{% endif %}
+        {% if NET_SERVICES %}<p><b>Instant</b> services are answered right away from our road network when your link is covered by it.</p>{% endif %}
+        <p><b>Data interval</b> sets how far apart the data points are within your study period. {{ default_data_interval }} minutes is the standard; results are still reported per hour.</p>
+        <p>The same services, periods and data interval apply to every link in the order. All results are sent together in one report.</p>
       </details>
     </section>
 
@@ -79,6 +95,7 @@
 {% block js %}
 <script>
   const repeatRequest = {{repeat_request|tojson if repeat_request else 'null'}};
+  const repeatGroup = {{repeat_group|tojson if repeat_group else 'null'}};
   const canPreviewPointC = {{ 'true' if session.get('role') == 'admin' else 'false' }};
   const noJunctionDeclaration = document.getElementById('noJunctionDeclaration');
   const junctionQualityConsent = document.getElementById('junctionQualityConsent');
@@ -86,7 +103,7 @@
   const PERIOD_LABELS = {{ period_labels|tojson }}, MAX_LINKS = {{ max_links }};
   const LINK_COLORS = ['#2563eb', '#9333ea', '#ea580c', '#0891b2', '#be185d', '#65a30d', '#b45309', '#4f46e5', '#0f766e', '#dc2626'];
   let pts = [], line = null, extensionLine = null, markerC = null, route = null, seq = 0;
-  let mode = 'single', links = [], periodState = {};
+  let mode = 'single', links = [], periodState = {}, editingIndex = null;
   PERIOD_LABELS.forEach(label => periodState[label] = { checked: false, start: '', end: '' });
   const map = L.map('map', { zoomControl: false }).setView([30.0444, 31.2357], 11); L.control.zoom({ position: 'bottomright' }).addTo(map); tiles(map); const rg = L.featureGroup().addTo(map); const savedGroup = L.featureGroup().addTo(map);
   const fmt = p => [+p.lat.toFixed(6), +p.lng.toFixed(6)];
@@ -103,6 +120,8 @@
   function updateCoordinates() {
     pointACoordinates.textContent = pts[0] ? fmt(pts[0].getLatLng()).join(', ') : 'Not selected';
     pointBCoordinates.textContent = pts[1] ? fmt(pts[1].getLatLng()).join(', ') : 'Not selected';
+    if (pts[0] && document.activeElement !== manualA) manualA.value = fmt(pts[0].getLatLng()).join(', ');
+    if (pts[1] && document.activeElement !== manualB) manualB.value = fmt(pts[1].getLatLng()).join(', ');
     if (canPreviewPointC) {
       pointCReadout.hidden = !route?.pointC;
       pointCCoordinates.textContent = route?.pointC ? fmt({ lat: route.pointC[0], lng: route.pointC[1] }).join(', ') : 'Not calculated';
@@ -110,6 +129,20 @@
   }
   const maxLinksForMode = () => mode === 'multi_link' ? MAX_LINKS : 1;
   const maxPeriodsForMode = () => mode === 'multi_period' ? PERIOD_LABELS.length : 1;
+  const DEFAULT_INTERVAL = {{ default_data_interval }};
+  const selectedInterval = () => Number((document.querySelector('input[name="data_interval"]:checked') || {}).value || DEFAULT_INTERVAL);
+  const setDataInterval = minutes => { const input = document.querySelector(`input[name="data_interval"][value="${minutes}"]`); (input || document.querySelector(`input[name="data_interval"][value="${DEFAULT_INTERVAL}"]`)).checked = true; };
+  const serviceBoxes = () => [...document.querySelectorAll('#svl input[type="checkbox"]')];
+  function updateSvcToggle() {
+    const boxes = serviceBoxes(), chosen = boxes.filter(input => input.checked).length;
+    svcAll.textContent = chosen === boxes.length ? 'Clear all' : 'Select all';
+    svcCount.textContent = `${chosen} of ${boxes.length} selected`;
+  }
+  svcAll.onclick = () => {
+    const boxes = serviceBoxes(), all = boxes.every(input => input.checked);
+    boxes.forEach(input => { input.checked = !all; });
+    updateSvcToggle(); solve();
+  };
   const selectedServices = () => [...document.querySelectorAll('#svl input:checked')].map(input => input.value);
   const needsPointCForServices = () => selectedServices().some(value => ['speed', 'travel', 'volumes'].includes(value));
   function timeToSeconds(value) {
@@ -157,6 +190,15 @@
     const routeAcknowledged = route?.junctions === 0 ? nj.checked : route?.junctions > 0 && acceptJunctionQuality.checked;
     return pts.length == 2 && verifiedRoute && (!needsPointCForServices() || route.pointC) && routeAcknowledged;
   }
+  const linkConfirmed = link => link.junctions === 0 ? link.no_junctions === true : link.accept_intersection_quality_impact === true;
+  function editLink(index) {
+    const link = links[index];
+    clearCurrentLink();
+    links.splice(index, 1); editingIndex = index;
+    link.coords.forEach((coordinate, i) => pts.push(pointMarker(coordinate, i ? 'B' : 'A')));
+    map.setView(link.coords[0], 15);
+    renderLinks(); updateCoordinates(); solve();
+  }
   function renderLinks() {
     savedGroup.clearLayers();
     linkList.replaceChildren();
@@ -166,9 +208,21 @@
       const item = document.createElement('li'); item.className = 'link-chip'; item.style.setProperty('--swatch', color);
       const label = document.createElement('span');
       label.textContent = `Link ${index + 1}, about ${link.road_km} km${link.junctions ? `, ${link.junctions} intersection${link.junctions === 1 ? '' : 's'} acknowledged` : ''}`;
+      const edit = document.createElement('button'); edit.type = 'button'; edit.className = 'chip-edit'; edit.textContent = 'Edit';
+      edit.onclick = () => editLink(index);
       const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'chip-remove'; remove.textContent = 'Remove';
-      remove.onclick = () => { links.splice(index, 1); renderLinks(); check(); };
-      item.append(label, remove); linkList.append(item);
+      remove.onclick = () => { links.splice(index, 1); editingIndex = null; renderLinks(); check(); };
+      item.append(label, edit, remove);
+      if (link.confirm_needed) {
+        const confirmRow = document.createElement('label'); confirmRow.className = 'link-confirm';
+        const box = document.createElement('input'); box.type = 'checkbox'; box.checked = linkConfirmed(link);
+        box.onchange = () => { if (link.junctions === 0) link.no_junctions = box.checked; else link.accept_intersection_quality_impact = box.checked; check(); };
+        confirmRow.append(box, document.createTextNode(link.junctions === 0
+          ? ' I confirm this link has no intersections, entrances or exits.'
+          : ` I accept the possible quality impact of ${link.junctions} intersection${link.junctions === 1 ? '' : 's'}.`));
+        item.append(confirmRow);
+      }
+      linkList.append(item);
     });
     linkCount.textContent = `${links.length} / ${maxLinksForMode()}`;
   }
@@ -184,6 +238,8 @@
     if (!d1.value) todo.push('set the date');
     if (!chosen.length) todo.push('choose a period'); else if (!periodsValid()) todo.push('enter a valid start and end time');
     if (!selectedServices().length) todo.push('select a service');
+    const unconfirmed = links.some(link => link.confirm_needed && !linkConfirmed(link));
+    if (unconfirmed) todo.push('confirm the route condition of each copied link');
     orderSummary.textContent = todo.length
       ? `Before you submit: ${todo.join(', ')}.`
       : `${links.length} link${links.length === 1 ? '' : 's'} × ${chosen.length} period${chosen.length === 1 ? '' : 's'} = ${total} request${total === 1 ? '' : 's'}, delivered in one report.`;
@@ -191,8 +247,8 @@
     setDone('stepWhen', periodsValid() && !!d1.value);
     setDone('stepServices', selectedServices().length > 0);
     const pointCMissing = needsPointCForServices() && links.some(link => !link.pointC);
-    if (pointCMissing) orderSummary.textContent += ' A selected service needs point C: remove and re-add the links added before you chose it.';
-    ok.disabled = !(links.length && periodsValid() && d1.value && selectedServices().length && !pointCMissing);
+    if (pointCMissing) orderSummary.textContent += ' A selected service needs point C: use Edit on the links added before you chose it.';
+    ok.disabled = !(links.length && periodsValid() && d1.value && selectedServices().length && !pointCMissing && !unconfirmed);
   }
   function draw() {
     if (line) { rg.removeLayer(line); line = null }
@@ -314,11 +370,28 @@
   map.on('click', e => { if (pts.length >= 2) return; pts.push(pointMarker(e.latlng, pts.length ? 'B' : 'A')); updateCoordinates(); solve() });
   function clearCurrentLink() {
     rg.clearLayers(); pts = []; line = null; extensionLine = null; markerC = null; route = null; seq++;
-    nj.checked = false; acceptJunctionQuality.checked = false; updateCoordinates();
+    nj.checked = false; acceptJunctionQuality.checked = false; manualA.value = ''; manualB.value = ''; manualMsg.textContent = ''; updateCoordinates();
   }
+  function parseLatLng(text) {
+    const numbers = (text || '').match(/-?\d+(?:\.\d+)?/g);
+    if (!numbers || numbers.length !== 2) return null;
+    const lat = Number(numbers[0]), lng = Number(numbers[1]);
+    return lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180 ? [lat, lng] : null;
+  }
+  function drawFromCoordinates() {
+    const a = parseLatLng(manualA.value), b = parseLatLng(manualB.value);
+    if (!a || !b) { manualMsg.textContent = 'Enter A and B as "latitude, longitude", for example 30.138239, 31.395698.'; return; }
+    if (a[0] === b[0] && a[1] === b[1]) { manualMsg.textContent = 'A and B must be two different points.'; return; }
+    clearCurrentLink();
+    pts.push(pointMarker(a, 'A'), pointMarker(b, 'B'));
+    map.fitBounds(L.latLngBounds([a, b]), { padding: [40, 40], maxZoom: 16 });
+    updateCoordinates(); solve();
+  }
+  drawManual.onclick = drawFromCoordinates;
+  [manualA, manualB].forEach(input => input.onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); drawFromCoordinates(); } });
   reset.onclick = () => { clearCurrentLink(); msg.innerHTML = ''; solve() };
   resetOrder.onclick = () => {
-    clearCurrentLink(); links = []; renderLinks(); msg.replaceChildren(); q.value = '';
+    clearCurrentLink(); links = []; editingIndex = null; renderLinks(); msg.replaceChildren(); q.value = '';
     PERIOD_LABELS.forEach(label => periodState[label] = { checked: false, start: '', end: '' });
     mode = 'single'; document.querySelector('input[name="mode"][value="single"]').checked = true;
     renderPeriods();
@@ -326,16 +399,19 @@
       input.checked = input.value === 'speed' || input.value === 'travel';
     });
     d1.value = new Date().toISOString().slice(0, 10);
+    setDataInterval(DEFAULT_INTERVAL); updateSvcToggle();
     solve();
   };
   addLink.onclick = () => {
     if (!currentLinkReady() || links.length >= maxLinksForMode()) return;
-    links.push({
+    const added = {
       coords: [fmt(pts[0].getLatLng()), fmt(pts[1].getLatLng())], path: route.path, road_km: route.km, junctions: route.junctions,
       no_junctions: route.junctions === 0 && nj.checked, accept_intersection_quality_impact: route.junctions > 0 && acceptJunctionQuality.checked,
       pointC: route.pointC ? fmt({ lat: route.pointC[0], lng: route.pointC[1] }) : null,
       point_c_distance_km: route.routeDistanceToC ? route.routeDistanceToC / 1000 : null,
-    });
+    };
+    links.splice(editingIndex === null ? links.length : Math.min(editingIndex, links.length), 0, added);
+    editingIndex = null;
     clearCurrentLink(); renderLinks(); solve();
   };
   document.querySelectorAll('input[name="mode"]').forEach(input => input.onchange = () => {
@@ -346,9 +422,9 @@
     renderLinks(); renderPeriods(); check();
   });
   nj.onchange = check; acceptJunctionQuality.onchange = check; d1.onchange = check;
-  svl.onchange = solve;
+  svl.onchange = () => { updateSvcToggle(); solve(); };
   if (repeatRequest) {
-    d1.value = repeatRequest.date;
+    d1.value = repeatRequest.date; setDataInterval(repeatRequest.data_interval);
     const repeatLabel = PERIOD_LABELS.includes(repeatRequest.period_label) ? repeatRequest.period_label : PERIOD_LABELS[0];
     if (repeatLabel) periodState[repeatLabel] = { checked: true, start: repeatRequest.start_time, end: repeatRequest.end_time };
     document.querySelectorAll('#svl input[type="checkbox"]').forEach(input => {
@@ -360,6 +436,26 @@
     map.setView(repeatRequest.coords[0], 14);
     updateCoordinates();
   }
+  if (repeatGroup) {
+    const modeInput = document.querySelector(`input[name="mode"][value="${repeatGroup.mode}"]`);
+    if (modeInput) { mode = repeatGroup.mode; modeInput.checked = true; }
+    document.getElementById('reqTitle').value = repeatGroup.title || '';
+    d1.value = repeatGroup.date; setDataInterval(repeatGroup.data_interval);
+    PERIOD_LABELS.forEach(label => periodState[label] = { checked: false, start: '', end: '' });
+    repeatGroup.periods.forEach(period => {
+      if (periodState[period.label]) periodState[period.label] = { checked: true, start: period.start_time, end: period.end_time };
+    });
+    document.querySelectorAll('#svl input[type="checkbox"]').forEach(input => {
+      input.checked = repeatGroup.services.includes(input.value);
+    });
+    links = repeatGroup.links.slice(0, MAX_LINKS).map(link => ({
+      coords: link.coords, path: link.path, road_km: link.road_km, junctions: link.junctions,
+      no_junctions: false, accept_intersection_quality_impact: false, confirm_needed: true,
+      pointC: link.point_c, point_c_distance_km: link.point_c_distance_km,
+    }));
+    if (links.length) map.fitBounds(L.latLngBounds(links.flatMap(link => link.path)), { padding: [25, 25], maxZoom: 16 });
+  }
+  updateSvcToggle();
   solve();
   go.onclick = async () => {
     const s = q.value.trim(); if (!s) return; try {
@@ -377,7 +473,7 @@
         accept_intersection_quality_impact: link.accept_intersection_quality_impact,
         point_c: link.pointC, point_c_distance_km: link.point_c_distance_km,
       })),
-      periods: chosenPeriods(),
+      periods: chosenPeriods(), data_interval: selectedInterval(),
     };
     ok.disabled = true;
     const r = await fetch('/api/request-groups', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });

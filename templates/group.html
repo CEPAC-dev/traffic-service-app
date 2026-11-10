@@ -4,6 +4,7 @@
 <div class="row-actions">
 {% if admin_view and not card.sent %}<button class="btn" id="sendGroup" type="button" {{ '' if ready else 'disabled' }}>Send one report to client</button>{% endif %}
 {% if card.sent or admin_view %}<a class="btn {{ '' if card.sent else 'alt' }}" href="{{url_for('export_group_excel',gid=g.id)}}">Download Excel report</a>{% endif %}
+{% if card.sent and not admin_view %}<a class="btn alt" href="{{url_for('study',repeat_group_id=g.id)}}">Repeat / edit order</a>{% endif %}
 {% if admin_view %}<button class="btn alt" id="deleteGroup" type="button">Delete order</button>{% endif %}
 <a class="btn alt" href="{{ url_for('admin') if admin_view else url_for('my_requests') }}">Back</a></div></div>
 <div class="card" style="margin-bottom:14px"><p style="margin:0"><span class="b {{card.status}}">{{card.status}}</span>
