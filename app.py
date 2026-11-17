@@ -39,7 +39,7 @@ if not configured_secret:
 app.config["MAX_CONTENT_LENGTH"] = 300 * 1024 * 1024   # network files can be large
 app.config["OUTSCRAPER_AUTO_POLL"] = os.environ.get("TRAFFICLENS_OUTSCRAPER_AUTO_POLL", "1") != "0"
 app.config["MAINTENANCE_AUTO_START"] = os.environ.get("TRAFFICLENS_MAINTENANCE", "1") != "0"
-DB = os.environ.get("TRAFFICLENS_DB") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "mobility.db")
+app.config["DATABASE"] = os.environ.get("TRAFFICLENS_DB") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "mobility.db")
 from trafficlens.config import (
     SERVICES,
     PROFILE_JOB_TITLES,
@@ -62,7 +62,8 @@ from trafficlens.config import (
     ABANDON_MESSAGE,
     _f,
 )
-from trafficlens.db import SCHEMA
+from trafficlens.db import SCHEMA, db, close_db
+from trafficlens.security.decorators import login_required, admin_required
 
 def _clean_data_interval(raw):
     """Returns (minutes, error). Missing value -> the 15-minute default."""
@@ -78,11 +79,6 @@ def _clean_data_interval(raw):
 
 
 
-
-def db():
-    if "db" not in g:
-        g.db = sqlite3.connect(DB); g.db.row_factory = sqlite3.Row
-    return g.db
 
 def _create_notification(user_id, request_id, kind, title, message):
     hidden_child = kind != "group_ready" and db().execute(
@@ -162,7 +158,7 @@ def _run_maintenance_once():
         if last is None or (dt.datetime.now() - last).total_seconds() >= backup_hours * 3600:
             keep = int(os.environ.get("TRAFFICLENS_BACKUP_KEEP", "7") or 7)
             path = backup_tool.run_backup(
-                db_path=DB, runs_dir=volumes_runner.volume_runs_root(), dest_dir=dest, keep=keep,
+                db_path=app.config["DATABASE"], runs_dir=volumes_runner.volume_runs_root(), dest_dir=dest, keep=keep,
             )
             app.logger.info("backup written: %s", path)
 
@@ -219,10 +215,7 @@ def _save_volume_lanes_service(request_data, requested_services, lanes):
             "updated": dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
         }
 
-@app.teardown_appcontext
-def close(_):
-    d = g.pop("db", None)
-    if d: d.close()
+app.teardown_appcontext(close_db)
 
 def _translate_legacy_notifications(c):
     """Rewrite notifications stored in Arabic by earlier versions into English. Safe to run on every start."""
@@ -275,7 +268,7 @@ def _migrate_profile_columns(c):
 
 
 def init():
-    c = sqlite3.connect(DB); c.executescript(SCHEMA)
+    c = sqlite3.connect(app.config["DATABASE"]); c.executescript(SCHEMA)
     _migrate_profile_columns(c)
     workflow_cols = {column[1] for column in c.execute("PRAGMA table_info(request_directions_workflows)")}
     if "interval_minutes" not in workflow_cols:
@@ -1427,21 +1420,6 @@ def _process_outscraper_job(job_id):
     finally:
         with _outscraper_workers_lock:
             _outscraper_workers.discard(job_id)
-
-def login_required(f):
-    @wraps(f)
-    def w(*a, **k):
-        if "uid" not in session: return redirect(url_for("login", next=request.path))
-        return f(*a, **k)
-    return w
-
-def admin_required(f):
-    @wraps(f)
-    @login_required
-    def w(*a, **k):
-        if session.get("role") != "admin": abort(403)
-        return f(*a, **k)
-    return w
 
 def fmt_hours(hs):
     hs, out, i = sorted(set(hs)), [], 0

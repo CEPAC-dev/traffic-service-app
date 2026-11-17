@@ -1,4 +1,28 @@
-"""Database schema. Connection helpers and migrations will move here in step 2."""
+"""Database access: the per-request connection and the schema.
+
+The database path lives in app.config["DATABASE"] (set in app.py), so tests and
+tools can point the app at another file without touching this module.
+Migrations (init) will move here in a later step.
+"""
+import sqlite3
+
+from flask import current_app, g
+
+
+def db():
+    """Return this request's SQLite connection, opening it on first use."""
+    if "db" not in g:
+        g.db = sqlite3.connect(current_app.config["DATABASE"])
+        g.db.row_factory = sqlite3.Row
+    return g.db
+
+
+def close_db(_exc=None):
+    """Registered with app.teardown_appcontext: close the connection when the request ends."""
+    connection = g.pop("db", None)
+    if connection:
+        connection.close()
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, name TEXT, email TEXT UNIQUE, pw TEXT, role TEXT DEFAULT 'client');

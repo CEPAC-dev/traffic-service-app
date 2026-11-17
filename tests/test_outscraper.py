@@ -2459,10 +2459,10 @@ class OutscraperWorkflowTests(unittest.TestCase):
 
     def test_startup_migrates_legacy_route_columns_before_status_refresh(self):
         directory = tempfile.TemporaryDirectory()
-        original_db = traffic.DB
+        original_db = traffic.app.config["DATABASE"]
         legacy_db = os.path.join(directory.name, "legacy.db")
         try:
-            traffic.DB = legacy_db
+            traffic.app.config["DATABASE"] = legacy_db
             legacy_schema = traffic.SCHEMA.replace(
                 ",\n  junction_quality_ack INTEGER NOT NULL DEFAULT 0, junction_quality_ack_at TEXT",
                 "",
@@ -2512,7 +2512,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
             poll.assert_called_once_with("legacy-provider")
             self.assertEqual(response.get_json()["status"], "completed")
         finally:
-            traffic.DB = original_db
+            traffic.app.config["DATABASE"] = original_db
             directory.cleanup()
 
     def test_csv_export_neutralizes_spreadsheet_formulas(self):
@@ -2597,7 +2597,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
                     (user_id, 1, kind, title, message),
                 )
             db.commit()
-            raw = sqlite3.connect(traffic.DB)
+            raw = sqlite3.connect(traffic.app.config["DATABASE"])
             try:
                 traffic._translate_legacy_notifications(raw)
                 raw.commit()
