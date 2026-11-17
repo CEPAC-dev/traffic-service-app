@@ -40,21 +40,29 @@ app.config["MAX_CONTENT_LENGTH"] = 300 * 1024 * 1024   # network files can be la
 app.config["OUTSCRAPER_AUTO_POLL"] = os.environ.get("TRAFFICLENS_OUTSCRAPER_AUTO_POLL", "1") != "0"
 app.config["MAINTENANCE_AUTO_START"] = os.environ.get("TRAFFICLENS_MAINTENANCE", "1") != "0"
 DB = os.environ.get("TRAFFICLENS_DB") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "mobility.db")
-SERVICES = {"lanes": "Number of lanes", "speed": "Speed", "travel": "Travel time", "length": "Length",
-            "freeflow_time": "Free flow time", "freeflow_speed": "Free flow speed", "capacity": "Capacity",
-            "volumes": "Traffic volumes"}
-PROFILE_JOB_TITLES = (
-    "Engineer", "Data Analyst", "Researcher", "Student", "Manager", "Other",
+from trafficlens.config import (
+    SERVICES,
+    PROFILE_JOB_TITLES,
+    PROFILE_PHOTO_MAX_BYTES,
+    PROFILE_PHOTO_SIZE,
+    ENGINEERING_SPECIALIZATIONS,
+    HIDDEN_SERVICES_BY_DEFAULT,
+    DATA_INTERVALS,
+    DEFAULT_DATA_INTERVAL,
+    STATUSES,
+    APP_NAME,
+    SERVICE_DEFAULTS,
+    FORMS,
+    MAX_GROUP_LINKS,
+    GROUP_MODES,
+    AUDIT_LABELS,
+    MAX_VOLUME_LANES,
+    MAX_VOLUME_PER_LANE,
+    SHARED_FLOW_SERVICES,
+    ABANDON_MESSAGE,
+    _f,
 )
-PROFILE_PHOTO_MAX_BYTES = 5 * 1024 * 1024
-PROFILE_PHOTO_SIZE = (512, 512)
-ENGINEERING_SPECIALIZATIONS = (
-    "Civil Engineering", "Transportation Engineering", "Traffic Engineering",
-    "Highway Engineering", "Structural Engineering", "Other",
-)
-HIDDEN_SERVICES_BY_DEFAULT = {"capacity"}
-DATA_INTERVALS = (5, 15, 30, 60)   # minutes between data points the client can ask for
-DEFAULT_DATA_INTERVAL = 15
+from trafficlens.db import SCHEMA
 
 def _clean_data_interval(raw):
     """Returns (minutes, error). Missing value -> the 15-minute default."""
@@ -66,138 +74,10 @@ def _clean_data_interval(raw):
     if minutes not in DATA_INTERVALS:
         return None, "Choose how often you want the data: " + ", ".join(str(x) for x in DATA_INTERVALS) + " minutes"
     return minutes, None
-STATUSES = ["Pending", "Processing", "Completed", "Rejected"]
-APP_NAME = "TrafficLens"   # change the app name here (shown in the header, page title and landing page)
 
-# Default explanation of each service. The admin can edit these texts from Admin > Services.
-SERVICE_DEFAULTS = {
- "lanes": {"icon": "\U0001F6E3\uFE0F", "desc": "The number of traffic lanes on the link."},
- "speed": {"icon": "\u26A1", "desc": "The average speed of vehicles on the link during each hour you selected."},
- "travel": {"icon": "\u23F1\uFE0F", "desc": "How long it takes to drive the whole link during each hour you selected."},
- "length": {"icon": "\U0001F4CF", "desc": "The length of the link, from its start (A) to its end (B)."},
- "freeflow_time": {"icon": "\U0001F552", "desc": "Travel time at 7:00 AM on the public holiday nearest to your study date in the route's country."},
- "freeflow_speed": {"icon": "\U0001F680", "desc": "Travel speed at 7:00 AM on a past weekly-weekend day in the route's country: the one nearest your study date when Traffic volumes is selected, otherwise the most recent one."},
- "capacity": {"icon": "\U0001F699", "desc": "The maximum number of vehicles that can pass through the link in one hour."},
- "volumes": {"icon": "\U0001F4CA", "desc": "Estimated hourly traffic volume calculated from lanes, actual speed, and weekly-weekend free-flow speed using the traffic model."},
-}
 
-# One form per service. kind="static": one value for the whole link. kind="hourly": one value per selected hour.
-def _f(kind, label, unit, hint): return {"kind": kind, "label": label, "unit": unit, "hint": hint}
-FORMS = {
- "lanes": _f("static", "Number of lanes", "lanes", "Enter the number of lanes of the link."),
- "length": _f("static", "Length", "km", "Enter the length of the link in kilometres."),
- "freeflow_speed": _f("static", "Free flow speed", "km/h", "Use Directions API on the latest weekly weekend date before today at 7:00 AM in the route's country."),
- "freeflow_time": _f("static", "Free flow time", "min", "Use Directions API for the nearest public holiday at 7:00 AM in the route's country."),
- "capacity": _f("static", "Capacity", "veh/h", "Enter the maximum number of vehicles per hour the link can carry."),
- "volumes": _f("hourly", "Estimated traffic volume", "veh/h", "Calculated from the traffic model after administrator review."),
- "speed": _f("hourly", "Average speed", "km/h", "Enter the average speed for each hour the client selected."),
- "travel": _f("hourly", "Travel time", "min", "Enter the travel time of the whole link for each hour the client selected."),
-}
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, name TEXT, email TEXT UNIQUE, pw TEXT, role TEXT DEFAULT 'client');
-CREATE TABLE IF NOT EXISTS requests(id INTEGER PRIMARY KEY, user_id INTEGER, created TEXT, d1 TEXT, d2 TEXT,
-  services TEXT, area TEXT, bbox TEXT, coords TEXT, status TEXT DEFAULT 'Pending', results TEXT,
-  type TEXT DEFAULT 'area', reply TEXT, reply_at TEXT, data TEXT, hours TEXT, path TEXT, road_km REAL, junctions INTEGER,
-  start_time TEXT, end_time TEXT, point_c TEXT, point_c_distance_km REAL,
-  show_point_c INTEGER NOT NULL DEFAULT 0, title TEXT,
-  junction_quality_ack INTEGER NOT NULL DEFAULT 0, junction_quality_ack_at TEXT);
-CREATE TABLE IF NOT EXISTS audit_log(
-  id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, user_id INTEGER, user_name TEXT,
-  role TEXT, action TEXT NOT NULL, request_id INTEGER, details TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_audit_request ON audit_log(request_id, id);
-CREATE TABLE IF NOT EXISTS service_info(key TEXT PRIMARY KEY, description TEXT);
-CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
-CREATE TABLE IF NOT EXISTS notifications(
-  id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id),
-  request_id INTEGER NOT NULL REFERENCES requests(id), kind TEXT NOT NULL,
-  title TEXT NOT NULL, message TEXT NOT NULL, created_at TEXT NOT NULL,
-  read_at TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_notifications_user_unread ON notifications(user_id, read_at, id);
-CREATE TABLE IF NOT EXISTS outscraper_jobs(
-  id TEXT PRIMARY KEY, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-  config_json TEXT NOT NULL, config_hash TEXT NOT NULL, approval_token_hash TEXT NOT NULL,
-  approval_status TEXT NOT NULL DEFAULT 'pending', execution_status TEXT NOT NULL DEFAULT 'awaiting_approval',
-  approved_at TEXT, rejected_at TEXT, started_at TEXT, completed_at TEXT,
-  estimated_cost REAL, estimated_currency TEXT, estimate_confidence TEXT NOT NULL DEFAULT 'unknown',
-  actual_cost REAL, actual_currency TEXT, provider_ids TEXT NOT NULL DEFAULT '[]',
-  error TEXT, result_count INTEGER NOT NULL DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS outscraper_job_routes(
-  id INTEGER PRIMARY KEY, job_id TEXT NOT NULL REFERENCES outscraper_jobs(id),
-  route_index INTEGER NOT NULL, origin TEXT NOT NULL, destination TEXT NOT NULL,
-  execution_status TEXT NOT NULL DEFAULT 'awaiting_approval', provider_request_id TEXT,
-  provider_status TEXT, submitted_at TEXT, completed_at TEXT, last_polled_at TEXT,
-  request_details_json TEXT, raw_response_json TEXT, result_count INTEGER NOT NULL DEFAULT 0, error TEXT,
-  UNIQUE(job_id, route_index)
-);
-CREATE INDEX IF NOT EXISTS idx_outscraper_jobs_created ON outscraper_jobs(created_at);
-CREATE INDEX IF NOT EXISTS idx_outscraper_jobs_status ON outscraper_jobs(approval_status, execution_status);
-CREATE INDEX IF NOT EXISTS idx_outscraper_routes_status ON outscraper_job_routes(execution_status);
-CREATE TABLE IF NOT EXISTS request_directions_workflows(
-  job_id TEXT PRIMARY KEY REFERENCES outscraper_jobs(id),
-  request_id INTEGER NOT NULL REFERENCES requests(id),
-  status TEXT NOT NULL DEFAULT 'awaiting_response',
-  interval_seconds INTEGER NOT NULL,
-  interval_minutes INTEGER,
-  result_json TEXT,
-  error TEXT,
-  confirmed_by INTEGER REFERENCES users(id),
-  confirmed_at TEXT,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_request_directions_request ON request_directions_workflows(request_id, created_at);
-CREATE TABLE IF NOT EXISTS volumes_workflows(
-  request_id INTEGER PRIMARY KEY REFERENCES requests(id),
-  status TEXT NOT NULL DEFAULT 'waiting_for_inputs',
-  lanes REAL,
-  actual_result_json TEXT,
-  freeflow_speed REAL,
-  freeflow_accepted INTEGER NOT NULL DEFAULT 0,
-  freeflow_result_json TEXT,
-  freeflow_validation_json TEXT,
-  freeflow_override INTEGER NOT NULL DEFAULT 0,
-  freeflow_accepted_at TEXT,
-  freeflow_job_id TEXT,
-  result_json TEXT,
-  workbook_path TEXT,
-  error TEXT,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  reviewed_by INTEGER REFERENCES users(id),
-  reviewed_at TEXT,
-  sent_at TEXT
-);
-CREATE TABLE IF NOT EXISTS volume_freeflow_attempts(
-  job_id TEXT PRIMARY KEY REFERENCES outscraper_jobs(id),
-  request_id INTEGER NOT NULL REFERENCES requests(id),
-  submitted_at TEXT NOT NULL,
-  status TEXT NOT NULL,
-  result_json TEXT,
-  validation_json TEXT,
-  error TEXT,
-  accepted INTEGER NOT NULL DEFAULT 0,
-  override INTEGER NOT NULL DEFAULT 0,
-  accepted_at TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_volume_freeflow_attempts_request
-  ON volume_freeflow_attempts(request_id,submitted_at);
-CREATE TABLE IF NOT EXISTS request_groups(
-  id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), title TEXT,
-  created TEXT NOT NULL, study_date TEXT NOT NULL, services TEXT NOT NULL,
-  mode TEXT NOT NULL, sent_at TEXT
-);
-CREATE TABLE IF NOT EXISTS periods(
-  id INTEGER PRIMARY KEY, label TEXT NOT NULL UNIQUE,
-  is_active INTEGER NOT NULL DEFAULT 1, sort_order INTEGER NOT NULL DEFAULT 0
-);
-"""
 
-MAX_GROUP_LINKS = 10
-GROUP_MODES = ("single", "multi_period", "multi_link")
 
 def db():
     if "db" not in g:
@@ -228,17 +108,6 @@ def audit(action, request_id=None, **details):
     except sqlite3.Error as exc:
         app.logger.warning("audit log write failed: %s", exc)
 
-AUDIT_LABELS = {
-    "request_saved": "Request saved",
-    "status_changed": "Status changed",
-    "service_saved": "Service value saved",
-    "directions_confirmed": "Directions result approved",
-    "volumes_lanes_saved": "Lane count saved",
-    "volumes_freeflow_accepted": "Free-flow speed accepted",
-    "volumes_retry_requested": "MATLAB retry requested",
-    "volumes_approved": "Volumes approved and sent to the client",
-    "volumes_run_interrupted": "MATLAB run interrupted by an app restart",
-}
 
 def _audit_details_text(raw):
     try:
@@ -1193,8 +1062,6 @@ def _volume_result_warnings(result):
             warnings.append(f"{label}: the RMSE tolerance is larger than the estimated volume.")
     return warnings
 
-MAX_VOLUME_LANES = 12
-MAX_VOLUME_PER_LANE = 2400  # veh/h/lane, above typical saturation flow
 
 def _start_volume_calculation(request_id):
     _sync_volume_actual_speeds(request_id)
@@ -2342,7 +2209,6 @@ def create_request():
 # existing admin workflow (volumes, directions, free flow...) keeps working;
 # `request_groups` ties the rows together for intake, review and one report.
 # ---------------------------------------------------------------------------
-SHARED_FLOW_SERVICES = ("freeflow_time", "freeflow_speed")
 
 def _flow_is_shared(services, service):
     """Free flow time/speed describe the link, not the study period, so one API result serves every period of a link.
@@ -3843,10 +3709,6 @@ def refresh_outscraper_job(job_id):
     status = _refresh_job_status(job_id)
     return jsonify(ok=True, status=status, routes=polled)
 
-ABANDON_MESSAGE = (
-    "Stopped waiting: the Scraper returned no data. The original request is kept in history; "
-    "a new request can be prepared and approved."
-)
 
 @app.post("/api/outscraper/<job_id>/abandon")
 @admin_required

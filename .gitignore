@@ -14,3 +14,6 @@ outscraper_exports/
 *.asv
 instance/
 backups/
+*.patch
+.vscode/
+.idea/
