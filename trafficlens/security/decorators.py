@@ -8,7 +8,7 @@ def login_required(f):
     """Send visitors who are not signed in to the login page."""
     @wraps(f)
     def w(*a, **k):
-        if "uid" not in session: return redirect(url_for("login", next=request.path))
+        if "uid" not in session: return redirect(url_for("public.login", next=request.path))
         return f(*a, **k)
     return w
 

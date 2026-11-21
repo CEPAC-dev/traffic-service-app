@@ -1,5 +1,5 @@
 {% extends "base.html" %}{% block body %}
-<div class="banner dashboard-banner"><div><span class="eyebrow">OUTSCRAPER · GOOGLE MAPS DIRECTIONS</span><h1>Directions requests</h1><p>Configure routes, preview the exact submission, then make a separate approval decision.</p></div><a class="btn alt" href="{{ url_for('admin') }}">Admin dashboard</a></div>
+<div class="banner dashboard-banner"><div><span class="eyebrow">OUTSCRAPER · GOOGLE MAPS DIRECTIONS</span><h1>Directions requests</h1><p>Configure routes, preview the exact submission, then make a separate approval decision.</p></div><a class="btn alt" href="{{ url_for('admin.admin') }}">Admin dashboard</a></div>
 <div class="outscraper-notice {{ 'ok' if api_configured else 'tip' }}" role="status">
   {% if api_configured %}API key is configured on the server. Its value is never shown in this page.{% else %}API key not configured. Copy <code>.env.example</code> to <code>.env</code>, set <code>OUTSCRAPER_API_KEY</code>, then restart the app.{% endif %}
   <p>Pricing is not verified for this endpoint: each preview says <b>Cost unknown</b>; provider billable units and actual per-request cost are unavailable. Execution remains blocked unless you explicitly approve despite that uncertainty.</p>
@@ -42,7 +42,7 @@
   <div class="section-heading"><div><h2>Request history</h2><p>Provider API submissions are shown separately from provider billable units.</p></div></div>
   <form class="request-toolbar" method="get">
     <div class="bar"><input type="search" name="q" placeholder="Filter by origin or destination" value="{{filters.q}}"><input type="date" name="from" aria-label="From date" value="{{filters.from}}"><input type="date" name="to" aria-label="To date" value="{{filters.to}}">
-      <select name="status"><option value="">All statuses</option>{% for value in ('pending','approved','rejected','invalidated','awaiting_approval','submitting','running','completed','failed','unknown','abandoned') %}<option value="{{value}}" {{ 'selected' if filters.status==value }}>{{value|replace('_',' ')|title}}</option>{% endfor %}</select><button class="btn" type="submit">Filter</button><a class="btn alt" href="{{url_for('admin_outscraper')}}">Clear</a></div>
+      <select name="status"><option value="">All statuses</option>{% for value in ('pending','approved','rejected','invalidated','awaiting_approval','submitting','running','completed','failed','unknown','abandoned') %}<option value="{{value}}" {{ 'selected' if filters.status==value }}>{{value|replace('_',' ')|title}}</option>{% endfor %}</select><button class="btn" type="submit">Filter</button><a class="btn alt" href="{{url_for('outscraper_admin.admin_outscraper')}}">Clear</a></div>
   </form>
   <div class="tw"><table><thead><tr><th>Internal ID</th><th>Created</th><th>Routes</th><th>Approval</th><th>Execution</th><th>Provider ID(s)</th><th>Results</th><th>Estimated cost / currency</th><th>Actual cost / currency</th><th></th></tr></thead><tbody>
   {% for job in jobs %}<tr>
@@ -53,7 +53,7 @@
     <td>{% for provider_id in job.provider_ids %}<code>{{provider_id}}</code>{% else %}—{% endfor %}</td>
     <td>{{job.result_count}} · {% if job.result_count %}Available{% elif job.execution_status=='completed' %}Empty{% else %}Not ready{% endif %}</td>
     <td>Cost unknown · currency unknown</td><td>Unavailable · currency unknown</td>
-    <td><a class="btn" href="{{url_for('outscraper_job_detail',job_id=job.id)}}">Open</a></td>
+    <td><a class="btn" href="{{url_for('outscraper_admin.outscraper_job_detail',job_id=job.id)}}">Open</a></td>
   </tr>{% else %}<tr><td colspan="10">No Outscraper requests match these filters.</td></tr>{% endfor %}
   </tbody></table></div>
   {% if jobs|length==250 %}<p class="sub">Showing the latest 250 matching requests.</p>{% endif %}

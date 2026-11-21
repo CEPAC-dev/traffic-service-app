@@ -14,6 +14,7 @@ os.environ.setdefault("TRAFFICLENS_OUTSCRAPER_AUTO_POLL", "0")
 os.environ.setdefault("TRAFFICLENS_MAINTENANCE", "0")  # no scheduled backups or cleanup during tests
 
 import app as traffic
+from trafficlens.services import network_links as network_links_svc, notifications as notifications_svc, request_groups as request_groups_svc
 
 
 def link(offset=0.0, with_c=True):
@@ -57,7 +58,7 @@ class RequestGroupTests(unittest.TestCase):
         body = {"mode": "multi_link", "services": ["travel"], "date": "2026-10-24", "title": "Junction",
                 "links": [link(0), link(0.01), link(0.02)], "periods": [PERIODS[0]]}
         body.update(overrides)
-        with mock.patch.object(traffic, "apply_network", return_value=None):
+        with mock.patch.object(network_links_svc, "apply_network", return_value=None):
             return client.post("/api/request-groups", json=body)
 
     def test_links_times_periods_become_one_group_of_ordinary_requests(self):
@@ -148,7 +149,7 @@ class RequestGroupTests(unittest.TestCase):
         data = self.submit(client).get_json()
         with traffic.app.app_context():
             before = traffic.db().execute("SELECT COUNT(*) FROM notifications WHERE user_id=?", (self.client_id,)).fetchone()[0]
-            traffic._create_notification(self.client_id, data["request_ids"][0], "admin_reply", "Reply", "child level")
+            notifications_svc._create_notification(self.client_id, data["request_ids"][0], "admin_reply", "Reply", "child level")
             traffic.db().commit()
             after = traffic.db().execute("SELECT COUNT(*) FROM notifications WHERE user_id=?", (self.client_id,)).fetchone()[0]
         self.assertEqual(before, after)
@@ -157,7 +158,7 @@ class RequestGroupTests(unittest.TestCase):
         client = self.login(self.client_id, "client", "Group client")
         data = self.submit(client).get_json()
         with traffic.app.app_context():
-            traffic._delete_requests(data["request_ids"])
+            request_groups_svc._delete_requests(data["request_ids"])
             left = traffic.db().execute("SELECT COUNT(*) FROM request_groups WHERE id=?", (data["group_id"],)).fetchone()[0]
         self.assertEqual(left, 0)
 

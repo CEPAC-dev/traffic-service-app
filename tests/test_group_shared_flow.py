@@ -14,6 +14,7 @@ os.environ.setdefault("SECRET_KEY", "unit-test-session-secret-that-is-long-enoug
 os.environ.setdefault("TRAFFICLENS_OUTSCRAPER_AUTO_POLL", "0")
 
 import app as traffic
+from trafficlens.services import network_links as network_links_svc, request_groups as request_groups_svc
 
 
 def link(offset=0.0):
@@ -50,7 +51,7 @@ class SharedFreeFlowTests(unittest.TestCase):
     def order(self, links=1, services=("freeflow_time", "travel"), periods=PERIODS):
         body = {"mode": "multi_period" if links == 1 else "multi_link", "services": list(services), "date": "2026-10-24",
                 "links": [link(i / 100) for i in range(links)], "periods": periods if links == 1 else periods[:1]}
-        with mock.patch.object(traffic, "apply_network", return_value=None):
+        with mock.patch.object(network_links_svc, "apply_network", return_value=None):
             response = self.client.post("/api/request-groups", json=body)
         self.assertEqual(response.status_code, 200, response.get_json())
         return response.get_json()
@@ -64,10 +65,10 @@ class SharedFreeFlowTests(unittest.TestCase):
         a, b, c = self.order()["request_ids"]
         with traffic.app.app_context():
             rows = {rid: traffic.db().execute("SELECT * FROM requests WHERE id=?", (rid,)).fetchone() for rid in (a, b, c)}
-            self.assertIsNone(traffic._shared_flow_leader(rows[a], "freeflow_time"))
-            self.assertEqual(traffic._shared_flow_leader(rows[b], "freeflow_time"), a)
-            self.assertEqual(traffic._shared_flow_leader(rows[c], "freeflow_time"), a)
-            self.assertIsNone(traffic._shared_flow_leader(rows[b], "travel"))   # depends on the period
+            self.assertIsNone(request_groups_svc._shared_flow_leader(rows[a], "freeflow_time"))
+            self.assertEqual(request_groups_svc._shared_flow_leader(rows[b], "freeflow_time"), a)
+            self.assertEqual(request_groups_svc._shared_flow_leader(rows[c], "freeflow_time"), a)
+            self.assertIsNone(request_groups_svc._shared_flow_leader(rows[b], "travel"))   # depends on the period
 
     def test_no_second_directions_request_can_be_prepared_for_a_follower(self):
         a, b, _ = self.order()["request_ids"]
@@ -100,7 +101,7 @@ class SharedFreeFlowTests(unittest.TestCase):
         self.assertEqual(len(data["request_ids"]), 2)   # two links x one period: nothing to share, both are owners
         with traffic.app.app_context():
             rows = [traffic.db().execute("SELECT * FROM requests WHERE id=?", (rid,)).fetchone() for rid in data["request_ids"]]
-            self.assertTrue(all(traffic._shared_flow_leader(r, "freeflow_time") is None for r in rows))
+            self.assertTrue(all(request_groups_svc._shared_flow_leader(r, "freeflow_time") is None for r in rows))
 
     def test_admin_sees_one_row_per_order_and_a_complete_draft_report(self):
         data = self.order()

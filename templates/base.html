@@ -4,38 +4,38 @@
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script></head><body>
-{% set dashboard_url = url_for('admin') if me.get('role')=='admin' else url_for('dashboard') if me.get('uid') else url_for('index') %}
+{% set dashboard_url = url_for('admin.admin') if me.get('role')=='admin' else url_for('client.dashboard') if me.get('uid') else url_for('public.index') %}
 {% if me.get('uid') %}
 <div class="app-shell" id="appShell">
 <aside class="app-sidebar" id="appSidebar" aria-label="Main navigation">
   <a class="sidebar-brand" href="{{dashboard_url}}"><span class="sidebar-brand-icon">T</span><span>{{APP_NAME}}</span></a>
-  <div class="sidebar-account"><span class="account-avatar">{% if me.get('profile_image') %}<img src="{{url_for('profile_photo')}}" alt="">{% else %}{{me.get('name','U')[:1]|upper}}{% endif %}</span><span><b>{{me.get('name')}}</b><small>{{'Administrator' if me.get('role')=='admin' else 'Client account'}}</small></span></div>
+  <div class="sidebar-account"><span class="account-avatar">{% if me.get('profile_image') %}<img src="{{url_for('profile.profile_photo')}}" alt="">{% else %}{{me.get('name','U')[:1]|upper}}{% endif %}</span><span><b>{{me.get('name')}}</b><small>{{'Administrator' if me.get('role')=='admin' else 'Client account'}}</small></span></div>
   <nav class="sidebar-nav">
     <span class="sidebar-label">WORKSPACE</span>
     {% if me.get('role')=='admin' %}
-    <a class="side-link" href="{{url_for('admin')}}#overview" data-section="overview"><span class="side-icon">▦</span>Dashboard</a>
-    <div class="side-group"><a class="side-link" href="{{url_for('admin')}}#requests-all" data-section="requests"><span class="side-icon">▤</span>Requests</a>
+    <a class="side-link" href="{{url_for('admin.admin')}}#overview" data-section="overview"><span class="side-icon">▦</span>Dashboard</a>
+    <div class="side-group"><a class="side-link" href="{{url_for('admin.admin')}}#requests-all" data-section="requests"><span class="side-icon">▤</span>Requests</a>
       <div class="side-subnav">
-        <a href="{{url_for('admin')}}#requests-all" data-request-filter="">All requests</a>
-        <a href="{{url_for('admin')}}#requests-pending" data-request-filter="Pending">Pending</a>
-        <a href="{{url_for('admin')}}#requests-processing" data-request-filter="Processing">Processing</a>
-        <a href="{{url_for('admin')}}#requests-review" data-request-filter="review">Waiting for review</a>
-        <a href="{{url_for('admin')}}#requests-completed" data-request-filter="Completed">Completed</a>
-        <a href="{{url_for('admin_outscraper')}}">Directions API history</a>
+        <a href="{{url_for('admin.admin')}}#requests-all" data-request-filter="">All requests</a>
+        <a href="{{url_for('admin.admin')}}#requests-pending" data-request-filter="Pending">Pending</a>
+        <a href="{{url_for('admin.admin')}}#requests-processing" data-request-filter="Processing">Processing</a>
+        <a href="{{url_for('admin.admin')}}#requests-review" data-request-filter="review">Waiting for review</a>
+        <a href="{{url_for('admin.admin')}}#requests-completed" data-request-filter="Completed">Completed</a>
+        <a href="{{url_for('outscraper_admin.admin_outscraper')}}">Directions API history</a>
       </div>
     </div>
-    <a class="side-link" href="{{url_for('admin')}}#services" data-section="services"><span class="side-icon">◇</span>Services</a>
-    <a class="side-link" href="{{url_for('admin')}}#users" data-section="users"><span class="side-icon">♙</span>Users</a>
-    <a class="side-link" href="{{url_for('admin')}}#network" data-section="network"><span class="side-icon">⌖</span>Road network</a>
-    <a class="side-link" href="{{url_for('admin_profile')}}"><span class="side-icon">◎</span>Profile</a>
+    <a class="side-link" href="{{url_for('admin.admin')}}#services" data-section="services"><span class="side-icon">◇</span>Services</a>
+    <a class="side-link" href="{{url_for('admin.admin')}}#users" data-section="users"><span class="side-icon">♙</span>Users</a>
+    <a class="side-link" href="{{url_for('admin.admin')}}#network" data-section="network"><span class="side-icon">⌖</span>Road network</a>
+    <a class="side-link" href="{{url_for('profile.admin_profile')}}"><span class="side-icon">◎</span>Profile</a>
     {% else %}
-    <a class="side-link" href="{{url_for('dashboard')}}"><span class="side-icon">▦</span>Home</a>
-    <a class="side-link" href="{{url_for('study')}}"><span class="side-icon">◇</span>Services</a>
-    <a class="side-link" href="{{url_for('my_requests')}}"><span class="side-icon">▤</span>My requests</a>
-    <a class="side-link" href="{{url_for('profile')}}"><span class="side-icon">◎</span>Profile</a>
+    <a class="side-link" href="{{url_for('client.dashboard')}}"><span class="side-icon">▦</span>Home</a>
+    <a class="side-link" href="{{url_for('client.study')}}"><span class="side-icon">◇</span>Services</a>
+    <a class="side-link" href="{{url_for('client.my_requests')}}"><span class="side-icon">▤</span>My requests</a>
+    <a class="side-link" href="{{url_for('profile.profile')}}"><span class="side-icon">◎</span>Profile</a>
     {% endif %}
   </nav>
-  <a class="side-link sidebar-logout" href="{{url_for('logout')}}"><span class="side-icon">↪</span>Log out</a>
+  <a class="side-link sidebar-logout" href="{{url_for('public.logout')}}"><span class="side-icon">↪</span>Log out</a>
 </aside>
 <button class="sidebar-scrim" id="sidebarScrim" aria-label="Close navigation" type="button" hidden></button>
 <div class="app-main">
@@ -53,15 +53,15 @@
               <button type="button" id="notifClear" class="danger-text">Clear all</button>
             </div></div>
           <ul class="notif-items" id="notifItems" aria-live="polite"></ul>
-          <div class="notif-foot"><a href="{{url_for('notifications')}}">View all notifications</a></div>
+          <div class="notif-foot"><a href="{{url_for('notifications.notifications')}}">View all notifications</a></div>
         </section>
       </div>
-      <details class="profile-menu"><summary><span class="account-avatar">{% if me.get('profile_image') %}<img src="{{url_for('profile_photo')}}" alt="">{% else %}{{me.get('name','U')[:1]|upper}}{% endif %}</span><span class="profile-menu-name">{{me.get('name')}}</span><span class="profile-menu-caret">⌄</span></summary><div class="profile-menu-popover"><small>Signed in as</small><b>{{me.get('name')}}</b><a href="{{url_for('admin_profile') if me.get('role')=='admin' else url_for('profile')}}">View profile</a></div></details>
+      <details class="profile-menu"><summary><span class="account-avatar">{% if me.get('profile_image') %}<img src="{{url_for('profile.profile_photo')}}" alt="">{% else %}{{me.get('name','U')[:1]|upper}}{% endif %}</span><span class="profile-menu-name">{{me.get('name')}}</span><span class="profile-menu-caret">⌄</span></summary><div class="profile-menu-popover"><small>Signed in as</small><b>{{me.get('name')}}</b><a href="{{url_for('profile.admin_profile') if me.get('role')=='admin' else url_for('profile.profile')}}">View profile</a></div></details>
     </div>
   </header>
   <main class="app-content">
 {% else %}
-<div class="public-shell"><header class="public-topbar"><a class="brand" href="{{url_for('index')}}">🚦 {{APP_NAME}}</a><nav><a href="{{url_for('index')}}">Home</a><a href="{{url_for('login')}}">Sign in</a><a href="{{url_for('register')}}">Create account</a></nav></header><main class="public-content">
+<div class="public-shell"><header class="public-topbar"><a class="brand" href="{{url_for('public.index')}}">🚦 {{APP_NAME}}</a><nav><a href="{{url_for('public.index')}}">Home</a><a href="{{url_for('public.login')}}">Sign in</a><a href="{{url_for('public.register')}}">Create account</a></nav></header><main class="public-content">
 {% endif %}
 {% for category, m in get_flashed_messages(with_categories=true) %}<div class="flash flash-{{category}}" role="status">{{ m }}</div>{% endfor %}
 {% block body %}{% endblock %}
@@ -79,7 +79,7 @@ if(appShell&&sidebarToggle){
 }
 const notificationBadge=document.getElementById('notificationBadge');
 if(notificationBadge){
- const refreshNotificationCount=async()=>{try{const response=await fetch('{{url_for("notification_unread_count")}}');if(!response.ok)throw new Error(`Notification count returned HTTP ${response.status}`);const data=await response.json();notificationBadge.textContent=data.count;notificationBadge.hidden=!data.count}catch(error){console.warn('Unable to refresh notification count.',error)}};
+ const refreshNotificationCount=async()=>{try{const response=await fetch('{{url_for("notifications.notification_unread_count")}}');if(!response.ok)throw new Error(`Notification count returned HTTP ${response.status}`);const data=await response.json();notificationBadge.textContent=data.count;notificationBadge.hidden=!data.count}catch(error){console.warn('Unable to refresh notification count.',error)}};
  window.setInterval(refreshNotificationCount,30000);
  const userCursorKey='trafficlens-notification-cursor-{{me.uid}}';
  let lastNotificationId=Number(localStorage.getItem(userCursorKey));
@@ -93,7 +93,7 @@ if(notificationBadge){
   if(notificationPollBusy||!notificationWorker||Notification.permission!=='granted')return;
   notificationPollBusy=true;
   try{
-   const response=await fetch(`{{url_for("notification_device_feed")}}?after=${lastNotificationId}`,{cache:'no-store'});
+   const response=await fetch(`{{url_for("notifications.notification_device_feed")}}?after=${lastNotificationId}`,{cache:'no-store'});
    if(!response.ok)throw new Error(`Notification feed returned HTTP ${response.status}`);
    const data=await response.json();
    for(const item of data.notifications){
@@ -146,7 +146,7 @@ if(notifToggle){
    del.onclick=async()=>{try{const j=await api(`/api/notifications/${item.id}/delete`);setBadge(j.unread);li.remove();if(!list.children.length)empty('No notifications.')}catch(e){alert(e.message)}};
    actions.append(toggle,del);li.append(link,actions);return li}));
  };
- const load=async()=>{try{const r=await fetch('{{url_for("notification_menu_items")}}',{cache:'no-store'});if(!r.ok)throw new Error(`HTTP ${r.status}`);const j=await r.json();setBadge(j.unread);render(j.notifications)}catch(e){empty('Could not load notifications. Try Refresh.')}};
+ const load=async()=>{try{const r=await fetch('{{url_for("notifications.notification_menu_items")}}',{cache:'no-store'});if(!r.ok)throw new Error(`HTTP ${r.status}`);const j=await r.json();setBadge(j.unread);render(j.notifications)}catch(e){empty('Could not load notifications. Try Refresh.')}};
  const setOpen=open=>{panel.hidden=!open;notifToggle.setAttribute('aria-expanded',String(open));if(open)load()};
  notifToggle.addEventListener('click',e=>{e.stopPropagation();setOpen(panel.hidden)});
  document.addEventListener('click',e=>{if(!panel.hidden&&!document.getElementById('notifMenu').contains(e.target))setOpen(false)});

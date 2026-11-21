@@ -1,6 +1,6 @@
 {% extends "base.html" %}{% block body %}
 <div class="page-heading">
-  <div><a class="detail-back-link" href="{{url_for('my_requests')}}">← My requests</a><span class="eyebrow">REQUEST DETAILS</span><h1 id="requestTitleHeading">REQ-{{r.id}}{% if r.title %} · {{r.title}}{% endif %}</h1><p>Submitted {{r.created}}</p></div>
+  <div><a class="detail-back-link" href="{{url_for('client.my_requests')}}">← My requests</a><span class="eyebrow">REQUEST DETAILS</span><h1 id="requestTitleHeading">REQ-{{r.id}}{% if r.title %} · {{r.title}}{% endif %}</h1><p>Submitted {{r.created}}</p></div>
   <span class="b {{r.status}}">{{r.status}}</span>
 </div>
 <div class="request-detail-grid">
@@ -9,8 +9,8 @@
 </div>
 <div class="row-actions request-detail-actions">
   <button class="btn alt" id="renameRequest" type="button">{% if r.title %}Rename request{% else %}Name this request{% endif %}</button><span class="msg" id="renameMessage" aria-live="polite"></span>
-  {% if r.results_available %}<a class="btn" href="{{url_for('result',rid=r.id)}}">View results</a>{% endif %}
-  <a class="btn alt" href="{{url_for('study',repeat_request_id=r.id)}}">Create a similar request</a>
+  {% if r.results_available %}<a class="btn" href="{{url_for('client.result',rid=r.id)}}">View results</a>{% endif %}
+  <a class="btn alt" href="{{url_for('client.study',repeat_request_id=r.id)}}">Create a similar request</a>
 </div>
 <script>
 document.getElementById('renameRequest').onclick=async()=>{

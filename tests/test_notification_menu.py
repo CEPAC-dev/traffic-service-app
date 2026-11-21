@@ -10,6 +10,7 @@ os.environ.setdefault("SECRET_KEY", "unit-test-session-secret-that-is-long-enoug
 os.environ.setdefault("TRAFFICLENS_OUTSCRAPER_AUTO_POLL", "0")
 
 import app as traffic
+from trafficlens.services import network_links as network_links_svc, notifications as notifications_svc
 
 
 class NotificationMenuTests(unittest.TestCase):
@@ -29,12 +30,12 @@ class NotificationMenuTests(unittest.TestCase):
             "path": [[30.138239, 31.395698], [30.137423, 31.393946]], "road_km": 0.19, "junctions": 0,
             "no_junctions": True, "point_c": [30.129997, 31.383281], "point_c_distance_km": 1.7}],
             "periods": [{"label": "AM", "start_time": "07:00:00", "end_time": "08:00:00"}]}
-        with mock.patch.object(traffic, "apply_network", return_value=None):
+        with mock.patch.object(network_links_svc, "apply_network", return_value=None):
             self.request_id = self.owner.post("/api/request-groups", json=body).get_json()["id"]
         with traffic.app.app_context():
             for owner, n in ((self.owner_id, 3), (self.other_id, 1)):
                 for i in range(n):
-                    traffic._create_notification(owner, self.request_id, "admin_reply", f"Title {i}", f"Message {i}")
+                    notifications_svc._create_notification(owner, self.request_id, "admin_reply", f"Title {i}", f"Message {i}")
             traffic.db().commit()
 
     def login(self, uid, name):

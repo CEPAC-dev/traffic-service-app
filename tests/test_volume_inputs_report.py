@@ -14,6 +14,7 @@ os.environ.setdefault("SECRET_KEY", "unit-test-session-secret-that-is-long-enoug
 os.environ.setdefault("TRAFFICLENS_OUTSCRAPER_AUTO_POLL", "0")
 
 import app as traffic
+from trafficlens.services import network_links as network_links_svc
 
 LINK = {"coords": [[30.138239, 31.395698], [30.137423, 31.393946]],
         "path": [[30.138239, 31.395698], [30.137423, 31.393946]], "road_km": 0.19, "junctions": 0,
@@ -33,7 +34,7 @@ class VolumeInputsReportTests(unittest.TestCase):
         self.admin = self.login(ids["vol-admin@example.test"], "admin", "Vol admin")
         self.client = self.login(ids["vol-client@example.test"], "client", "Vol client")
         body = {"mode": "multi_period", "services": ["volumes"], "date": "2026-10-24", "links": [LINK], "periods": PERIODS}
-        with mock.patch.object(traffic, "apply_network", return_value=None):
+        with mock.patch.object(network_links_svc, "apply_network", return_value=None):
             data = self.client.post("/api/request-groups", json=body).get_json()
         self.gid, self.ids = data["group_id"], data["request_ids"]
         with traffic.app.app_context():

@@ -13,6 +13,8 @@ os.environ.setdefault("TRAFFICLENS_OUTSCRAPER_AUTO_POLL", "0")
 os.environ.setdefault("TRAFFICLENS_MAINTENANCE", "0")
 
 import app as traffic
+from trafficlens.config import DATA_INTERVALS
+from trafficlens.services import directions as directions_svc, network_links as network_links_svc
 
 
 def link(offset=0.0):
@@ -45,7 +47,7 @@ class DataIntervalTests(unittest.TestCase):
         body = {"mode": "single", "services": ["travel"], "date": "2026-10-24", "title": "Interval road",
                 "links": [link()], "periods": [PERIOD]}
         body.update(extra)
-        with mock.patch.object(traffic, "apply_network", return_value=None):
+        with mock.patch.object(network_links_svc, "apply_network", return_value=None):
             return self.client.post("/api/request-groups", json=body)
 
     def stored_interval(self, request_id):
@@ -77,7 +79,7 @@ class DataIntervalTests(unittest.TestCase):
         page = self.client.get("/study")
         self.assertEqual(page.status_code, 200)
         html = page.data.decode()
-        for minutes in traffic.DATA_INTERVALS:
+        for minutes in DATA_INTERVALS:
             self.assertIn(f'name="data_interval" value="{minutes}"', html)
         self.assertRegex(html, r'value="15" checked')
         self.assertIn('id="svcAll"', html)
@@ -105,7 +107,7 @@ class DataIntervalTests(unittest.TestCase):
             d = traffic.db()
             legacy = self.order().get_json()["id"]
             d.execute("UPDATE requests SET data_interval=NULL WHERE id=?", (legacy,)); d.commit()
-            prefill = lambda rid: traffic._outscraper_prefill_from_request(
+            prefill = lambda rid: directions_svc._outscraper_prefill_from_request(
                 d.execute("SELECT * FROM requests WHERE id=?", (rid,)).fetchone(), "travel")["prefill_config"]
             self.assertEqual(prefill(chosen)["interval"], 30)
             self.assertEqual(prefill(legacy)["interval"], 1)

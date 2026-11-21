@@ -6,26 +6,26 @@
       <h1>My Profile</h1>
       <p>Manage your personal and professional information.</p>
     </div>
-    <a class="btn alt profile-logout" href="{{url_for('logout')}}">Log out</a>
+    <a class="btn alt profile-logout" href="{{url_for('public.logout')}}">Log out</a>
   </div>
 
   <section class="card profile-card profile-photo-card" aria-labelledby="profilePhotoHeading">
     <div class="profile-photo-preview">
       {% if profile_user.profile_image %}
-      <img class="profile-photo-image" src="{{url_for('profile_photo')}}" alt="Your profile photo">
+      <img class="profile-photo-image" src="{{url_for('profile.profile_photo')}}" alt="Your profile photo">
       {% else %}
       <span class="profile-photo-placeholder" aria-hidden="true">{{profile_user.first_name[:1]|upper if profile_user.first_name else 'U'}}</span>
       {% endif %}
       <div><h2 id="profilePhotoHeading">Profile photo</h2><p>Choose a clear photo to personalize your account.</p><small>JPG, PNG, or WebP · up to 5 MB</small></div>
     </div>
     <div class="profile-photo-actions">
-      <form method="post" action="{{url_for('update_profile_photo')}}" enctype="multipart/form-data" class="profile-photo-upload">
+      <form method="post" action="{{url_for('profile.update_profile_photo')}}" enctype="multipart/form-data" class="profile-photo-upload">
         <label class="profile-photo-file-label" for="profilePhoto">Choose photo</label>
         <input id="profilePhoto" name="photo" type="file" accept="image/jpeg,image/png,image/webp" required>
         <button class="btn profile-save" type="submit">Upload Photo</button>
       </form>
       {% if profile_user.profile_image %}
-      <form method="post" action="{{url_for('update_profile_photo')}}" onsubmit="return confirm('Remove your profile photo?')">
+      <form method="post" action="{{url_for('profile.update_profile_photo')}}" onsubmit="return confirm('Remove your profile photo?')">
         <input type="hidden" name="remove_photo" value="1">
         <button class="btn alt profile-photo-remove" type="submit">Remove photo</button>
       </form>
@@ -37,7 +37,7 @@
     <div class="profile-card-heading">
       <div><h2 id="profileInformationHeading">Personal information</h2><p>Fields marked required must be completed.</p></div>
     </div>
-    <form method="post" action="{{url_for('update_profile')}}" class="profile-form">
+    <form method="post" action="{{url_for('profile.update_profile')}}" class="profile-form">
       <div class="profile-fields">
         <div class="profile-field">
           <label for="profileFirstName">First Name <span>Required</span></label>
@@ -95,7 +95,7 @@
     <div class="profile-card-heading">
       <div><h2 id="changePasswordHeading">Change password</h2><p>Confirm your current password before choosing a new one.</p></div>
     </div>
-    <form method="post" action="{{url_for('change_password')}}" class="profile-form profile-password-form">
+    <form method="post" action="{{url_for('profile.change_password')}}" class="profile-form profile-password-form">
       <div class="profile-fields">
         <div class="profile-field"><label for="currentPassword">Current password <span>Required</span></label><input id="currentPassword" name="current_password" type="password" autocomplete="current-password" required></div>
         <div class="profile-field"><label for="newPassword">New password <span>Required</span></label><input id="newPassword" name="new_password" type="password" minlength="6" autocomplete="new-password" required><small class="profile-field-hint">At least 6 characters.</small></div>

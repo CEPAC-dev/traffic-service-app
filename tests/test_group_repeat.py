@@ -13,6 +13,7 @@ os.environ.setdefault("TRAFFICLENS_OUTSCRAPER_AUTO_POLL", "0")
 os.environ.setdefault("TRAFFICLENS_MAINTENANCE", "0")
 
 import app as traffic
+from trafficlens.services import network_links as network_links_svc
 
 
 def link(offset=0.0):
@@ -54,7 +55,7 @@ class RepeatGroupTests(unittest.TestCase):
         body = {"mode": "multi_link", "services": ["travel"], "date": "2026-10-24", "title": "Gulf Road",
                 "links": [link(0), link(0.01)], "periods": [PERIODS[0]]}
         body.update(overrides)
-        with mock.patch.object(traffic, "apply_network", return_value=None):
+        with mock.patch.object(network_links_svc, "apply_network", return_value=None):
             return client.post("/api/request-groups", json=body).get_json()
 
     def complete_and_send(self, gid, ids):
@@ -131,7 +132,7 @@ class RepeatGroupTests(unittest.TestCase):
         body = {"mode": "multi_link", "title": copy["title"], "date": "2026-11-10", "services": ["travel", "speed"],
                 "links": [link(0.03)] + [dict(x, no_junctions=True, point_c=x["point_c"]) for x in copy["links"][:1]],
                 "periods": [PERIODS[1]]}
-        with mock.patch.object(traffic, "apply_network", return_value=None):
+        with mock.patch.object(network_links_svc, "apply_network", return_value=None):
             again = client.post("/api/request-groups", json=body).get_json()
         self.assertNotEqual(again["group_id"], data["group_id"])
         self.assertEqual(again["count"], 2)

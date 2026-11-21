@@ -2,7 +2,6 @@ import json
 import os
 import tempfile
 import unittest
-from unittest import mock
 
 _database_dir = tempfile.TemporaryDirectory()
 os.environ.setdefault("TRAFFICLENS_DB", os.path.join(_database_dir.name, "freeflow_confirm.db"))
@@ -12,6 +11,7 @@ os.environ.setdefault("TRAFFICLENS_OUTSCRAPER_AUTO_POLL", "0")
 os.environ.setdefault("TRAFFICLENS_MAINTENANCE", "0")
 
 import app as traffic
+from trafficlens.services import common as common_svc, directions as directions_svc
 
 # 200 m take 30 s on the A-to-B road -> 24 km/h and 0.5 min
 RESPONSE = {"status": "Success", "data": [[{"road_distance_timing(meters:seconds)": {"0": 0, "100": 10, "200": 30}}]]}
@@ -45,14 +45,14 @@ class FreeflowConfirmTests(unittest.TestCase):
                    "country_code": "EG", "country_name": "Egypt", "timezone": "Africa/Cairo",
                    "departure_time": 1792310400, **context}
         with traffic.app.app_context():
-            now = traffic._timestamp_now()
+            now = common_svc._timestamp_now()
             traffic.db().execute(
                 "INSERT INTO outscraper_jobs(id,created_at,updated_at,config_json,config_hash,approval_token_hash) VALUES(?,?,?,?,?,?)",
                 (job_id, now, now, json.dumps({"trafficlens_context": context}), "hash", "token"))
             traffic.db().execute(
                 "INSERT INTO outscraper_job_routes(job_id,route_index,origin,destination,raw_response_json) VALUES(?,1,'A','B',?)",
                 (job_id, json.dumps(RESPONSE)))
-            traffic._persist_holiday_result_context(job_id)
+            directions_svc._persist_holiday_result_context(job_id)
             return json.loads(traffic.db().execute("SELECT data FROM requests WHERE id=?", (request_id,)).fetchone()["data"])
 
     def test_free_flow_speed_without_volumes_gets_the_api_value_to_confirm(self):
@@ -84,14 +84,14 @@ class FreeflowConfirmTests(unittest.TestCase):
         rid = self.request_with("freeflow_speed")
         job_id = f"freeflow-confirm-empty-{rid}"
         with traffic.app.app_context():
-            now = traffic._timestamp_now()
+            now = common_svc._timestamp_now()
             traffic.db().execute(
                 "INSERT INTO outscraper_jobs(id,created_at,updated_at,config_json,config_hash,approval_token_hash) VALUES(?,?,?,?,?,?)",
                 (job_id, now, now, json.dumps({"trafficlens_context": {"source_request_id": rid, "service": "freeflow_speed"}}), "h", "t"))
             traffic.db().execute(
                 "INSERT INTO outscraper_job_routes(job_id,route_index,origin,destination,raw_response_json) VALUES(?,1,'A','B',?)",
                 (job_id, json.dumps({"status": "Success", "data": [[{"duration": "10 mins"}]]})))
-            traffic._persist_holiday_result_context(job_id)
+            directions_svc._persist_holiday_result_context(job_id)
             data = json.loads(traffic.db().execute("SELECT data FROM requests WHERE id=?", (rid,)).fetchone()["data"])
         self.assertNotIn("suggested_speed", data["freeflow_speed"])
 

@@ -1,10 +1,10 @@
 {% extends "base.html" %}{% block body %}
-<div class="banner dashboard-banner"><div><span class="eyebrow">OUTSCRAPER REQUEST</span><h1>Request {{job.id[:8]}}</h1><p>Created {{job.created_at}}</p></div><div class="row-actions">{% if request_workflow %}<a class="btn alt" href="{{url_for('admin_request',rid=request_workflow.request_id)}}">Back to client request REQ-{{request_workflow.request_id}}</a>{% endif %}<a class="btn" href="{{url_for('admin_outscraper',duplicate_job_id=job.id)}}">إعادة الطلب مع التعديل</a><a class="btn alt" href="{{url_for('admin_outscraper')}}">Back to Directions API</a></div></div>
+<div class="banner dashboard-banner"><div><span class="eyebrow">OUTSCRAPER REQUEST</span><h1>Request {{job.id[:8]}}</h1><p>Created {{job.created_at}}</p></div><div class="row-actions">{% if request_workflow %}<a class="btn alt" href="{{url_for('admin_requests.admin_request',rid=request_workflow.request_id)}}">Back to client request REQ-{{request_workflow.request_id}}</a>{% endif %}<a class="btn" href="{{url_for('outscraper_admin.admin_outscraper',duplicate_job_id=job.id)}}">إعادة الطلب مع التعديل</a><a class="btn alt" href="{{url_for('outscraper_admin.admin_outscraper')}}">Back to Directions API</a></div></div>
 <div class="grid2 outscraper-detail-kpis">
   <article class="card"><span class="eyebrow">APPROVAL</span><h2>{{job.approval_status|replace('_',' ')|title}}</h2><p>Approved: {{job.approved_at or '—'}} · Rejected: {{job.rejected_at or '—'}}</p></article>
   <article class="card"><span class="eyebrow">EXECUTION</span><h2 id="executionStatus">{{job.execution_status|replace('_',' ')|title}}</h2><p>Provider ID(s): {% for provider_id in job.provider_ids %}<code>{{provider_id}}</code> {% else %}Unavailable{% endfor %}</p></article>
   <article class="card"><span class="eyebrow">COST</span><h2>Estimated: Cost unknown</h2><p>Actual: Unavailable · Currency: Unknown</p></article>
-  <article class="card"><span class="eyebrow">RESULTS</span><h2 id="resultCount">{{job.result_count}}</h2><p>Stored locally. <a href="{{url_for('export_outscraper_results',job_id=job.id)}}">Export CSV</a></p></article>
+  <article class="card"><span class="eyebrow">RESULTS</span><h2 id="resultCount">{{job.result_count}}</h2><p>Stored locally. <a href="{{url_for('outscraper_admin.export_outscraper_results',job_id=job.id)}}">Export CSV</a></p></article>
 </div>
 {% if job.error %}<div class="flash" id="jobError">{{job.error}}</div>{% endif %}
 {% if job.approval_token %}<section class="card approval-panel" id="resumeApproval">

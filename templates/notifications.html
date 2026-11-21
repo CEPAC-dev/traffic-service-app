@@ -14,7 +14,7 @@
 <section class="notification-list" id="pageList">
   {% for item in notifications %}
   <div class="card notification-item {{'unread' if not item.read_at}}" data-id="{{item.id}}" data-read="{{ '1' if item.read_at else '0' }}">
-    <a class="notification-item-link" href="{{url_for('open_notification',notification_id=item.id)}}">
+    <a class="notification-item-link" href="{{url_for('notifications.open_notification',notification_id=item.id)}}">
       <span class="notification-item-icon" aria-hidden="true">{{'📨' if item.kind=='new_request' else '📊' if item.kind=='group_ready' else '💬'}}</span>
       <span class="notification-item-body"><b>{{item.title}}</b><span>{{item.message}}</span><small>{{item.created_at}}</small></span>
     </a>

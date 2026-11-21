@@ -3,6 +3,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import threading
 import time
 import unittest
 from io import BytesIO
@@ -22,7 +23,12 @@ os.environ["TRAFFICLENS_OUTSCRAPER_AUTO_POLL"] = "0"
 os.environ["TRAFFICLENS_MAINTENANCE"] = "0"
 
 import app as traffic
-_REAL_GET_SETTING = traffic.get_setting
+import outscraper_integration as outscraper
+import volumes_runner
+from werkzeug.security import check_password_hash
+from trafficlens.config import PROFILE_PHOTO_MAX_BYTES
+from trafficlens.services import catalog as catalog_svc, common as common_svc, directions as directions_svc, holiday_calendar as holiday_calendar_svc, network_links as network_links_svc, notifications as notifications_svc, outscraper_jobs as outscraper_jobs_svc, request_groups as request_groups_svc, volumes as volumes_svc
+_REAL_GET_SETTING = catalog_svc.get_setting
 import outscraper_integration as integration
 
 
@@ -191,7 +197,7 @@ class DashboardAndProfileTests(unittest.TestCase):
             "point_c": [30.129997, 31.383281],
             "point_c_distance_km": 1.7,
         }
-        with mock.patch.object(traffic, "apply_network", return_value=None):
+        with mock.patch.object(network_links_svc, "apply_network", return_value=None):
             response = user_client.post("/api/requests", json=request_payload)
         self.assertEqual(response.status_code, 200, response.get_json())
         request_id = response.get_json()["id"]
@@ -212,7 +218,7 @@ class DashboardAndProfileTests(unittest.TestCase):
         other_client = self.logged_client(self.admin_id, "admin", "Profile admin")
         self.assertEqual(other_client.get(f"/requests/{request_id}").status_code, 404)
         with traffic.app.app_context():
-            traffic._delete_requests([request_id])
+            request_groups_svc._delete_requests([request_id])
 
     def test_user_can_update_profile_and_change_password(self):
         user_client = self.logged_client(self.client_id, "client", "Dashboard client")
@@ -257,7 +263,7 @@ class DashboardAndProfileTests(unittest.TestCase):
         self.assertEqual(wrong_password.status_code, 302)
         with traffic.app.app_context():
             user = traffic.db().execute("SELECT pw FROM users WHERE id=?", (self.client_id,)).fetchone()
-            self.assertTrue(traffic.check_password_hash(user["pw"], "client123"))
+            self.assertTrue(check_password_hash(user["pw"], "client123"))
 
         changed = user_client.post("/profile/password", data={
             "current_password": "client123",
@@ -267,7 +273,7 @@ class DashboardAndProfileTests(unittest.TestCase):
         self.assertEqual(changed.status_code, 302)
         with traffic.app.app_context():
             user = traffic.db().execute("SELECT email,pw FROM users WHERE id=?", (self.client_id,)).fetchone()
-            self.assertTrue(traffic.check_password_hash(user["pw"], "updated123"))
+            self.assertTrue(check_password_hash(user["pw"], "updated123"))
 
         logout = user_client.get("/logout")
         self.assertEqual(logout.status_code, 302)
@@ -478,7 +484,7 @@ class DashboardAndProfileTests(unittest.TestCase):
         self.assertEqual(missing_photo.status_code, 404)
         missing_photo.close()
 
-        oversized_stream = BytesIO(b"x" * (traffic.PROFILE_PHOTO_MAX_BYTES + 1))
+        oversized_stream = BytesIO(b"x" * (PROFILE_PHOTO_MAX_BYTES + 1))
         oversized = client.post(
             "/profile/photo",
             data={
@@ -636,7 +642,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
     def test_weekend_reference_is_latest_country_weekend_strictly_before_today(self):
         cairo = ZoneInfo("Africa/Cairo")
         friday_morning = dt.datetime(2026, 10, 30, 7, 0, tzinfo=cairo)
-        reference_date, weekday = traffic._latest_previous_weekly_weekend(
+        reference_date, weekday = holiday_calendar_svc._latest_previous_weekly_weekend(
             "EG", "Africa/Cairo", now=friday_morning
         )
         self.assertEqual(reference_date, dt.date(2026, 10, 24))
@@ -644,7 +650,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
         self.assertLess(reference_date, friday_morning.date())
 
         saturday_morning = dt.datetime(2026, 10, 24, 7, 0, tzinfo=cairo)
-        reference_date, weekday = traffic._latest_previous_weekly_weekend(
+        reference_date, weekday = holiday_calendar_svc._latest_previous_weekly_weekend(
             "EG", "Africa/Cairo", now=saturday_morning
         )
         self.assertEqual(reference_date, dt.date(2026, 10, 23))
@@ -668,7 +674,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
             "point_c_distance_km": 1.7,
             "area": "Combined service test",
         }
-        with mock.patch.object(traffic, "apply_network", return_value=None):
+        with mock.patch.object(network_links_svc, "apply_network", return_value=None):
             response = self.client.post("/api/requests", json=payload)
         self.assertEqual(response.status_code, 200, response.get_json())
         with traffic.app.app_context():
@@ -684,8 +690,8 @@ class OutscraperWorkflowTests(unittest.TestCase):
 
     def test_volumes_freeflow_form_endpoint_returns_route_and_reference_context(self):
         request_id = self.insert_volume_request()
-        with mock.patch.object(traffic, "_route_holiday_location", return_value=("EG", "Egypt", "Africa/Cairo")), \
-             mock.patch.object(traffic.outscraper, "api_key_configured", return_value=True):
+        with mock.patch.object(holiday_calendar_svc, "_route_holiday_location", return_value=("EG", "Egypt", "Africa/Cairo")), \
+             mock.patch.object(outscraper, "api_key_configured", return_value=True):
             response = self.client.get(f"/api/requests/{request_id}/volumes/freeflow-preview")
         self.assertEqual(response.status_code, 200, response.get_json())
         configuration = response.get_json()["configuration"]
@@ -706,7 +712,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
             with traffic.app.app_context():
-                job = traffic._outscraper_job(job_id)
+                job = outscraper_jobs_svc._outscraper_job(job_id)
             if job and job["execution_status"] in states:
                 return job
             time.sleep(0.01)
@@ -779,7 +785,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
                 "timezone": "Africa/Cairo",
             },
         }
-        with mock.patch.object(traffic, "_route_holiday_location", return_value=("EG", "Egypt", "Africa/Cairo")):
+        with mock.patch.object(holiday_calendar_svc, "_route_holiday_location", return_value=("EG", "Egypt", "Africa/Cairo")):
             location = self.client.get(f"/api/requests/{request_id}/directions/location")
             self.assertEqual(location.status_code, 200)
             self.assertEqual(location.get_json()["location"], {
@@ -800,8 +806,8 @@ class OutscraperWorkflowTests(unittest.TestCase):
         self.assertEqual(original_data, '{"travel":{"rows":[],"note":""}}')
 
         provider_response = {"id": "request-a-to-c", "status": "Success", "data": [[record_one]]}
-        with mock.patch.object(traffic, "_route_holiday_location", return_value=("EG", "Egypt", "Africa/Cairo")):
-          with mock.patch.object(traffic.outscraper, "submit_route", return_value=provider_response) as submit:
+        with mock.patch.object(holiday_calendar_svc, "_route_holiday_location", return_value=("EG", "Egypt", "Africa/Cairo")):
+          with mock.patch.object(outscraper, "submit_route", return_value=provider_response) as submit:
             approved = self.approve(preview)
             self.assertEqual(approved.status_code, 202, approved.get_json())
             job = self.wait_for(preview["id"], {"completed"})
@@ -899,7 +905,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
                  0.19, "07:00:00", "09:00:00", "[30.129997,31.383281]", 1.7, "{}"),
             )
             request_id = cursor.lastrowid
-            now = traffic._timestamp_now()
+            now = common_svc._timestamp_now()
             traffic.db().execute(
                 "INSERT INTO volumes_workflows(request_id,status,created_at,updated_at) VALUES(?,'waiting_for_inputs',?,?)",
                 (request_id, now, now),
@@ -943,8 +949,8 @@ class OutscraperWorkflowTests(unittest.TestCase):
                     job_id,
                     request_id,
                     json.dumps(direction_result),
-                    traffic._timestamp_now(),
-                    traffic._timestamp_now(),
+                    common_svc._timestamp_now(),
+                    common_svc._timestamp_now(),
                 ),
             )
             traffic.db().commit()
@@ -962,10 +968,10 @@ class OutscraperWorkflowTests(unittest.TestCase):
             source.save(shared_workbook)
             source.close()
 
-            with mock.patch.object(traffic.volumes_runner, "APP_DIR", app_root), \
-                    mock.patch.object(traffic.volumes_runner, "INPUT_TEMPLATE", shared_workbook), \
-                    mock.patch.object(traffic.volumes_runner, "MODELS_FILE", models_file):
-                prepared = traffic.volumes_runner.prepare_volume_run(request_id, [
+            with mock.patch.object(volumes_runner, "APP_DIR", app_root), \
+                    mock.patch.object(volumes_runner, "INPUT_TEMPLATE", shared_workbook), \
+                    mock.patch.object(volumes_runner, "MODELS_FILE", models_file):
+                prepared = volumes_runner.prepare_volume_run(request_id, [
                     {
                         "hour": 7,
                         "lanes": 1,
@@ -1001,7 +1007,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
                 )
                 self.assertEqual(confirmation.status_code, 200, confirmation.get_json())
                 self.assertEqual(confirmation.get_json()["status"], "confirmed")
-                with mock.patch.object(traffic.volumes_runner.subprocess, "run") as matlab:
+                with mock.patch.object(volumes_runner.subprocess, "run") as matlab:
                     detail = self.client.get(f"/admin/requests/{request_id}")
                 matlab.assert_not_called()
 
@@ -1044,8 +1050,8 @@ class OutscraperWorkflowTests(unittest.TestCase):
                 ('{"hourly":[{"hour":7,"speed_kmh":25}]}', request_id),
             )
             traffic.db().commit()
-            with mock.patch.object(traffic.volumes_runner, "prepare_volume_run") as prepare:
-                started = traffic._start_volume_calculation(request_id)
+            with mock.patch.object(volumes_runner, "prepare_volume_run") as prepare:
+                started = volumes_svc._start_volume_calculation(request_id)
             workflow = traffic.db().execute(
                 "SELECT status,error FROM volumes_workflows WHERE request_id=?",
                 (request_id,),
@@ -1086,20 +1092,20 @@ class OutscraperWorkflowTests(unittest.TestCase):
 
             try:
                 with mock.patch.object(
-                    traffic.volumes_runner,
+                    volumes_runner,
                     "prepare_volume_run",
                     side_effect=prepare_inputs,
-                ), mock.patch.object(traffic.threading, "Thread") as thread:
+                ), mock.patch.object(threading, "Thread") as thread:
                     thread.return_value.start.return_value = None
-                    started = traffic._start_volume_calculation(request_id)
-                    duplicate_start = traffic._start_volume_calculation(request_id)
+                    started = volumes_svc._start_volume_calculation(request_id)
+                    duplicate_start = volumes_svc._start_volume_calculation(request_id)
                 workflow = traffic.db().execute(
                     "SELECT status,workbook_path FROM volumes_workflows WHERE request_id=?",
                     (request_id,),
                 ).fetchone()
             finally:
-                with traffic._outscraper_workers_lock:
-                    traffic._outscraper_workers.discard(f"volumes-{request_id}")
+                with common_svc._outscraper_workers_lock:
+                    common_svc._outscraper_workers.discard(f"volumes-{request_id}")
 
         self.assertTrue(started)
         self.assertFalse(duplicate_start)
@@ -1132,7 +1138,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
                 {"hour": 11, "value": 0.0, "tolerance": 0.0},
             ],
         }
-        warnings = traffic._volume_result_warnings(result)
+        warnings = volumes_svc._volume_result_warnings(result)
         self.assertEqual(len(warnings), 4)
         self.assertFalse(any(text.startswith("07:00") for text in warnings))
         for hour in ("08:00", "09:00", "10:00", "11:00"):
@@ -1159,22 +1165,22 @@ class OutscraperWorkflowTests(unittest.TestCase):
 
     def test_directions_placeholder_note_does_not_count_as_a_finished_service(self):
         placeholder = {"rows": [], "note": "awaiting review", "source": "outscraper"}
-        self.assertFalse(traffic._all_requested_services_ready(["freeflow_time"], {"freeflow_time": placeholder}))
-        self.assertFalse(traffic._all_requested_services_ready(["volumes"], {"volumes": {"rows": [], "note": "x"}}))
+        self.assertFalse(catalog_svc._all_requested_services_ready(["freeflow_time"], {"freeflow_time": placeholder}))
+        self.assertFalse(catalog_svc._all_requested_services_ready(["volumes"], {"volumes": {"rows": [], "note": "x"}}))
         entered = {"rows": [{"value": 4.2}], "note": "", "source": "outscraper"}
-        self.assertTrue(traffic._all_requested_services_ready(["freeflow_time"], {"freeflow_time": entered}))
+        self.assertTrue(catalog_svc._all_requested_services_ready(["freeflow_time"], {"freeflow_time": entered}))
         admin_note = {"rows": [], "note": "Closed for works"}
-        self.assertTrue(traffic._all_requested_services_ready(["capacity"], {"capacity": admin_note}))
-        self.assertFalse(traffic._all_requested_services_ready(
+        self.assertTrue(catalog_svc._all_requested_services_ready(["capacity"], {"capacity": admin_note}))
+        self.assertFalse(catalog_svc._all_requested_services_ready(
             ["freeflow_time", "capacity"], {"freeflow_time": placeholder, "capacity": admin_note}
         ))
 
     def test_mean_route_minutes_averages_a_to_b_time_over_all_records(self):
         key = "road_distance_timing(meters:seconds)"
         response = {"data": [[{key: {"0": 0, "1000": 120}}, {key: {"0": 0, "1000": 180}}]]}
-        self.assertAlmostEqual(traffic._mean_route_minutes(response, 500), 1.25)
-        self.assertIsNone(traffic._mean_route_minutes({"data": []}, 500))
-        self.assertIsNone(traffic._mean_route_minutes({"data": [{key: {"0": 0, "100": 10}}]}, 500))
+        self.assertAlmostEqual(directions_svc._mean_route_minutes(response, 500), 1.25)
+        self.assertIsNone(directions_svc._mean_route_minutes({"data": []}, 500))
+        self.assertIsNone(directions_svc._mean_route_minutes({"data": [{key: {"0": 0, "100": 10}}]}, 500))
 
     def test_volumes_workbook_download_is_limited_to_owner_after_approval_and_admins(self):
         request_id = self.insert_volume_request(services=["volumes"])
@@ -1186,8 +1192,8 @@ class OutscraperWorkflowTests(unittest.TestCase):
             return test_client
 
         with tempfile.TemporaryDirectory() as temp_dir, \
-                mock.patch.object(traffic.volumes_runner, "APP_DIR", Path(temp_dir)):
-            run_dir = traffic.volumes_runner.request_run_dir(self.client_id, request_id)
+                mock.patch.object(volumes_runner, "APP_DIR", Path(temp_dir)):
+            run_dir = volumes_runner.request_run_dir(self.client_id, request_id)
             run_dir.mkdir(parents=True)
             result_path = run_dir / f"REQ-{request_id}-abc-results.xlsx"
             outside_path = Path(temp_dir) / "secret-results.xlsx"
@@ -1237,10 +1243,10 @@ class OutscraperWorkflowTests(unittest.TestCase):
         request_id = self.insert_volume_request(services=["lanes", "volumes"])
         lookup = {"values": {"lanes": {"value": 3, "note": "network"}}, "coverage": 1.0}
         with mock.patch.object(traffic.network, "HAVE_GEO", True), \
-                mock.patch.object(traffic, "get_setting", return_value={"file": "network.shp"}), \
+                mock.patch.object(catalog_svc, "get_setting", return_value={"file": "network.shp"}), \
                 mock.patch.object(traffic.network, "lookup", return_value=lookup):
             with traffic.app.app_context():
-                traffic.apply_network(request_id)
+                network_links_svc.apply_network(request_id)
         with traffic.app.app_context():
             row = traffic.db().execute(
                 "SELECT lanes,suggested_lanes FROM volumes_workflows WHERE request_id=?", (request_id,)
@@ -1254,10 +1260,10 @@ class OutscraperWorkflowTests(unittest.TestCase):
         implausible = {"values": {"lanes": {"value": 40, "note": "network"}}, "coverage": 1.0}
         other_id = self.insert_volume_request(services=["volumes"])
         with mock.patch.object(traffic.network, "HAVE_GEO", True), \
-                mock.patch.object(traffic, "get_setting", return_value={"file": "network.shp"}), \
+                mock.patch.object(catalog_svc, "get_setting", return_value={"file": "network.shp"}), \
                 mock.patch.object(traffic.network, "lookup", return_value=implausible):
             with traffic.app.app_context():
-                traffic.apply_network(other_id)
+                network_links_svc.apply_network(other_id)
         with traffic.app.app_context():
             ignored = traffic.db().execute(
                 "SELECT suggested_lanes FROM volumes_workflows WHERE request_id=?", (other_id,)
@@ -1280,7 +1286,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
             return cfg if key == "network" else _REAL_GET_SETTING(key, default)
 
         with mock.patch.object(traffic.network, "HAVE_GEO", True), \
-                mock.patch.object(traffic, "get_setting", side_effect=settings), \
+                mock.patch.object(catalog_svc, "get_setting", side_effect=settings), \
                 mock.patch.object(traffic.network, "lookup") as lookup:
             lookup.return_value = {"values": {"lanes": {"value": 3, "note": "n"}}, "coverage": 1.0}
             page = self.client.get(f"/admin/requests/{usable}")
@@ -1334,8 +1340,8 @@ class OutscraperWorkflowTests(unittest.TestCase):
     def test_approval_is_audited_and_removes_superseded_run_files(self):
         request_id = self.insert_volume_request(services=["volumes"])
         with tempfile.TemporaryDirectory() as temp_dir, \
-                mock.patch.object(traffic.volumes_runner, "APP_DIR", Path(temp_dir)):
-            run_dir = traffic.volumes_runner.request_run_dir(self.client_id, request_id)
+                mock.patch.object(volumes_runner, "APP_DIR", Path(temp_dir)):
+            run_dir = volumes_runner.request_run_dir(self.client_id, request_id)
             run_dir.mkdir(parents=True)
             kept = [run_dir / "REQ-1-keep.xlsx", run_dir / "REQ-1-keep-results.xlsx"]
             old = [run_dir / "REQ-1-old.xlsx", run_dir / "REQ-1-old-results.xlsx"]
@@ -1381,7 +1387,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
 
     def test_admin_page_exposes_internal_directions_and_volume_review(self):
         request_id = self.insert_volume_request()
-        with mock.patch.object(traffic, "_route_holiday_location", return_value=("EG", "Egypt", "Africa/Cairo")):
+        with mock.patch.object(holiday_calendar_svc, "_route_holiday_location", return_value=("EG", "Egypt", "Africa/Cairo")):
             response = self.client.get(f"/admin/requests/{request_id}")
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Save Actual Speed for MATLAB", response.data)
@@ -1400,9 +1406,9 @@ class OutscraperWorkflowTests(unittest.TestCase):
             source_request = traffic.db().execute(
                 "SELECT * FROM requests WHERE id=?", (request_id,)
             ).fetchone()
-            with mock.patch.object(traffic, "_route_holiday_location", return_value=("EG", "Egypt", "Africa/Cairo")):
-                with mock.patch.object(traffic, "_nearest_previous_weekly_weekend", return_value=(dt.date(2026, 10, 24), "Saturday")):
-                    prepared = traffic._outscraper_prefill_from_request(source_request, "freeflow_speed")
+            with mock.patch.object(holiday_calendar_svc, "_route_holiday_location", return_value=("EG", "Egypt", "Africa/Cairo")):
+                with mock.patch.object(holiday_calendar_svc, "_nearest_previous_weekly_weekend", return_value=(dt.date(2026, 10, 24), "Saturday")):
+                    prepared = directions_svc._outscraper_prefill_from_request(source_request, "freeflow_speed")
                     response = self.client.post("/api/outscraper/preview", json=prepared["prefill_config"])
         self.assertEqual(response.status_code, 201, response.get_json())
         job_id = response.get_json()["id"]
@@ -1416,7 +1422,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
     def test_completed_weekend_response_saves_freeflow_speed_and_reference_internally(self):
         request_id = self.insert_volume_request()
         job_id = f"volume-freeflow-{request_id}"
-        weekend_date, weekend_day = traffic._latest_previous_weekly_weekend(
+        weekend_date, weekend_day = holiday_calendar_svc._latest_previous_weekly_weekend(
             "EG", "Africa/Cairo"
         )
         departure = int(dt.datetime.combine(
@@ -1441,7 +1447,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
             }]],
         }
         with traffic.app.app_context():
-            now = traffic._timestamp_now()
+            now = common_svc._timestamp_now()
             traffic.db().execute(
                 "INSERT INTO outscraper_jobs(id,created_at,updated_at,config_json,config_hash,approval_token_hash) "
                 "VALUES(?,?,?,?,?,?)",
@@ -1452,8 +1458,8 @@ class OutscraperWorkflowTests(unittest.TestCase):
                 "VALUES(?,1,'A','B',?)",
                 (job_id, __import__("json").dumps(provider_response)),
             )
-            with mock.patch.object(traffic, "_start_volume_calculation") as start_model:
-                traffic._persist_holiday_result_context(job_id)
+            with mock.patch.object(volumes_svc, "_start_volume_calculation") as start_model:
+                directions_svc._persist_holiday_result_context(job_id)
             start_model.assert_called_once_with(request_id)
             workflow = traffic.db().execute(
                 "SELECT freeflow_speed,freeflow_job_id,status FROM volumes_workflows WHERE request_id=?",
@@ -1472,7 +1478,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
     def test_volumes_status_recovers_a_completed_linked_freeflow_job(self):
         request_id = self.insert_volume_request()
         job_id = f"completed-freeflow-{request_id}"
-        weekend_date, weekend_day = traffic._latest_previous_weekly_weekend("EG", "Africa/Cairo")
+        weekend_date, weekend_day = holiday_calendar_svc._latest_previous_weekly_weekend("EG", "Africa/Cairo")
         context = {
             "source_request_id": request_id,
             "service": "freeflow_speed",
@@ -1491,7 +1497,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
             }]],
         }
         with traffic.app.app_context():
-            now = traffic._timestamp_now()
+            now = common_svc._timestamp_now()
             traffic.db().execute(
                 "INSERT INTO outscraper_jobs(id,created_at,updated_at,config_json,config_hash,approval_token_hash,execution_status) "
                 "VALUES(?,?,?,?,?,?,?)",
@@ -1511,7 +1517,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
                 (job_id, request_id),
             )
             traffic.db().commit()
-            with mock.patch.object(traffic, "_start_volume_calculation") as start_model:
+            with mock.patch.object(volumes_svc, "_start_volume_calculation") as start_model:
                 response = self.client.get(f"/api/requests/{request_id}/volumes")
             start_model.assert_called_once_with(request_id)
         self.assertEqual(response.status_code, 200, response.get_json())
@@ -1528,9 +1534,9 @@ class OutscraperWorkflowTests(unittest.TestCase):
             source = traffic.db().execute(
                 "SELECT * FROM requests WHERE id=?", (request_id,)
             ).fetchone()
-            with mock.patch.object(traffic, "_route_holiday_location", return_value=("EG", "Egypt", "Africa/Cairo")):
-                with mock.patch.object(traffic, "_nearest_previous_weekly_weekend", return_value=(weekend, "Friday")):
-                    prepared = traffic._outscraper_prefill_from_request(source, "freeflow_speed")
+            with mock.patch.object(holiday_calendar_svc, "_route_holiday_location", return_value=("EG", "Egypt", "Africa/Cairo")):
+                with mock.patch.object(holiday_calendar_svc, "_nearest_previous_weekly_weekend", return_value=(weekend, "Friday")):
+                    prepared = directions_svc._outscraper_prefill_from_request(source, "freeflow_speed")
         configuration = prepared["prefill_config"]
         context = configuration["trafficlens_context"]
         self.assertEqual(configuration["routes"][0]["origin"], "30.138239, 31.395698")
@@ -1585,7 +1591,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
             ]],
         }
         with traffic.app.app_context():
-            now = traffic._timestamp_now()
+            now = common_svc._timestamp_now()
             traffic.db().execute(
                 "UPDATE volumes_workflows SET lanes=2,actual_result_json=? WHERE request_id=?",
                 (json.dumps({"hourly": [
@@ -1608,8 +1614,8 @@ class OutscraperWorkflowTests(unittest.TestCase):
                 (job_id, request_id),
             )
             traffic.db().commit()
-            with mock.patch.object(traffic, "_start_volume_calculation") as start_model:
-                traffic._persist_holiday_result_context(job_id)
+            with mock.patch.object(volumes_svc, "_start_volume_calculation") as start_model:
+                directions_svc._persist_holiday_result_context(job_id)
                 start_model.assert_not_called()
             workflow = traffic.db().execute(
                 "SELECT freeflow_speed,freeflow_accepted,freeflow_validation_json FROM volumes_workflows WHERE request_id=?",
@@ -1621,9 +1627,9 @@ class OutscraperWorkflowTests(unittest.TestCase):
         self.assertEqual(validation["mismatched_hours"], ["08:00"])
 
         prepared_run = {"request_id": request_id, "hours": [7, 8], "input_workbook": "in.xlsx"}
-        with mock.patch.object(traffic.volumes_runner, "find_existing_volume_result", return_value=None), \
-                mock.patch.object(traffic.volumes_runner, "prepare_volume_run", return_value=prepared_run), \
-                mock.patch.object(traffic.threading, "Thread") as worker:
+        with mock.patch.object(volumes_runner, "find_existing_volume_result", return_value=None), \
+                mock.patch.object(volumes_runner, "prepare_volume_run", return_value=prepared_run), \
+                mock.patch.object(threading, "Thread") as worker:
             worker.return_value.start.return_value = None
             response = self.client.post(
                 f"/api/requests/{request_id}/volumes/freeflow/accept",
@@ -1662,7 +1668,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
                 ),
             )
             traffic.db().commit()
-        with mock.patch.object(traffic, "_start_volume_calculation") as start_model:
+        with mock.patch.object(volumes_svc, "_start_volume_calculation") as start_model:
             response = self.client.post(
                 f"/api/requests/{request_id}/volumes/freeflow/accept",
                 json={"use_anyway": True},
@@ -1688,7 +1694,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
             ],
         }
         with traffic.app.app_context():
-            now = traffic._timestamp_now()
+            now = common_svc._timestamp_now()
             traffic.db().execute(
                 "UPDATE volumes_workflows SET lanes=2,freeflow_speed=80,"
                 "freeflow_job_id='freeflow-existing',freeflow_result_json=?,"
@@ -1710,7 +1716,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
             )
             traffic.db().commit()
 
-        with mock.patch.object(traffic, "_start_volume_calculation", return_value=True) as start_model:
+        with mock.patch.object(volumes_svc, "_start_volume_calculation", return_value=True) as start_model:
             response = self.client.post(
                 f"/api/requests/{request_id}/volumes/freeflow/accept",
                 json={},
@@ -1761,7 +1767,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
             )
             traffic.db().commit()
 
-            self.assertTrue(traffic._evaluate_volume_freeflow(request_id))
+            self.assertTrue(volumes_svc._evaluate_volume_freeflow(request_id))
             workflow = traffic.db().execute(
                 "SELECT actual_result_json,freeflow_validation_json FROM volumes_workflows WHERE request_id=?",
                 (request_id,),
@@ -1792,7 +1798,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
             "speed_kmh": 50.0,
         }
         with traffic.app.app_context():
-            now = traffic._timestamp_now()
+            now = common_svc._timestamp_now()
             traffic.db().execute(
                 "INSERT INTO outscraper_jobs(id,created_at,updated_at,config_json,config_hash,approval_token_hash) "
                 "VALUES(?,? ,? ,'{}','hash','token')",
@@ -1805,7 +1811,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
             )
             traffic.db().commit()
 
-        with mock.patch.object(traffic, "_start_volume_calculation") as start_model:
+        with mock.patch.object(volumes_svc, "_start_volume_calculation") as start_model:
             response = self.client.post(
                 f"/api/requests/{request_id}/directions/confirm",
                 json={"job_id": job_id},
@@ -1838,7 +1844,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
             "speed_kmh": 41.45,
         }
         with traffic.app.app_context():
-            now = traffic._timestamp_now()
+            now = common_svc._timestamp_now()
             traffic.db().execute(
                 "INSERT INTO outscraper_jobs(id,created_at,updated_at,config_json,config_hash,approval_token_hash) "
                 "VALUES(?,? ,? ,'{}','hash','token')",
@@ -1910,7 +1916,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
             },
         }
         with traffic.app.app_context():
-            now = traffic._timestamp_now()
+            now = common_svc._timestamp_now()
             traffic.db().execute(
                 "UPDATE requests SET data=?,status='Processing' WHERE id=?",
                 (json.dumps(existing_volumes), request_id),
@@ -1975,7 +1981,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
 
     def test_saving_volume_lanes_populates_requested_lanes_service(self):
         request_id = self.insert_volume_request(services=["lanes", "volumes"])
-        with mock.patch.object(traffic, "_start_volume_calculation", return_value=False):
+        with mock.patch.object(volumes_svc, "_start_volume_calculation", return_value=False):
             response = self.client.post(
                 f"/api/requests/{request_id}/volumes/lanes",
                 json={"lanes": "3"},
@@ -2079,9 +2085,9 @@ class OutscraperWorkflowTests(unittest.TestCase):
         self.assertEqual(bulk.status_code, 409)
 
     def test_request_directions_interpolation_requires_profile_to_reach_point_b(self):
-        self.assertEqual(traffic._interpolate_route_seconds({"0": 0, "100": 10, "200": 30}, 150), 20)
+        self.assertEqual(directions_svc._interpolate_route_seconds({"0": 0, "100": 10, "200": 30}, 150), 20)
         with self.assertRaisesRegex(ValueError, "does not reach Point B"):
-            traffic._interpolate_route_seconds({"0": 0, "100": 10}, 150)
+            directions_svc._interpolate_route_seconds({"0": 0, "100": 10}, 150)
 
     def test_completed_directions_with_no_data_still_fails_extraction(self):
         job_id = "completed-empty-directions"
@@ -2114,7 +2120,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
             )
             traffic.db().commit()
             with self.assertRaisesRegex(ValueError, "no usable timing data"):
-                traffic._extract_request_directions_result(job_id)
+                directions_svc._extract_request_directions_result(job_id)
 
     def test_ready_directions_hourly_speeds_are_saved_for_volumes_before_client_confirmation(self):
         request_id = self.insert_volume_request(services=["volumes", "speed"])
@@ -2147,7 +2153,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
             ]],
         }
         with traffic.app.app_context():
-            now = traffic._timestamp_now()
+            now = common_svc._timestamp_now()
             traffic.db().execute(
                 "UPDATE requests SET hours='[16,17]' WHERE id=?",
                 (request_id,),
@@ -2177,8 +2183,8 @@ class OutscraperWorkflowTests(unittest.TestCase):
             )
             traffic.db().commit()
 
-            with mock.patch.object(traffic, "_start_volume_calculation") as start_calculation:
-                traffic._extract_request_directions_result(job_id)
+            with mock.patch.object(volumes_svc, "_start_volume_calculation") as start_calculation:
+                directions_svc._extract_request_directions_result(job_id)
                 start_calculation.assert_called_once_with(request_id)
 
             saved = traffic.db().execute(
@@ -2206,7 +2212,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
         payload = {**self.config, "routes": self.config["routes"] * 2}
         preview = self.preview(payload)
         with traffic.app.app_context():
-            job = traffic._outscraper_job(preview["id"])
+            job = outscraper_jobs_svc._outscraper_job(preview["id"])
         self.assertEqual(job["config"], preview["configuration"])
         self.assertEqual(preview["planned_http_submissions"], 2)
         self.assertIsNone(preview["cost_estimate"])
@@ -2215,7 +2221,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
 
     def test_rejection_never_calls_provider(self):
         preview = self.preview()
-        with mock.patch.object(traffic.outscraper, "submit_route") as submit:
+        with mock.patch.object(outscraper, "submit_route") as submit:
             response = self.client.post(
                 f"/api/outscraper/{preview['id']}/reject",
                 json={"approval_token": preview["approval_token"]},
@@ -2223,13 +2229,13 @@ class OutscraperWorkflowTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             submit.assert_not_called()
         with traffic.app.app_context():
-            job = traffic._outscraper_job(preview["id"])
+            job = outscraper_jobs_svc._outscraper_job(preview["id"])
         self.assertEqual(job["approval_status"], "rejected")
         self.assertIsNotNone(job["rejected_at"])
 
     def test_execution_requires_unknown_cost_acknowledgement_and_matching_configuration(self):
         preview = self.preview()
-        with mock.patch.object(traffic.outscraper, "submit_route") as submit:
+        with mock.patch.object(outscraper, "submit_route") as submit:
             denied = self.client.post(f"/api/outscraper/{preview['id']}/approve", json={
                 "approval_token": preview["approval_token"],
                 "configuration": preview["configuration"],
@@ -2241,7 +2247,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
             submit.assert_not_called()
 
     def _holiday_config(self, request_id):
-        holiday, holiday_name = traffic._nearest_public_holiday("KW", dt.date(2026, 10, 18))
+        holiday, holiday_name = holiday_calendar_svc._nearest_public_holiday("KW", dt.date(2026, 10, 18))
         departure = int(dt.datetime.combine(
             holiday, dt.time(7), tzinfo=ZoneInfo("Asia/Kuwait")
         ).timestamp())
@@ -2273,18 +2279,18 @@ class OutscraperWorkflowTests(unittest.TestCase):
             return traffic.db().execute("SELECT * FROM requests WHERE id=?", (cursor.lastrowid,)).fetchone()
 
     def test_freeflow_services_are_available_and_excluded_from_static_network_values(self):
-        with mock.patch.object(traffic, "get_setting", return_value={}):
-            catalog = traffic.service_catalog()
+        with mock.patch.object(catalog_svc, "get_setting", return_value={}):
+            catalog = catalog_svc.service_catalog()
         self.assertTrue(catalog["freeflow_time"]["enabled"])
         self.assertTrue(catalog["freeflow_speed"]["enabled"])
         row = self._insert_holiday_request("freeflow_speed")
         with mock.patch.object(traffic.network, "HAVE_GEO", True), \
-             mock.patch.object(traffic, "get_setting", return_value={"file": "network.gpkg"}), \
+             mock.patch.object(catalog_svc, "get_setting", return_value={"file": "network.gpkg"}), \
              mock.patch.object(traffic.network, "lookup", return_value={
                  "values": {"freeflow_speed": {"value": 60, "note": "static"}}, "coverage": 1,
              }):
             with traffic.app.app_context():
-                outcome = traffic.apply_network(row["id"])
+                outcome = network_links_svc.apply_network(row["id"])
         self.assertEqual(outcome["filled"], [])
         with traffic.app.app_context():
             saved = traffic.db().execute("SELECT data FROM requests WHERE id=?", (row["id"],)).fetchone()
@@ -2292,12 +2298,12 @@ class OutscraperWorkflowTests(unittest.TestCase):
 
     def test_freeflow_prefill_uses_nearest_country_holiday_at_7am_and_shows_date(self):
         row = self._insert_holiday_request("freeflow_time")
-        with mock.patch.object(traffic, "_route_holiday_location", return_value=("KW", "Kuwait", "Asia/Kuwait")):
+        with mock.patch.object(holiday_calendar_svc, "_route_holiday_location", return_value=("KW", "Kuwait", "Asia/Kuwait")):
             with traffic.app.app_context():
-                prepared = traffic._outscraper_prefill_from_request(row, "freeflow_time")
+                prepared = directions_svc._outscraper_prefill_from_request(row, "freeflow_time")
             page = self.client.get(f"/admin/outscraper?source_request_id={row['id']}&service=freeflow_time")
         context = prepared["prefill_config"]["trafficlens_context"]
-        expected_date, expected_name = traffic._nearest_public_holiday("KW", dt.date.fromisoformat(row["d1"]))
+        expected_date, expected_name = holiday_calendar_svc._nearest_public_holiday("KW", dt.date.fromisoformat(row["d1"]))
         departure = dt.datetime.fromtimestamp(context["departure_time"], ZoneInfo(context["timezone"]))
         self.assertEqual(context["holiday_date"], expected_date.isoformat())
         self.assertEqual(context["holiday_name"], expected_name)
@@ -2330,7 +2336,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
                 "UPDATE outscraper_job_routes SET execution_status='completed', provider_request_id=?, provider_status=?, raw_response_json=?, result_count=1 WHERE job_id=?",
                 ("holiday-provider", "Success", '{"id":"holiday-provider","status":"Success","data":[[{"duration":"10 mins"}]]}', preview["id"]),
             )
-            traffic._refresh_job_status(preview["id"])
+            outscraper_jobs_svc._refresh_job_status(preview["id"])
             saved = traffic.db().execute("SELECT data FROM requests WHERE id=?", (row["id"],)).fetchone()
         service_data = __import__("json").loads(saved["data"])["freeflow_time"]
         self.assertEqual(service_data["source"], "outscraper")
@@ -2354,14 +2360,14 @@ class OutscraperWorkflowTests(unittest.TestCase):
             json={"approval_token": preview["approval_token"]},
         )
         self.assertEqual(invalidated.status_code, 200)
-        with mock.patch.object(traffic.outscraper, "submit_route") as submit:
+        with mock.patch.object(outscraper, "submit_route") as submit:
             response = self.approve(preview)
             self.assertEqual(response.status_code, 409)
             submit.assert_not_called()
 
     def test_duplicate_approval_submits_once(self):
         preview = self.preview()
-        with mock.patch.object(traffic.outscraper, "submit_route", return_value={
+        with mock.patch.object(outscraper, "submit_route", return_value={
             "id": "provider-1", "status": "Pending", "data": [],
         }) as submit:
             first = self.approve(preview)
@@ -2381,7 +2387,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
 
     def test_timeout_marks_submission_unknown_and_does_not_resubmit(self):
         preview = self.preview()
-        with mock.patch.object(traffic.outscraper, "submit_route", side_effect=integration.SubmissionUncertain(
+        with mock.patch.object(outscraper, "submit_route", side_effect=integration.SubmissionUncertain(
             "Connection to Outscraper failed; submission status is uncertain"
         )) as submit:
             self.assertEqual(self.approve(preview).status_code, 202)
@@ -2389,13 +2395,13 @@ class OutscraperWorkflowTests(unittest.TestCase):
             self.assertEqual(self.approve(preview).status_code, 409)
             submit.assert_called_once()
         self.assertIn("uncertain", job["error"])
-        with mock.patch.object(traffic.outscraper, "fetch_request") as poll:
+        with mock.patch.object(outscraper, "fetch_request") as poll:
             self.client.post(f"/api/outscraper/{preview['id']}/refresh")
             poll.assert_not_called()
 
     def test_provider_failure_is_saved_without_retry(self):
         preview = self.preview()
-        with mock.patch.object(traffic.outscraper, "submit_route", side_effect=integration.OutscraperError(
+        with mock.patch.object(outscraper, "submit_route", side_effect=integration.OutscraperError(
             "Outscraper returned HTTP 400"
         )) as submit:
             self.assertEqual(self.approve(preview).status_code, 202)
@@ -2409,15 +2415,15 @@ class OutscraperWorkflowTests(unittest.TestCase):
         completed = {"id": "provider-async-1", "status": "Success", "data": [[
             {"road": "Route 1", "distance(meters)": 1200},
         ]]}
-        with mock.patch.object(traffic.outscraper, "submit_route", return_value=pending):
+        with mock.patch.object(outscraper, "submit_route", return_value=pending):
             self.assertEqual(self.approve(preview).status_code, 202)
             self.wait_for(preview["id"], {"running"})
-        with mock.patch.object(traffic.outscraper, "fetch_request", return_value=completed) as poll:
+        with mock.patch.object(outscraper, "fetch_request", return_value=completed) as poll:
             response = self.client.post(f"/api/outscraper/{preview['id']}/refresh")
             self.assertEqual(response.status_code, 200, response.get_json())
             poll.assert_called_once_with("provider-async-1")
         with traffic.app.app_context():
-            job = traffic._outscraper_job(preview["id"])
+            job = outscraper_jobs_svc._outscraper_job(preview["id"])
         self.assertEqual(job["execution_status"], "completed")
         self.assertEqual(job["result_count"], 1)
         self.assertEqual(job["routes"][0]["result"]["data"][0][0]["road"], "Route 1")
@@ -2429,7 +2435,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
 
     def test_empty_completed_results_are_retained_as_successful_empty_result(self):
         preview = self.preview()
-        with mock.patch.object(traffic.outscraper, "submit_route", return_value={
+        with mock.patch.object(outscraper, "submit_route", return_value={
             "id": "provider-empty", "status": "Success", "data": [],
         }):
             self.assertEqual(self.approve(preview).status_code, 202)
@@ -2446,14 +2452,14 @@ class OutscraperWorkflowTests(unittest.TestCase):
                 (preview["id"],))
             traffic.db().commit()
         completed = {"id": "provider-background", "status": "Success", "data": [[{"road": "Background route"}]]}
-        with mock.patch.object(traffic.time, "sleep") as wait, mock.patch.object(
-            traffic.outscraper, "fetch_request", return_value=completed
+        with mock.patch.object(time, "sleep") as wait, mock.patch.object(
+            outscraper, "fetch_request", return_value=completed
         ) as poll:
-            traffic._monitor_outscraper_job(preview["id"])
+            outscraper_jobs_svc._monitor_outscraper_job(preview["id"])
         wait.assert_called_once_with(15)
         poll.assert_called_once_with("provider-background")
         with traffic.app.app_context():
-            job = traffic._outscraper_job(preview["id"])
+            job = outscraper_jobs_svc._outscraper_job(preview["id"])
         self.assertEqual(job["execution_status"], "completed")
         self.assertEqual(job["routes"][0]["result"]["data"][0][0]["road"], "Background route")
 
@@ -2504,7 +2510,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
             self.assertIn("junction_quality_ack_at", request_columns)
             migrated.close()
 
-            with mock.patch.object(traffic.outscraper, "fetch_request", return_value={
+            with mock.patch.object(outscraper, "fetch_request", return_value={
                 "id": "legacy-provider", "status": "Success", "data": [],
             }) as poll:
                 response = self.client.post("/api/outscraper/legacy-job/refresh")
@@ -2599,7 +2605,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
             db.commit()
             raw = sqlite3.connect(traffic.app.config["DATABASE"])
             try:
-                traffic._translate_legacy_notifications(raw)
+                notifications_svc._translate_legacy_notifications(raw)
                 raw.commit()
                 rows = raw.execute(
                     "SELECT title,message FROM notifications WHERE user_id=? ORDER BY id", (user_id,)
@@ -2636,7 +2642,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
             "road_km": 1.2, "junctions": 0, "no_junctions": True, "point_c": [29.41, 48.01],
             "point_c_distance_km": 1.6,
         }
-        with mock.patch.object(traffic, "apply_network", return_value=None):
+        with mock.patch.object(network_links_svc, "apply_network", return_value=None):
             created = self.client.post("/api/requests", json=request_payload)
         self.assertEqual(created.status_code, 200, created.get_json())
         request_id = created.get_json()["id"]
@@ -2824,7 +2830,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
         self.assertIn(b"Departure and finish use the exact selected times", response.data)
         self.assertIn(b"29.375912, 47.977401", response.data)
         with traffic.app.test_request_context():
-            prefill = traffic._outscraper_prefill_from_request(
+            prefill = directions_svc._outscraper_prefill_from_request(
                 traffic.db().execute("SELECT * FROM requests WHERE id=?", (source_request_id,)).fetchone()
             )
         config = integration.validate_configuration(prefill["prefill_config"])
@@ -2896,7 +2902,7 @@ class OutscraperWorkflowTests(unittest.TestCase):
             self.assertEqual(response.status_code, 400)
             self.assertIn("intersections", response.get_json()["error"])
         with self.subTest(reason="explicit quality-impact acknowledgment"):
-            with mock.patch.object(traffic, "apply_network", return_value=None):
+            with mock.patch.object(network_links_svc, "apply_network", return_value=None):
                 accepted = self.client.post(
                     "/api/requests",
                     json={
@@ -3106,15 +3112,15 @@ class AbandonStuckJobTests(unittest.TestCase):
         self.make_job("abandon-refresh", "running")
         self.post("abandon-refresh", {"acknowledge_possible_charge": True})
         with traffic.app.app_context():
-            self.assertEqual(traffic._refresh_job_status("abandon-refresh"), "abandoned")
+            self.assertEqual(outscraper_jobs_svc._refresh_job_status("abandon-refresh"), "abandoned")
 
     def test_late_provider_answer_cannot_revive_an_abandoned_route(self):
         self.make_job("abandon-late", "running")
         self.post("abandon-late", {"acknowledge_possible_charge": True})
         with traffic.app.app_context():
             route = dict(traffic.db().execute("SELECT * FROM outscraper_job_routes WHERE job_id='abandon-late'").fetchone())
-            with mock.patch.object(traffic.outscraper, "fetch_request", return_value={"status": "Success", "data": [{"x": 1}]}):
-                traffic._poll_outscraper_route(route)
+            with mock.patch.object(outscraper, "fetch_request", return_value={"status": "Success", "data": [{"x": 1}]}):
+                outscraper_jobs_svc._poll_outscraper_route(route)
             self.assertEqual(
                 traffic.db().execute("SELECT execution_status FROM outscraper_job_routes WHERE job_id='abandon-late'").fetchone()[0],
                 "abandoned",
@@ -3244,9 +3250,9 @@ class SendAllAndNamingTests(unittest.TestCase):
         self.assertIn("Gulf Road morning peak", self.admin.get("/admin").get_data(as_text=True))
 
     def test_title_is_trimmed_and_limited(self):
-        self.assertIsNone(traffic._clean_request_title("   "))
-        self.assertIsNone(traffic._clean_request_title(None))
-        self.assertEqual(len(traffic._clean_request_title("x" * 200)), 80)
+        self.assertIsNone(common_svc._clean_request_title("   "))
+        self.assertIsNone(common_svc._clean_request_title(None))
+        self.assertEqual(len(common_svc._clean_request_title("x" * 200)), 80)
 
 
 if __name__ == "__main__":

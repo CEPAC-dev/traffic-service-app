@@ -124,4 +124,9 @@ CREATE TABLE IF NOT EXISTS periods(
   id INTEGER PRIMARY KEY, label TEXT NOT NULL UNIQUE,
   is_active INTEGER NOT NULL DEFAULT 1, sort_order INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS login_attempts(
+  id INTEGER PRIMARY KEY, email TEXT NOT NULL, ip TEXT NOT NULL DEFAULT '', at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_login_attempts_email ON login_attempts(email,at);
+CREATE INDEX IF NOT EXISTS idx_login_attempts_ip ON login_attempts(ip,at);
 """
