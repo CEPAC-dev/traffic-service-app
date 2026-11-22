@@ -23,6 +23,19 @@ CLASS_LOW, CLASS_MEDIUM, CLASS_HIGH = 1, 2, 3
 CLASS_LABELS = {CLASS_LOW: "Low", CLASS_MEDIUM: "Medium", CLASS_HIGH: "High"}
 FOUR_LEG_NAMES = ("E", "N", "W", "S")   # counter-clockwise from east; row = from, column = to
 
+# Turn types for a four-leg intersection with traffic driving on the right. Legs are listed
+# counter-clockwise, so for a vehicle arriving from leg i: leg i again is a U-turn, the next leg
+# counter-clockwise is a right turn, the one after is straight on, the last one is a left turn.
+TURN_TYPES = ("u_turn", "left", "through", "right")
+TURN_LABELS = {"u_turn": "U-turn", "left": "Left", "through": "Through", "right": "Right"}
+_TURN_BY_STEP = {0: "u_turn", 1: "right", 2: "through", 3: "left"}   # step = (to - from) % 4
+
+# Starting values for the class of each turn (0 = not allowed, 1 low, 2 medium, 3 high).
+CLASS_PRESETS = {
+    "typical": {"u_turn": CLASS_LOW, "left": CLASS_MEDIUM, "through": CLASS_HIGH, "right": CLASS_MEDIUM},
+    "no_u_turns": {"u_turn": 0, "left": CLASS_MEDIUM, "through": CLASS_HIGH, "right": CLASS_MEDIUM},
+}
+
 IMBALANCE_WARNING = 0.10     # inflow and outflow totals more than 10% apart
 COLUMN_GAP_WARNING = 0.05    # arrivals more than 5% away from a leg's outflow
 
@@ -45,6 +58,17 @@ class TurningMovementResult:
     column_gaps: tuple        # arrivals at each leg minus its (balanced) outflow
     row_std: tuple            # spread of each leg's turns (not an error estimate)
     warnings: tuple
+
+    def to_dict(self):
+        """A plain, JSON-friendly copy (tuples become lists)."""
+        return {
+            "legs": list(self.legs), "original_inflows": list(self.original_inflows),
+            "original_outflows": list(self.original_outflows), "inflows": list(self.inflows),
+            "outflows": list(self.outflows), "balanced_by_scaling": self.balanced_by_scaling,
+            "imbalance": self.imbalance, "matrix": [list(row) for row in self.matrix],
+            "rounded": [list(row) for row in self.rounded], "column_gaps": list(self.column_gaps),
+            "row_std": list(self.row_std), "warnings": list(self.warnings),
+        }
 
 
 def _round_half_up(value):
@@ -81,6 +105,37 @@ def _validate(inflows, outflows, classes, legs):
         if outflows[j] > 0 and not any(classes[i][j] > 0 for i in range(n)):
             raise TurningMovementError(f"Leg {legs[j]} has traffic leaving but no turn leads to it.")
     return tuple(legs), inflows, outflows, classes
+
+
+def turn_type(from_leg, to_leg, legs=4):
+    """Which kind of turn a vehicle makes going from one leg to another (four-leg intersections only)."""
+    if legs != 4:
+        raise TurningMovementError("Turn types are only defined for four-leg intersections.")
+    return _TURN_BY_STEP[(to_leg - from_leg) % 4]
+
+
+def classes_from_turn_classes(turn_classes):
+    """Turn a per-leg {u_turn, left, through, right} table into the class matrix the method uses."""
+    if len(turn_classes) != 4:
+        raise TurningMovementError("Give the turn classes of all four legs.")
+    matrix = []
+    for i, leg in enumerate(turn_classes):
+        row = []
+        for j in range(4):
+            kind = turn_type(i, j)
+            value = leg.get(kind)
+            if isinstance(value, bool) or value not in (0, 1, 2, 3):
+                raise TurningMovementError(f"The class of the {TURN_LABELS[kind].lower()} turn must be 0, 1, 2 or 3.")
+            row.append(value)
+        matrix.append(row)
+    return matrix
+
+
+def movements_by_leg(result):
+    """Rounded vehicle counts per leg and turn type, e.g. [{"u_turn": 177, "right": 269, ...}, ...]."""
+    if len(result.legs) != 4:
+        raise TurningMovementError("Turn types are only defined for four-leg intersections.")
+    return [{turn_type(i, j): result.rounded[i][j] for j in range(4)} for i in range(4)]
 
 
 def estimate_turning_movements(inflows, outflows, classes, legs=None):

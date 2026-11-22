@@ -129,4 +129,16 @@ CREATE TABLE IF NOT EXISTS login_attempts(
 );
 CREATE INDEX IF NOT EXISTS idx_login_attempts_email ON login_attempts(email,at);
 CREATE INDEX IF NOT EXISTS idx_login_attempts_ip ON login_attempts(ip,at);
+CREATE TABLE IF NOT EXISTS turning_movement_studies(
+  id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), title TEXT NOT NULL, study_date TEXT,
+  mode TEXT NOT NULL DEFAULT 'manual', legs_json TEXT NOT NULL, classes_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'Pending', reply TEXT, reply_at TEXT,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, reviewed_by INTEGER, reviewed_at TEXT, sent_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_tm_studies_user ON turning_movement_studies(user_id,status);
+CREATE TABLE IF NOT EXISTS turning_movement_periods(
+  id INTEGER PRIMARY KEY, study_id INTEGER NOT NULL REFERENCES turning_movement_studies(id),
+  label TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0, inflows_json TEXT NOT NULL, outflows_json TEXT NOT NULL,
+  source_json TEXT, result_json TEXT, UNIQUE(study_id,label)
+);
 """
