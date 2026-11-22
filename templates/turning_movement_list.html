@@ -1,36 +1,57 @@
 {% extends "base.html" %}
 {% block body %}
-<style>
-.tm-head{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;margin-bottom:16px}
-.tm-filters a{margin-right:10px;text-decoration:none}.tm-filters a.on{font-weight:700;text-decoration:underline}
-.tm-table{width:100%;border-collapse:collapse}.tm-table th,.tm-table td{padding:8px 10px;border-bottom:1px solid #8884;text-align:left}
-.tm-badge{padding:2px 8px;border-radius:999px;border:1px solid #8886;font-size:.85em}
-</style>
-<div class="tm-head">
-  <h1>Turning movements</h1>
-  <a class="btn" href="{{ url_for('turning.new') }}">+ New study</a>
+{% from "turning_movement_diagram.html" import intersection_map %}
+<div class="page-heading">
+  <div>
+    <h1>Turning movements</h1>
+    <p>Estimate how many vehicles turn left, go through or turn right at a four-leg intersection.</p>
+  </div>
+  <a class="btn" href="{{ url_for('turning.new') }}">New study</a>
 </div>
-<p class="tm-filters">
-  <a href="{{ url_for('turning.index') }}" class="{{ '' if status else 'on' }}">All</a>
-  {% for s in statuses %}<a href="{{ url_for('turning.index', status=s) }}" class="{{ 'on' if status==s else '' }}">{{ s }}</a>{% endfor %}
-</p>
+
+<nav class="tm-seg" aria-label="Filter studies by status">
+  <a href="{{ url_for('turning.index') }}" {% if not status %}aria-current="page"{% endif %}>All</a>
+  {% for s in statuses %}<a href="{{ url_for('turning.index', status=s) }}" {% if status == s %}aria-current="page"{% endif %}>{{ s }}</a>{% endfor %}
+</nav>
+
 {% if rows %}
-<table class="tm-table">
-  <thead><tr><th>#</th><th>Title</th>{% if is_admin %}<th>Client</th>{% endif %}<th>Study date</th><th>Periods</th><th>Status</th><th>Last change</th></tr></thead>
-  <tbody>
-  {% for r in rows %}
-    <tr>
-      <td><a href="{{ url_for('turning.view', study_id=r.id) }}">TM-{{ r.id }}</a></td>
-      <td><a href="{{ url_for('turning.view', study_id=r.id) }}">{{ r.title }}</a></td>
-      {% if is_admin %}<td>{{ r.owner_name }}</td>{% endif %}
-      <td>{{ r.study_date or '—' }}</td><td>{{ r.period_count }}</td>
-      <td><span class="tm-badge">{{ r.status }}</span></td><td>{{ r.updated_at[:16]|replace('T',' ') }}</td>
-    </tr>
-  {% endfor %}
-  </tbody>
-</table>
+<div class="tw">
+  <table class="tm-list">
+    <thead><tr>
+      <th scope="col">#</th><th scope="col">Title</th>{% if is_admin %}<th scope="col">Client</th>{% endif %}
+      <th scope="col">Study date</th><th scope="col">Periods</th><th scope="col">Status</th><th scope="col">Last change</th>
+    </tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr>
+        <td><a class="tm-id" href="{{ url_for('turning.view', study_id=r.id) }}">TM-{{ r.id }}</a></td>
+        <td><a class="tm-title-link" href="{{ url_for('turning.view', study_id=r.id) }}">{{ r.title }}</a></td>
+        {% if is_admin %}<td>{{ r.owner_name }}</td>{% endif %}
+        <td>{{ r.study_date or '—' }}</td>
+        <td>{{ r.period_count }}</td>
+        <td><span class="b {{ r.status }}">{{ r.status }}</span></td>
+        <td>{{ r.updated_at[:16]|replace('T', ' ') }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
 {% else %}
-<p>{% if status %}No {{ status|lower }} studies.{% else %}No studies yet.{% endif %}
-  <a href="{{ url_for('turning.new') }}">Create the first one.</a></p>
+<div class="card tm-empty">
+  {{ intersection_map() }}
+  {% if status %}
+    <h2>No {{ status|lower }} studies</h2>
+    <p>Studies with another status are still in the list.</p>
+    <a class="btn alt" href="{{ url_for('turning.index') }}">Show all studies</a>
+  {% else %}
+    <h2>No studies yet</h2>
+    {% if is_admin %}
+    <p>Studies that clients submit appear here for review.</p>
+    {% else %}
+    <p>Enter the vehicles entering and leaving each leg of an intersection. The estimate appears here once an administrator approves it.</p>
+    {% endif %}
+    <a class="btn" href="{{ url_for('turning.new') }}">{{ 'New study' if is_admin else 'Create your first study' }}</a>
+  {% endif %}
+</div>
 {% endif %}
 {% endblock %}

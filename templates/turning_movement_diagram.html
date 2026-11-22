@@ -1,0 +1,45 @@
+{#- Four-leg intersection drawing shared by the turning-movement pages.
+    Legs run counter-clockwise: leg 1 on the right, leg 2 on top, leg 3 on the left, leg 4 at the bottom.
+    Traffic drives on the right. Teal arrows enter the junction, navy arrows leave it. -#}
+{% macro num(value) %}{{ "{:,}".format(value) if value is number else value }}{% endmacro %}
+
+{% macro intersection_map() %}
+<svg class="tm-xing-map" viewBox="0 0 200 200" aria-hidden="true" focusable="false">
+  <rect class="tm-road" x="0" y="66" width="200" height="68"/>
+  <rect class="tm-road" x="66" y="0" width="68" height="200"/>
+  <path class="tm-dash" d="M0 100H66M134 100H200M100 0V66M100 134V200"/>
+  <g class="tm-arrows tm-arrows-in">
+    <path d="M190 83H152M83 10V48M10 117H48M117 190V152"/>
+    <path class="tm-head" d="M146 83l8-4.5v9zM83 54l-4.5-8h9zM54 117l-8-4.5v9zM117 146l4.5 8h-9z"/>
+  </g>
+  <g class="tm-arrows tm-arrows-out">
+    <path d="M146 117H184M117 54V16M54 83H16M83 146V184"/>
+    <path class="tm-head" d="M190 117l-8-4.5v9zM117 10l-4.5 8h9zM10 83l8-4.5v9zM83 190l-4.5-8h9z"/>
+  </g>
+  <path class="tm-turn" d="M114 100A14 14 0 1 0 100 114"/>
+  <path class="tm-turn-head" d="M107 114l-8-4.5v9z"/>
+</svg>
+{% endmacro %}
+
+{#- legs: four names. inflows/outflows: optional lists, shown next to each leg.
+    editable: render the leg names as text inputs (name="leg_name_0" ... "leg_name_3"). -#}
+{% macro intersection(legs, inflows=none, outflows=none, editable=false) %}
+<div class="tm-xing" role="group" aria-label="Intersection with four legs, listed counter-clockwise">
+  {{ intersection_map() }}
+  {% for i in range(4) %}
+  <div class="tm-leg tm-leg-{{ i }}">
+    {% if editable %}
+    <label class="tm-leg-field"><i class="tm-idx">{{ i + 1 }}</i><input name="leg_name_{{ i }}" value="{{ legs[i] }}" maxlength="40" class="tm-leg-name" aria-label="Name of leg {{ i + 1 }}"></label>
+    {% else %}
+    <span class="tm-leg-label"><i class="tm-idx">{{ i + 1 }}</i><b>{{ legs[i] }}</b></span>
+    {% endif %}
+    {% if inflows is not none and outflows is not none %}
+    <span class="tm-flows">
+      <span class="tm-flow tm-flow-in"><small>Entering</small> <b>{{ num(inflows[i]) }}</b></span>
+      <span class="tm-flow tm-flow-out"><small>Leaving</small> <b>{{ num(outflows[i]) }}</b></span>
+    </span>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% endmacro %}

@@ -24,7 +24,7 @@
         <a href="{{url_for('outscraper_admin.admin_outscraper')}}">Directions API history</a>
       </div>
     </div>
-    <a class="side-link" href="{{url_for('turning.index')}}"><span class="side-icon">⇄</span>Turning movements</a>
+    <a class="side-link{{' active' if request.blueprint=='turning'}}" href="{{url_for('turning.index')}}"{{' aria-current="page"' if request.blueprint=='turning'}}><span class="side-icon">⇄</span>Turning movements</a>
     <a class="side-link" href="{{url_for('admin.admin')}}#services" data-section="services"><span class="side-icon">◇</span>Services</a>
     <a class="side-link" href="{{url_for('admin.admin')}}#users" data-section="users"><span class="side-icon">♙</span>Users</a>
     <a class="side-link" href="{{url_for('admin.admin')}}#network" data-section="network"><span class="side-icon">⌖</span>Road network</a>
@@ -32,7 +32,7 @@
     {% else %}
     <a class="side-link" href="{{url_for('client.dashboard')}}"><span class="side-icon">▦</span>Home</a>
     <a class="side-link" href="{{url_for('client.study')}}"><span class="side-icon">◇</span>Services</a>
-    <a class="side-link" href="{{url_for('turning.index')}}"><span class="side-icon">⇄</span>Turning movements</a>
+    <a class="side-link{{' active' if request.blueprint=='turning'}}" href="{{url_for('turning.index')}}"{{' aria-current="page"' if request.blueprint=='turning'}}><span class="side-icon">⇄</span>Turning movements</a>
     <a class="side-link" href="{{url_for('client.my_requests')}}"><span class="side-icon">▤</span>My requests</a>
     <a class="side-link" href="{{url_for('profile.profile')}}"><span class="side-icon">◎</span>Profile</a>
     {% endif %}

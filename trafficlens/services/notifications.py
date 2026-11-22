@@ -63,12 +63,35 @@ def _translate_legacy_notifications(c):
                 break
 
 
-def _notification_destination(request_id, is_admin):
-    row = db().execute("SELECT group_id FROM requests WHERE id=?", (request_id,)).fetchone()
-    group_id = row["group_id"] if row else None
-    if group_id:
-        return url_for("groups.admin_group", gid=group_id) if is_admin else url_for("groups.client_group", gid=group_id)
-    return url_for("admin_requests.admin_request", rid=request_id) if is_admin else url_for("client.result", rid=request_id)
+def _notification_destination(request_id, is_admin, study_id=None):
+    if study_id is not None:
+        study = db().execute(
+            "SELECT user_id FROM turning_movement_studies WHERE id=?", (study_id,)
+        ).fetchone()
+        if study and (is_admin or study["user_id"] == session.get("uid")):
+            return url_for("turning.view", study_id=study_id)
+
+    if request_id is not None:
+        row = db().execute(
+            "SELECT r.group_id,r.user_id,g.user_id AS group_user_id "
+            "FROM requests r LEFT JOIN request_groups g ON g.id=r.group_id WHERE r.id=?",
+            (request_id,),
+        ).fetchone()
+        if row and (is_admin or row["user_id"] == session.get("uid")):
+            group_id = row["group_id"]
+            if group_id:
+                if row["group_user_id"] is None or (
+                    not is_admin and row["group_user_id"] != session.get("uid")
+                ):
+                    return url_for("notifications.notifications")
+                return url_for("groups.admin_group", gid=group_id) if is_admin else url_for(
+                    "groups.client_group", gid=group_id
+                )
+            return url_for("admin_requests.admin_request", rid=request_id) if is_admin else url_for(
+                "client.result", rid=request_id
+            )
+
+    return url_for("notifications.notifications")
 
 
 def _unread_notification_count():

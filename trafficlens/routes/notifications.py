@@ -33,7 +33,9 @@ def open_notification(notification_id):
             (dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), notification_id, session["uid"]),
         )
         db().commit()
-    return redirect(notifications_svc._notification_destination(notification["request_id"], session.get("role") == "admin"))
+    return redirect(notifications_svc._notification_destination(
+        notification["request_id"], session.get("role") == "admin", notification["study_id"]
+    ))
 
 
 @bp.get("/api/notifications")
@@ -114,13 +116,15 @@ def notification_device_feed():
     if after_id < 0:
         return jsonify(error="Invalid notification cursor"), 400
     rows = db().execute(
-        "SELECT id,request_id,kind,title,message,created_at FROM notifications "
+        "SELECT id,request_id,study_id,kind,title,message,created_at FROM notifications "
         "WHERE user_id=? AND id>? ORDER BY id ASC LIMIT 30",
         (session["uid"], after_id),
     ).fetchall()
     notifications_out = []
     for row in rows:
-        destination = notifications_svc._notification_destination(row["request_id"], session.get("role") == "admin")
+        destination = notifications_svc._notification_destination(
+            row["request_id"], session.get("role") == "admin", row["study_id"]
+        )
         notifications_out.append({
             "id": row["id"],
             "title": row["title"],
