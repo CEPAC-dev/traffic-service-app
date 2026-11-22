@@ -24,6 +24,7 @@
         <a href="{{url_for('outscraper_admin.admin_outscraper')}}">Directions API history</a>
       </div>
     </div>
+    <a class="side-link" href="{{url_for('turning.index')}}"><span class="side-icon">⇄</span>Turning movements</a>
     <a class="side-link" href="{{url_for('admin.admin')}}#services" data-section="services"><span class="side-icon">◇</span>Services</a>
     <a class="side-link" href="{{url_for('admin.admin')}}#users" data-section="users"><span class="side-icon">♙</span>Users</a>
     <a class="side-link" href="{{url_for('admin.admin')}}#network" data-section="network"><span class="side-icon">⌖</span>Road network</a>
@@ -31,6 +32,7 @@
     {% else %}
     <a class="side-link" href="{{url_for('client.dashboard')}}"><span class="side-icon">▦</span>Home</a>
     <a class="side-link" href="{{url_for('client.study')}}"><span class="side-icon">◇</span>Services</a>
+    <a class="side-link" href="{{url_for('turning.index')}}"><span class="side-icon">⇄</span>Turning movements</a>
     <a class="side-link" href="{{url_for('client.my_requests')}}"><span class="side-icon">▤</span>My requests</a>
     <a class="side-link" href="{{url_for('profile.profile')}}"><span class="side-icon">◎</span>Profile</a>
     {% endif %}
@@ -124,7 +126,7 @@ if(notificationBadge){
 const notifToggle=document.getElementById('notifToggle');
 if(notifToggle){
  const panel=document.getElementById('notifPanel'),list=document.getElementById('notifItems'),badge=document.getElementById('notificationBadge');
- const icons={new_request:'📨',group_ready:'📊'};
+ const icons={new_request:'📨',group_ready:'📊',tm_submitted:'🚦',tm_result:'📊'};
  const api=(url,method='POST',body)=>fetch(url,{method,headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined}).then(async r=>{const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||`HTTP ${r.status}`);return j});
  const setBadge=n=>{badge.textContent=n;badge.hidden=!n};
  const empty=text=>{const li=document.createElement('li');li.className='notif-empty';li.textContent=text;list.replaceChildren(li)};

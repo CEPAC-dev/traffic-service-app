@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block body %}
+{% macro csrf() %}{% if csrf_token is defined %}<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{% endif %}{% endmacro %}
+<style>
+.tm-card{border:1px solid #8886;border-radius:8px;padding:12px 16px;margin:0 0 16px}
+.tm-scroll{overflow-x:auto}.tm-grid{border-collapse:collapse}.tm-grid th,.tm-grid td{padding:5px 10px;border-bottom:1px solid #8884;text-align:right}
+.tm-grid th:first-child,.tm-grid td:first-child{text-align:left}
+.tm-badge{padding:2px 8px;border-radius:999px;border:1px solid #8886;font-size:.85em}
+.tm-warn{border-left:4px solid #d97706;padding:6px 10px;margin:8px 0}
+.tm-actions form{display:inline-block;margin:0 12px 12px 0;vertical-align:top}.tm-actions textarea{display:block;width:280px}
+.tm-hint{opacity:.75;font-size:.9em}
+</style>
+{% set legs = study.legs %}
+<p><a href="{{ url_for('turning.index') }}">← All studies</a></p>
+<h1>{{ study.title }} <span class="tm-badge">{{ study.status }}</span></h1>
+<p class="tm-hint">TM-{{ study.id }}{% if study.study_date %} · study date {{ study.study_date }}{% endif %}{% if is_admin %} · client: {{ study.owner_name }} ({{ study.owner_email }}){% endif %}</p>
+
+{% if study.reply %}<div class="tm-card"><b>{{ 'Reply from the administrator' if not is_admin else 'Reply sent to the client' }}</b><p>{{ study.reply }}</p></div>{% endif %}
+{% if not is_admin and study.status == 'Pending' %}<p class="tm-hint">Waiting for review. You can still edit it until an administrator starts working on it.</p>{% endif %}
+{% if not is_admin and study.status == 'Processing' %}<p class="tm-hint">An administrator is working on this study. The results will appear here when they are approved.</p>{% endif %}
+{% if can_edit %}<p><a class="btn" href="{{ url_for('turning.edit', study_id=study.id) }}">Edit</a></p>{% endif %}
+
+{% for p in study.periods %}
+<section class="tm-card">
+  <h2>{{ p.label }}</h2>
+  <div class="tm-scroll"><table class="tm-grid">
+    <thead><tr><th>Leg</th><th>Entering</th><th>Leaving</th></tr></thead>
+    <tbody>{% for i in range(4) %}<tr><td>{{ legs[i] }}</td><td>{{ p.inflows[i] }}</td><td>{{ p.outflows[i] }}</td></tr>{% endfor %}</tbody>
+  </table></div>
+  {% if p.result %}
+    {% if is_admin and p.result.warnings %}
+      {% for w in p.result.warnings %}<div class="tm-warn">⚠ {{ w }}</div>{% endfor %}
+    {% endif %}
+    <h3>Turning movements (vehicles)</h3>
+    {% if p.result.balanced_by_scaling %}<p class="tm-hint">The entering and leaving totals differed, so the leaving counts were scaled to match before estimating.</p>{% endif %}
+    <div class="tm-scroll"><table class="tm-grid">
+      <thead><tr><th>From leg</th>{% for kind in turn_types %}<th>{{ turn_labels[kind] }}</th>{% endfor %}<th>Total</th></tr></thead>
+      <tbody>{% for i in range(4) %}{% set m = p.result.movements[i] %}<tr><td>{{ legs[i] }}</td>
+        {% for kind in turn_types %}<td>{{ m[kind] }}</td>{% endfor %}<td><b>{{ m.values()|sum }}</b></td></tr>{% endfor %}</tbody>
+    </table></div>
+    <p class="tm-hint">Method: {{ p.result.method }}</p>
+  {% endif %}
+</section>
+{% endfor %}
+{% if not is_admin and not study.results_visible %}<p class="tm-hint">Results are shown here after the administrator approves the study.</p>{% endif %}
+
+{% if is_admin %}
+<section class="tm-card tm-actions">
+  <h2>Review</h2>
+  {% if study.warning_count %}<div class="tm-warn">This study has {{ study.warning_count }} warning(s) (see the periods above). The client cannot see them.</div>{% endif %}
+  {% if study.status != 'Completed' %}
+  <form method="post" action="{{ url_for('turning.approve', study_id=study.id) }}">{{ csrf() }}
+    <label>Message to the client (optional)<textarea name="reply" maxlength="2000"></textarea></label>
+    {% if study.warning_count %}<label><input type="checkbox" name="acknowledge" value="1"> I reviewed the warnings</label>{% endif %}
+    <button type="submit" class="btn">Approve and release results</button>
+  </form>
+  {% if study.status in ('Pending','Processing') %}
+  <form method="post" action="{{ url_for('turning.reject', study_id=study.id) }}">{{ csrf() }}
+    <label>Reason (required)<textarea name="reply" maxlength="2000" required></textarea></label>
+    <button type="submit">Reject</button>
+  </form>{% endif %}
+  {% else %}
+  <form method="post" action="{{ url_for('turning.reopen', study_id=study.id) }}">{{ csrf() }}
+    <button type="submit">Reopen for corrections</button></form>
+  {% endif %}
+  <form method="post" action="{{ url_for('turning.delete', study_id=study.id) }}" onsubmit="return confirm('Delete TM-{{ study.id }} permanently?')">{{ csrf() }}
+    <button type="submit" class="danger-text">Delete</button></form>
+</section>
+{% endif %}
+{% endblock %}

@@ -24,6 +24,7 @@ from trafficlens.db import SCHEMA, db, close_db
 from trafficlens.security.hardening import init_security
 from trafficlens.security.settings import debug_enabled, is_production
 from trafficlens.runtime import bind_app
+from trafficlens.study_notifications import ensure_study_notifications
 from trafficlens.services import (
     catalog as catalog_svc,
     common as common_svc,
@@ -33,7 +34,7 @@ from trafficlens.services import (
 )
 init_security(app)
 bind_app(app)
-from trafficlens.routes import public as public_routes, client as client_routes, profile as profile_routes, groups as groups_routes, notifications as notifications_routes, admin as admin_routes, admin_requests as admin_requests_routes, outscraper_admin as outscraper_admin_routes, directions as directions_routes, volumes as volumes_routes
+from trafficlens.routes import public as public_routes, client as client_routes, profile as profile_routes, groups as groups_routes, notifications as notifications_routes, admin as admin_routes, admin_requests as admin_requests_routes, outscraper_admin as outscraper_admin_routes, directions as directions_routes, volumes as volumes_routes, turning_movement as turning_movement_routes
 app.register_blueprint(public_routes.bp)
 app.register_blueprint(client_routes.bp)
 app.register_blueprint(profile_routes.bp)
@@ -44,6 +45,7 @@ app.register_blueprint(admin_requests_routes.bp)
 app.register_blueprint(outscraper_admin_routes.bp)
 app.register_blueprint(directions_routes.bp)
 app.register_blueprint(volumes_routes.bp)
+app.register_blueprint(turning_movement_routes.bp)
 
 
 app.teardown_appcontext(close_db)
@@ -75,6 +77,7 @@ def _migrate_profile_columns(c):
 def init():
     c = sqlite3.connect(app.config["DATABASE"]); c.executescript(SCHEMA)
     _migrate_profile_columns(c)
+    ensure_study_notifications(c)   # lets notifications point at turning-movement studies
     workflow_cols = {column[1] for column in c.execute("PRAGMA table_info(request_directions_workflows)")}
     if "interval_minutes" not in workflow_cols:
         c.execute("ALTER TABLE request_directions_workflows ADD COLUMN interval_minutes INTEGER")
@@ -160,6 +163,7 @@ def init():
         admin_password = os.environ.get("TRAFFICLENS_ADMIN_PASSWORD", "").strip()
         generated_password = not admin_password
         if is_production() and (generated_password or len(admin_password) < 12):
+            c.close()   # release the database file before failing: Windows cannot delete a file that is still open
             raise RuntimeError("Set TRAFFICLENS_ADMIN_PASSWORD (at least 12 characters) before the first start in production.")
         if generated_password:
             admin_password = secrets.token_urlsafe(12)
