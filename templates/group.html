@@ -10,6 +10,14 @@
 <div class="card" style="margin-bottom:14px"><p style="margin:0"><span class="b {{card.status}}">{{card.status}}</span>
 {% for s in card.services %}<span class="pill">{{SVINFO[s].icon}} {{SERVICES[s]}}</span>{% endfor %}
 {% if card.sent %}<span class="hint"> · Report sent {{g.sent_at}}</span>{% elif admin_view %}<span class="hint"> · {{ 'Every request is Completed. You can send the single report now.' if ready else 'Open each request below, finish its review, then send one report for the whole order.' }}</span>{% else %}<span class="hint"> · All results will arrive together in one report once every part is ready.</span>{% endif %}</p></div>
+<div id="groupMap" class="group-map" role="img" aria-label="Map of all links in this order"></div>
+{% set volumes_tab = admin_view and volume_children %}
+{% if tm or volumes_tab %}
+<div class="tabs" id="groupTabs" role="tablist" aria-label="Order sections"><button type="button" class="on" role="tab" aria-selected="true" data-panel="panelLinks">Links &amp; requests</button>{% if volumes_tab %}<button type="button" role="tab" aria-selected="false" data-panel="panelVolumes">Traffic volumes</button>{% endif %}{% if tm %}<button type="button" role="tab" aria-selected="false" data-panel="panelTurning">Turning Movement <span class="b {{ (tm.status if admin_view else ('Completed' if tm.released else 'Processing')) }}">{{ (tm.status if admin_view else ('Completed' if tm.released else 'Preparing')) }}</span></button>{% endif %}</div>
+{% if volumes_tab %}<div id="panelVolumes" role="tabpanel" hidden>{% include "group_volumes.html" %}</div>{% endif %}
+{% if tm %}<div id="panelTurning" role="tabpanel" hidden>{% include "group_turning_movement.html" %}</div>{% endif %}
+{% endif %}
+<div id="panelLinks" role="tabpanel">
 {% if admin_view %}
 {% if shared %}<div class="card" style="margin-bottom:14px"><b>Free flow is requested once per link</b>
 {% for item in shared %}<p class="hint" style="margin:6px 0 0">{{SERVICES[item.service]}}: <b>{{item.api_calls}}</b> Directions API request{{'' if item.api_calls==1 else 's'}} instead of {{item.without}}. Run it on {% for link_no, owner in item.owners.items() %}<a href="{{url_for('admin_requests.admin_request',rid=owner)}}">Link {{link_no}} · REQ-{{owner}}</a>{{ ', ' if not loop.last }}{% endfor %}; the confirmed value is copied to the other periods automatically.</p>{% endfor %}</div>{% endif %}
@@ -24,8 +32,90 @@
 {% if admin_view %}<td><a class="btn btn-small" href="{{url_for('admin_requests.admin_request',rid=c.id)}}">Open</a></td>{% elif card.sent %}<td>{% if c.status != 'Rejected' %}<a class="btn btn-small alt" href="{{url_for('client.result',rid=c.id)}}">Details</a>{% endif %}</td>{% endif %}</tr>{% endfor %}
 </tbody></table></div>
 {% endif %}
+</div>
 {% endblock %}
-{% block js %}{% if admin_view %}<script>
+{% block js %}<script>
+const GROUP_PANELS=['panelLinks','panelVolumes','panelTurning'].filter(id=>document.getElementById(id));
+const showPanel=name=>{document.querySelectorAll('#groupTabs button').forEach(x=>{const on=x.dataset.panel===name;x.classList.toggle('on',on);x.setAttribute('aria-selected',on)});GROUP_PANELS.forEach(id=>document.getElementById(id).hidden=id!==name)};
+document.querySelectorAll('#groupTabs button').forEach(b=>b.onclick=()=>{showPanel(b.dataset.panel);history.replaceState(null,'','#'+b.dataset.panel)});
+if(GROUP_PANELS.includes(location.hash.slice(1)))showPanel(location.hash.slice(1));
+// one map with every link of the order
+(function(){
+ const links={{ map_links|tojson }};if(!links.length||typeof L==='undefined')return;
+ const map=L.map('groupMap');tiles(map);const colors=['#0D9488','#2563EB','#C2410C','#7C3AED','#BE185D','#4D7C0F','#0369A1','#B45309'];const all=[];
+ links.forEach((link,i)=>{const color=colors[i%colors.length],line=L.polyline(link.path,{color,weight:5}).addTo(map);
+  line.bindTooltip('Link '+link.label,{permanent:true,direction:'top',className:'link-tag'});all.push(...link.path);
+  link.coords.forEach((p,k)=>L.circleMarker(p,{radius:5,color,fillColor:'#fff',fillOpacity:1,weight:2}).addTo(map).bindTooltip(k?'B':'A'));
+  if(link.point_c){L.marker(link.point_c,{icon:L.divIcon({className:'point-c-marker',html:'C',iconSize:[24,24],iconAnchor:[12,12]})}).addTo(map).bindTooltip('Link '+link.no+' · C');all.push(link.point_c)}});
+ map.fitBounds(L.latLngBounds(all),{padding:[30,30]});
+})();
+{% if tm %}
+{% if admin_view %}
+const tmMsg=document.getElementById('tmMsg');
+const tmClasses=()=>[...document.querySelectorAll('#tmRatingsForm tbody tr')].map(r=>Object.fromEntries([...r.querySelectorAll('select')].map(s=>[s.dataset.kind,Number(s.value)])));
+async function tmPost(url,body,button){
+ button.disabled=true;tmMsg.textContent='Working…';
+ const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});const j=await r.json();
+ if(!r.ok){button.disabled=false;tmMsg.textContent=j.error||'Could not complete the action.';return}
+ location.hash='panelTurning';location.reload();
+}
+document.getElementById('tmCalculate')?.addEventListener('click',e=>tmPost('/api/groups/{{g.id}}/turning/calculate',{turn_classes:tmClasses()},e.currentTarget));
+document.getElementById('tmApprove')?.addEventListener('click',e=>{if(confirm('Release the turning movements of GRP-{{g.id}} to the client?'))tmPost('/api/groups/{{g.id}}/turning/approve',{},e.currentTarget)});
+{% endif %}
+{% endif %}
+</script>{% if admin_view and volume_children %}<script src="{{ url_for('static', filename='group_volumes.js') }}"></script><script>
+(function(){
+ const children={{ volume_children|tojson }},$=id=>document.getElementById(id),tbody=$('gvTable').querySelector('tbody');
+ const request=async(method,url,body)=>{try{const r=await fetch(url,{method,headers:{'Content-Type':'application/json'},body:method==='GET'?undefined:JSON.stringify(body||{}),cache:'no-store'});let data=null;try{data=await r.json()}catch(e){}return{ok:r.ok,status:r.status,data}}catch(e){return{ok:false,status:0,data:{error:e.message}}}};
+ const gv=GroupVolumes.create(request),esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+ let states=[],busy=false,lastRefresh=0;const typed={};
+ const volumeOf=s=>{const h=s.volumes&&s.volumes.result&&s.volumes.result.hourly;return h&&h.length?Math.round(h.reduce((t,i)=>t+Number(i.value),0)):null};
+ function render(){
+  const by=Object.fromEntries(states.map(s=>[s.id,s]));
+  tbody.innerHTML=children.map(c=>{const s=by[c.id]||{},st=GroupVolumes.stage(s),locked=s.volumes&&['running','ready_for_review','sent'].includes(s.volumes.status);
+   const lanes=typed[c.id]!==undefined?typed[c.id]:((s.volumes&&s.volumes.lanes)||c.suggested_lanes||'');
+   const note=s.volumes&&s.volumes.error?`<small class="request-subtext">${esc(s.volumes.error)}</small>`:'';
+   const v=volumeOf(s);
+   return `<tr><td><b>Link ${c.link_no}</b></td><td>${esc(c.period)}</td><td><input type="number" min="1" max="12" step="1" style="width:76px" data-lanes="${c.id}" value="${esc(lanes)}" ${locked?'disabled':''} aria-label="Lanes of link ${c.link_no}"></td><td><span class="b ${st.tone==='good'?'Completed':st.tone==='bad'?'Rejected':'Processing'}">${esc(st.label)}</span>${note}</td><td>${v===null?'-':v.toLocaleString()}</td><td><a class="btn btn-small" href="/admin/requests/${c.id}#svc-volumes">Details</a></td></tr>`}).join('');
+  tbody.querySelectorAll('[data-lanes]').forEach(i=>i.oninput=()=>{typed[i.dataset.lanes]=i.value});
+  const ready=states.length===children.length&&states.every(s=>s.volumes&&['ready_for_review','sent'].includes(s.volumes.status));
+  const allSent=states.length&&states.every(s=>s.volumes&&s.volumes.status==='sent');
+  $('gvApprove').disabled=!ready||allSent||busy;
+  const badge=$('gvBadge');badge.textContent=allSent?'All sent':ready?'Ready to approve':'In progress';badge.className='b '+(allSent?'Completed':ready?'Processing':'Pending');
+ }
+ async function poll(){if(busy)return;busy=true;try{states=await gv.loadStates(children);render();if(Date.now()-lastRefresh>15000){lastRefresh=Date.now();if(await gv.refreshRunning(states))setTimeout(poll,800)}}finally{busy=false}}
+ const say=t=>{$('gvMsg').textContent=t};
+ const report=(label,results)=>{const bad=results.filter(r=>!r.ok);say(bad.length?`${label}: ${results.length-bad.length} done, ${bad.length} failed. `+bad.map(r=>`Link ${(children.find(c=>c.id===r.id)||{}).link_no}: ${r.error}`).join(' · '):`${label}: ${results.length} done.`)};
+ $('gvSendApi').onclick=async()=>{
+  const plan=gv.plan(children,states);
+  if(!plan.directions.length&&!plan.freeflow.length){say('Nothing to send: every link already has its speed and free-flow requests.');return}
+  const rows=children.map(c=>`<tr><td>Link ${c.link_no}</td><td>${esc(c.period)}</td><td>${plan.directions.includes(c)?'will send':'already sent'}</td><td>${plan.freeflow.includes(c)?'will send':'already sent / accepted'}</td></tr>`);
+  $('gvPlanRows').innerHTML=rows.join('');
+  $('gvPlanText').textContent=`${plan.directions.length} speed request(s) and ${plan.freeflow.length} free-flow request(s) will be sent to the Directions API.`;
+  $('gvCostAck').checked=false;$('gvConfirmSend').disabled=true;$('gvDialog').showModal();
+ };
+ $('gvCostAck').onchange=()=>{$('gvConfirmSend').disabled=!$('gvCostAck').checked};
+ $('gvCancelSend').onclick=()=>$('gvDialog').close();
+ $('gvConfirmSend').onclick=async()=>{
+  $('gvConfirmSend').disabled=true;const plan=gv.plan(children,states);$('gvDialog').close();busy=true;say('Sending the speed requests...');
+  try{const a=await gv.sendDirections(plan.directions);say('Sending the free-flow requests...');const f=await gv.sendFreeflow(plan.freeflow);report('API requests',a.concat(f))}finally{busy=false}
+  poll();
+ };
+ $('gvSaveLanes').onclick=async()=>{
+  const lanes={};children.forEach(c=>{const s=states.find(x=>x.id===c.id),v=typed[c.id]!==undefined?typed[c.id]:((s&&s.volumes&&s.volumes.lanes)||c.suggested_lanes);if(v)lanes[c.id]=v});
+  busy=true;say('Saving the lane counts...');
+  try{report('Lane counts',await gv.saveLanes(children,states,lanes))}finally{busy=false}
+  poll();
+ };
+ $('gvApprove').onclick=async()=>{
+  if(!confirm('Approve and send the Traffic volumes of all {{ volume_children|length }} requests of GRP-{{g.id}}?'))return;
+  busy=true;say('Approving...');let outcome;try{outcome=await gv.approveAll(children,states)}finally{busy=false}
+  if(!outcome.ok&&outcome.waiting.length)say('Not every link is ready yet.');else report('Approval',outcome.results);
+  poll();
+ };
+ poll();setInterval(poll,5000);
+})();
+</script>{% endif %}{% if admin_view %}<script>
 document.getElementById('deleteGroup').onclick=async()=>{
  if(!confirm('Delete GRP-{{g.id}} and all {{children|length}} requests in it? This cannot be undone.'))return;
  const r=await fetch('/api/groups/{{g.id}}/delete',{method:'POST'});const j=await r.json();

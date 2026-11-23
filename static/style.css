@@ -794,3 +794,15 @@ button.topbar-notifications{border:0;background:none;cursor:pointer;font-family:
   .tm-period-head{align-items:center}
   .tm-period-name{flex:1 1 auto}
 }
+.tm-ratings td{text-align:left!important}
+.tm-rate{display:inline-block;padding:3px 9px;border-radius:999px;font-size:13px;font-weight:600;background:#EEF2F6;color:var(--navy)}
+.tm-rate-0{background:#F1F3F5;color:#7B8794}
+.tm-rate-1{background:#E3F2FD;color:#1565C0}
+.tm-rate-2{background:#FFF4DB;color:#8A5A00}
+.tm-rate-3{background:#DDF3EE;color:#0B6F63}
+.tm-ratings select{width:auto;min-width:132px;padding:6px 8px}
+.svc-hidden{display:none!important}
+.service-tabs{margin:16px 0}
+.service-tabs button .b{margin-left:6px;font-size:11px;padding:1px 7px}
+.group-map{height:340px;margin:0 0 14px;border-radius:10px;border:1px solid var(--line,#E4EBF2)}
+.link-tag{font-weight:700}

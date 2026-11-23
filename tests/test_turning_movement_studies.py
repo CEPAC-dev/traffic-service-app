@@ -77,9 +77,20 @@ class CreateStudyTests(StudyTestCase):
         study = studies.get_study(self.make())
         self.assertEqual((study["status"], study["mode"], study["legs"]), ("Pending", "manual", ["E", "N", "W", "S"]))
         result = study["periods"][0]["result"]
-        self.assertEqual(result["rounded"][0], [177, 269, 901, 723])
-        self.assertEqual(result["movements"][0], {"u_turn": 177, "right": 269, "through": 901, "left": 723})
-        self.assertEqual(result["method"], "legacy")
+        self.assertEqual(result["rounded"][0], [32, 284, 974, 780])
+        self.assertEqual(result["movements"][0], {"u_turn": 32, "right": 284, "through": 974, "left": 780})
+        self.assertEqual(result["method"], "ordered")
+
+    def test_every_period_of_a_study_keeps_the_ratings_of_every_leg(self):
+        study = studies.get_study(self.make([dict(BALANCED), dict(UNBALANCED, label="MD"), dict(BALANCED, label="PM")]))
+        for period in study["periods"]:
+            for movements, ratings in zip(period["result"]["movements"], study["turn_classes"]):
+                for a in tm.TURN_TYPES:
+                    for b in tm.TURN_TYPES:
+                        if ratings[a] > ratings[b]:
+                            self.assertGreaterEqual(movements[a], movements[b], (period["label"], a, b))
+                    if ratings[a] == 0:
+                        self.assertEqual(movements[a], 0)
 
     def test_defaults_give_a_typical_class_for_every_leg(self):
         study_id = studies.create_study(self.alice, "Defaults", [dict(BALANCED)])
@@ -242,7 +253,7 @@ class ClientViewTests(StudyTestCase):
         studies.approve_study(study_id, self.admin)
         view = studies.client_view(studies.get_study(study_id))
         self.assertTrue(view["results_visible"])
-        self.assertEqual(view["periods"][0]["result"]["rounded"][1], [414, 314, 703, 1269])
+        self.assertEqual(view["periods"][0]["result"]["rounded"][1], [355, 284, 703, 1358])
         self.assertNotIn("row_std", view["periods"][0]["result"])
         self.assertNotIn("warnings", view["periods"][0]["result"])
 

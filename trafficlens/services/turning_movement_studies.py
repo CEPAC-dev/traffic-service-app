@@ -26,7 +26,7 @@ DEFAULT_LEGS = tm.FOUR_LEG_NAMES
 MAX_PERIODS = 24
 MAX_TITLE = 120
 MAX_NAME = 40
-METHOD = "legacy"          # the estimation method that produced stored results
+METHOD = "ordered"         # the estimation method that produced stored results (older studies say "legacy")
 EDITABLE_BY_OWNER = ("Pending", "Rejected")
 LOCKED = ("Completed",)
 

@@ -1,7 +1,10 @@
 """Turning-movement studies: the client's entry form, the owner's view and the admin's review."""
+import re
+from collections import Counter
+from datetime import datetime, timezone
 from functools import wraps
 
-from flask import Blueprint, abort, flash, redirect, render_template, request, session, url_for
+from flask import Blueprint, abort, flash, redirect, render_template, request, send_file, session, url_for
 
 from trafficlens import study_notifications as notes
 from trafficlens.services import turning_movement as tm
@@ -96,6 +99,13 @@ def _form_page(values, study=None, status=200):
                            turn_types=tm.TURN_TYPES, turn_labels=tm.TURN_LABELS, presets=PRESET_NAMES), status
 
 
+def _diagram(shown):
+    """What the drawing may use. For a client the movements exist only after approval, so nothing leaks."""
+    return {"legs": shown["legs"],
+            "periods": [{"label": p["label"], "inflows": p["inflows"], "outflows": p["outflows"],
+                         "movements": (p.get("result") or {}).get("movements")} for p in shown["periods"]]}
+
+
 # ------------------------------------------------------------ pages
 
 @bp.get("/")
@@ -103,9 +113,11 @@ def _form_page(values, study=None, status=200):
 def index():
     status = request.args.get("status")
     status = status if status in STATUSES else None
-    rows = studies.list_studies(None if _is_admin() else session["uid"], status)
+    everything = studies.list_studies(None if _is_admin() else session["uid"])
+    counts = Counter(row["status"] for row in everything)
+    rows = [row for row in everything if not status or row["status"] == status]
     return render_template("turning_movement_list.html", rows=rows, status=status, statuses=STATUSES,
-                           is_admin=_is_admin())
+                           counts=counts, total=len(everything), is_admin=_is_admin())
 
 
 @bp.route("/new", methods=["GET", "POST"])
@@ -119,7 +131,7 @@ def new():
         flash(str(exc), "error")
         return _form_page(_values_from_form(request.form), status=400)
     notes.notify_admins_new_study(study_id, session.get("name"))
-    flash("Your study was submitted. You will be notified when the results are ready.", "success")
+    flash("Sent for review. You will be notified when the results are ready.", "success")
     return redirect(url_for("turning.view", study_id=study_id))
 
 
@@ -128,9 +140,52 @@ def new():
 def view(study_id):
     study = _load(study_id)
     admin = _is_admin()
-    return render_template("turning_movement_view.html", study=study if admin else studies.client_view(study),
-                           is_admin=admin, can_edit=_can_edit(study), turn_types=tm.TURN_TYPES,
-                           turn_labels=tm.TURN_LABELS)
+    shown = study if admin else studies.client_view(study)
+    return render_template("turning_movement_view.html", study=shown, diagram=_diagram(shown), is_admin=admin,
+                           can_edit=_can_edit(study), turn_types=tm.TURN_TYPES, turn_labels=tm.TURN_LABELS)
+
+
+def _released(study_id):
+    """The study as this person may see it, or None while there are no results they may see.
+    Exports always start from this, so a client can never download what is still hidden from them."""
+    study = _load(study_id)
+    shown = study if _is_admin() else studies.client_view(study)
+    return shown if any(p.get("result") for p in shown["periods"]) else None
+
+
+def _not_ready(study_id):
+    flash("The results are not ready yet.", "error")
+    return redirect(url_for("turning.view", study_id=study_id))
+
+
+@bp.get("/<int:study_id>/export.xlsx")
+@_login_required
+def export_xlsx(study_id):
+    shown = _released(study_id)
+    if shown is None:
+        return _not_ready(study_id)
+    try:
+        from trafficlens.services import turning_movement_export as export
+    except ImportError:
+        flash("Excel export needs the openpyxl package. Run: pip install openpyxl", "error")
+        return redirect(url_for("turning.view", study_id=study_id))
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    data = export.build_workbook(shown, stamp, include_internal=_is_admin())
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", shown["title"]).strip("-")[:40] or "study"
+    import io
+    return send_file(io.BytesIO(data), as_attachment=True, download_name=f"TM-{study_id}-{slug}.xlsx",
+                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+@bp.get("/<int:study_id>/report")
+@_login_required
+def report(study_id):
+    shown = _released(study_id)
+    if shown is None:
+        return _not_ready(study_id)
+    return render_template("turning_movement_report.html", study=shown, diagram=_diagram(shown), is_admin=_is_admin(),
+                           turn_types=tm.TURN_TYPES, turn_labels=tm.TURN_LABELS,
+                           report_date=datetime.now(timezone.utc).strftime("%Y-%m-%d"))
 
 
 @bp.route("/<int:study_id>/edit", methods=["GET", "POST"])
@@ -152,7 +207,7 @@ def edit(study_id):
         return _form_page(_values_from_form(request.form), study=study, status=400)
     if not _is_admin():
         notes.notify_admins_new_study(study_id, session.get("name"), resubmitted=study["status"] == "Rejected")
-    flash("Saved.", "success")
+    flash("Changes saved.", "success")
     return redirect(url_for("turning.view", study_id=study_id))
 
 
@@ -176,7 +231,7 @@ def approve(study_id):
         study_id,
         lambda s: studies.approve_study(study_id, session["uid"], request.form.get("reply"),
                                         acknowledge_warnings=request.form.get("acknowledge") == "1"),
-        "Approved. The client can now see the results.",
+        "Approved. The client can see the results now.",
         lambda s: ("tm_result", "Turning-movement results are ready", f'The results of "{s["title"]}" are ready.'))
 
 
@@ -185,7 +240,7 @@ def approve(study_id):
 def reject(study_id):
     return _admin_action(
         study_id, lambda s: studies.reject_study(study_id, session["uid"], request.form.get("reply")),
-        "Rejected. The client can fix it and resubmit.",
+        "Rejected. The client can fix the counts and send the study again.",
         lambda s: ("tm_result", "Turning-movement study rejected", f'"{s["title"]}" needs changes. Open it to read why.'))
 
 
@@ -193,7 +248,7 @@ def reject(study_id):
 @_admin_required
 def reopen(study_id):
     return _admin_action(study_id, lambda s: studies.reopen_study(study_id, session["uid"]),
-                         "Reopened. The results are hidden from the client until you approve again.")
+                         "Reopened. The client cannot see the results until you approve again.")
 
 
 @bp.post("/<int:study_id>/delete")
@@ -206,5 +261,5 @@ def delete(study_id):
         flash(str(exc), "error")
         return redirect(url_for("turning.view", study_id=study_id))
     notes.forget_study(study_id)
-    flash("The study was deleted.", "success")
+    flash("Study deleted.", "success")
     return redirect(url_for("turning.index"))

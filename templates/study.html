@@ -81,6 +81,17 @@
       </details>
     </section>
 
+    <section class="step" id="stepTurning" hidden>
+      <div class="step-head"><span class="step-mark"><span>5</span></span><h2>Turning movements</h2></div>
+      <label class="svc-tile"><input type="checkbox" id="tmEnable"><span class="svc-text"><b>Turning movements of the intersection</b><small>Available because this order has 8 links. How many vehicles turn left, go through, turn right or make a U-turn from each leg, built from the Traffic volumes of the entries and exits.</small></span><span class="svc-tags"><em>Uses Traffic volumes</em></span></label>
+      <div id="tmOptions" hidden>
+        <p class="step-help">Legs are always East, North, West, South, in the order you added the links: Links 1 and 2 are East, 3 and 4 North, 5 and 6 West, 7 and 8 South. By default the first link of each pair is an entry and the second an exit; change a pair if it is the other way round.</p>
+        <div class="tw"><table><thead><tr><th>Leg</th><th>First link of the pair</th><th>Second link of the pair</th></tr></thead><tbody id="tmRoles"></tbody></table></div>
+        <p class="step-help">Rate every turn from 0 to 3. A 0 means the turn is not allowed. A higher rating always gets clearly more vehicles.</p>
+        <div class="tw"><table class="tm-grid"><thead><tr><th>From leg</th><th>U-turn</th><th>Left</th><th>Through</th><th>Right</th></tr></thead><tbody id="tmRatings"></tbody></table></div>
+      </div>
+    </section>
+
     <div id="msg" class="wb-msg"></div>
     <div class="wb-footer">
       <p id="orderSummary" class="summary" aria-live="polite"></p>
@@ -207,7 +218,7 @@
       L.polyline(link.path, { color, weight: 5 }).addTo(savedGroup).bindTooltip(`Link ${index + 1}`, { permanent: true, direction: 'top' });
       const item = document.createElement('li'); item.className = 'link-chip'; item.style.setProperty('--swatch', color);
       const label = document.createElement('span');
-      label.textContent = `Link ${index + 1}, about ${link.road_km} km${link.junctions ? `, ${link.junctions} intersection${link.junctions === 1 ? '' : 's'} acknowledged` : ''}`;
+      label.textContent = `Link ${index + 1}${tmOn() ? ' · ' + tmLinkLabel(index) : ''}, about ${link.road_km} km${link.junctions ? `, ${link.junctions} intersection${link.junctions === 1 ? '' : 's'} acknowledged` : ''}`;
       const edit = document.createElement('button'); edit.type = 'button'; edit.className = 'chip-edit'; edit.textContent = 'Edit';
       edit.onclick = () => editLink(index);
       const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'chip-remove'; remove.textContent = 'Remove';
@@ -226,7 +237,29 @@
     });
     linkCount.textContent = `${links.length} / ${maxLinksForMode()}`;
   }
+
+  // ---- turning movements (only for an order of exactly 8 links)
+  const TM_LEGS = ['East', 'North', 'West', 'South'], TM_TURNS = [['u_turn', 'U-turn'], ['left', 'Left'], ['through', 'Through'], ['right', 'Right']];
+  const TM_DEFAULT = { u_turn: 1, left: 2, through: 3, right: 2 }, TM_LABEL = ['0 Not allowed', '1 Low', '2 Medium', '3 High'];
+  const tmEnable = document.getElementById('tmEnable'), tmOptions = document.getElementById('tmOptions'), stepTurning = document.getElementById('stepTurning');
+  const tmRoles = document.getElementById('tmRoles'), tmRatings = document.getElementById('tmRatings');
+  tmRoles.innerHTML = TM_LEGS.map((name, leg) => `<tr><th scope="row">${name}</th><td>Link ${2 * leg + 1}: <select data-tm-leg="${leg}" aria-label="${name}: role of link ${2 * leg + 1}"><option value="in">Entry</option><option value="out">Exit</option></select></td><td>Link ${2 * leg + 2}: <b data-tm-other="${leg}">Exit</b></td></tr>`).join('');
+  tmRatings.innerHTML = TM_LEGS.map((name, leg) => `<tr data-tm-row="${leg}"><th scope="row">${name}</th>${TM_TURNS.map(([kind, label]) => `<td><select data-tm-kind="${kind}" aria-label="${name} ${label}">${TM_LABEL.map((text, v) => `<option value="${v}" ${TM_DEFAULT[kind] === v ? 'selected' : ''}>${text}</option>`).join('')}</select></td>`).join('')}</tr>`).join('');
+  tmRoles.querySelectorAll('select').forEach(select => select.onchange = () => { tmRoles.querySelector(`[data-tm-other="${select.dataset.tmLeg}"]`).textContent = select.value === 'in' ? 'Exit' : 'Entry'; check(); });
+  tmEnable.onchange = () => { renderLinks(); check(); };
+  const tmAvailable = () => mode === 'multi_link' && links.length === 8;
+  const tmOn = () => tmAvailable() && tmEnable.checked;
+  const tmRolesList = () => TM_LEGS.flatMap((name, leg) => { const first = tmRoles.querySelector(`[data-tm-leg="${leg}"]`).value; return [first, first === 'in' ? 'out' : 'in']; });
+  const tmRatingList = () => [...tmRatings.querySelectorAll('tr')].map(row => Object.fromEntries([...row.querySelectorAll('select')].map(select => [select.dataset.tmKind, Number(select.value)])));
+  function tmLinkLabel(index) { const roles = tmRolesList(); return `${TM_LEGS[Math.floor(index / 2)]} ${roles[index] === 'in' ? 'entry' : 'exit'}`; }
+  function updateTurning() {
+    stepTurning.hidden = !tmAvailable();
+    if (!tmAvailable()) tmEnable.checked = false;
+    tmOptions.hidden = !tmOn();
+    if (tmOn()) { const volumes = document.querySelector('#svl input[value="volumes"]'); if (volumes) volumes.checked = true; }
+  }
   function check() {
+    updateTurning();
     const verifiedRoute = route?.road && Number.isInteger(route.junctions) && route.junctions >= 0;
     noJunctionDeclaration.hidden = !verifiedRoute || route.junctions !== 0;
     junctionQualityConsent.hidden = !verifiedRoute || route.junctions === 0;
@@ -475,6 +508,7 @@
       })),
       periods: chosenPeriods(), data_interval: selectedInterval(),
     };
+    if (tmOn()) body.turning_movement = { roles: tmRolesList(), turn_classes: tmRatingList() };
     ok.disabled = true;
     const r = await fetch('/api/request-groups', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const j = await r.json(); if (!r.ok) { check(); return alert(j.error); }

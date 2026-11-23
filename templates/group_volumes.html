@@ -1,0 +1,20 @@
+{# Traffic volumes of every link of the order on one page (admin). Driven by static/group_volumes.js. #}
+<section class="card" id="groupVolumes" style="margin:0 0 14px">
+  <div class="svc-h"><h3>Traffic volumes · all links</h3><span class="b Pending" id="gvBadge">Loading</span></div>
+  <p class="hint">Do the whole order from here, in this order: 1) send the API requests, 2) confirm the lane counts, 3) approve and send. MATLAB starts by itself for each link when its speed, free-flow speed and lanes are ready. Links with a problem say so in the table.</p>
+  <div class="row-actions">
+    <button class="btn" id="gvSendApi" type="button">1 · Send API requests (speeds + free-flow) for all links</button>
+    <button class="btn alt" id="gvSaveLanes" type="button">2 · Save lane counts for all links</button>
+    <button class="btn" id="gvApprove" type="button" disabled>3 · Approve &amp; send all volumes</button>
+  </div>
+  <div id="gvMsg" class="hint" role="status" aria-live="polite"></div>
+  <div class="tw"><table id="gvTable"><thead><tr><th>Link</th><th>Period</th><th>Lanes</th><th>Status</th><th>Volume (veh)</th><th></th></tr></thead><tbody></tbody></table></div>
+</section>
+<dialog id="gvDialog" class="directions-review-dialog">
+  <h3>Send the API requests for all links</h3>
+  <p id="gvPlanText"></p>
+  <div class="tw"><table><thead><tr><th>Link</th><th>Period</th><th>Speeds</th><th>Free-flow</th></tr></thead><tbody id="gvPlanRows"></tbody></table></div>
+  <p class="hint">The speed request uses each link's period (A → C route, local time zone). The free-flow request uses the weekly weekend reference. Nothing was sent yet.</p>
+  <label class="cf"><input type="checkbox" id="gvCostAck"> I understand the estimated cost is unknown. Each route and time point is billed separately.</label>
+  <div class="row-actions"><button class="btn" id="gvConfirmSend" type="button" disabled>Send requests</button><button class="btn alt" id="gvCancelSend" type="button">Cancel</button></div>
+</dialog>

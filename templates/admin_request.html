@@ -7,7 +7,8 @@
   <section class="card request-detail-card"><span class="eyebrow">CUSTOMER</span><h2>{{r.client}}</h2><dl><div><dt>Email</dt><dd>{{r.email}}</dd></div><div><dt>Request ID</dt><dd>REQ-{{r.id}}</dd></div></dl></section>
   <section class="card request-detail-card"><span class="eyebrow">REQUEST</span><h2>{{r.area}}</h2><dl><div><dt>Services</dt><dd>{% for s in r.services %}<span class="pill">{{SVINFO[s].icon}} {{SERVICES[s]}}</span>{% endfor %}</dd></div><div><dt>Study date</dt><dd>{{r.d1}}</dd></div><div><dt>Time</dt><dd>{{r.time_range_label}} · {{r.hours_label}}</dd></div>{% if r.data_interval %}<div><dt>Data interval</dt><dd>Every {{r.data_interval}} min</dd></div>{% endif %}{% if r.road_km %}<div><dt>Road length</dt><dd>{{r.road_km}} km</dd></div>{% endif %}{% if r.junctions %}<div><dt>Route check</dt><dd>{{r.junctions}} possible junction(s) detected</dd></div><div><dt>Quality acknowledgment</dt><dd>{% if r.junction_quality_ack %}User agreed that intersections may affect result quality{% if r.junction_quality_ack_at %} · {{r.junction_quality_ack_at}}{% endif %}{% else %}Not acknowledged{% endif %}</dd></div>{% endif %}</dl></section>
 </div>
-{% if 'travel' in r.services or 'speed' in r.services or 'freeflow_time' in r.services or 'freeflow_speed' in r.services or 'volumes' in r.services %}<div class="row-actions directions-actions">
+<div class="tabs service-tabs" id="svcTabs" role="tablist" aria-label="Services of this request">{% for s in r.services %}<button type="button" role="tab" data-svc="{{s}}" aria-selected="false">{{SVINFO[s].icon}} {{SERVICES[s]}}{% if s=='volumes' and volumes_workflow %} <span class="b {{volumes_workflow.status}}">{{volumes_workflow.status|replace('_',' ')|title}}</span>{% endif %}</button>{% endfor %}</div>
+{% if 'travel' in r.services or 'speed' in r.services or 'freeflow_time' in r.services or 'freeflow_speed' in r.services or 'volumes' in r.services %}<div class="row-actions directions-actions" data-for="travel speed volumes freeflow_time freeflow_speed">
 {% if 'travel' in r.services or 'speed' in r.services or 'volumes' in r.services %}{% if r.point_c %}<button class="btn" id="openDirectionsReview" type="button">API Directions · Review A → C</button>{% endif %}{% endif %}
 {% if 'freeflow_time' in r.services %}{% if shared_leaders.get('freeflow_time') %}<a class="pill" href="{{url_for('admin_requests.admin_request',rid=shared_leaders['freeflow_time'])}}">Free flow time · shared with REQ-{{shared_leaders['freeflow_time']}} (same link, no API call needed)</a>{% else %}<a class="btn alt" href="{{url_for('outscraper_admin.admin_outscraper',source_request_id=r.id,service='freeflow_time')}}">API Directions · Free flow time</a>{% endif %}{% endif %}
 {% if 'volumes' in r.services %}{% set freeflow_received=volumes_workflow and volumes_workflow.freeflow_speed is not none %}{% set freeflow_active=volumes_workflow and volumes_workflow.freeflow_job_status in ('submitting','running','unknown') %}<span class="pill" id="freeflowReceivedPill" {% if not freeflow_received and not freeflow_active %}hidden{% endif %}>{% if freeflow_received %}Free-flow speed received{% if volumes_workflow.freeflow_context %} · {{volumes_workflow.freeflow_context.weekend_day}} {{volumes_workflow.freeflow_context.weekend_date}}{% endif %}{% elif freeflow_active %}Free-flow speed request {{volumes_workflow.freeflow_job_status|replace('_',' ')}}{% endif %}</span><button class="btn alt" id="openFreeflowSpeedDialog" type="button" {% if freeflow_received or freeflow_active %}hidden{% endif %}>API Directions · Free flow speed for Volumes</button>{% elif 'freeflow_speed' in r.services %}{% if shared_leaders.get('freeflow_speed') %}<a class="pill" href="{{url_for('admin_requests.admin_request',rid=shared_leaders['freeflow_speed'])}}">Free flow speed · shared with REQ-{{shared_leaders['freeflow_speed']}} (same link, no API call needed)</a>{% else %}<a class="btn alt" href="{{url_for('outscraper_admin.admin_outscraper',source_request_id=r.id,service='freeflow_speed')}}">API Directions · Free flow speed</a>{% endif %}{% endif %}
@@ -37,7 +38,7 @@
 </dialog>
 {% endif %}
 {% if 'travel' in r.services or 'speed' in r.services or 'volumes' in r.services %}{% if r.point_c %}
-<section class="card" id="requestDirectionsWorkflow" data-job-id="{{directions_workflow.job_id if directions_workflow else ''}}" data-workflow-status="{{directions_workflow.status if directions_workflow else ''}}" data-status-url="{{url_for('directions.request_directions_status',rid=r.id)}}" style="margin:14px 0">
+<section class="card" data-for="travel speed volumes" id="requestDirectionsWorkflow" data-job-id="{{directions_workflow.job_id if directions_workflow else ''}}" data-workflow-status="{{directions_workflow.status if directions_workflow else ''}}" data-status-url="{{url_for('directions.request_directions_status',rid=r.id)}}" style="margin:14px 0">
 <div class="svc-h"><h3>API Directions result workflow</h3><span id="directionsWorkflowBadge" class="b {{directions_workflow.status if directions_workflow else 'Pending'}}">{{directions_workflow.status|replace('_',' ')|title if directions_workflow else 'Not sent'}}</span></div>
 <p id="directionsWorkflowMessage" class="hint">{% if directions_workflow and directions_workflow.error %}{{directions_workflow.error}}{% elif directions_workflow and directions_workflow.status=='ready' and volumes_workflow and volumes_workflow.status=='sent' and ('speed' in r.services or 'travel' in r.services) %}Traffic volumes have already been sent. Review and confirm these Directions results to send the selected Speed/Travel services; this will not rerun MATLAB.{% elif directions_workflow and directions_workflow.status=='ready' and 'volumes' in r.services and (not volumes_workflow or volumes_workflow.status!='sent') %}{% if 'speed' in r.services or 'travel' in r.services %}Speed / Travel results are ready. They are sent together with Traffic volumes when you approve in the Traffic volumes panel below.{% else %}Actual speed is ready for MATLAB. Nothing needs to be confirmed here.{% endif %}{% elif directions_workflow and directions_workflow.status=='ready' %}Response processed and ready for administrator review.{% elif directions_workflow and directions_workflow.status=='confirmed' %}Results were confirmed by administrator {{directions_workflow.confirmed_by}} at {{directions_workflow.confirmed_at}}.{% elif directions_workflow %}Waiting for the linked Scraper response. This page checks the same request automatically.{% else %}No Directions request has been sent for this client request.{% endif %}</p>
 <div id="directionsResultReview" {% if not directions_workflow or directions_workflow.status not in ('ready','confirmed') %}hidden{% endif %}>
@@ -73,7 +74,7 @@
 </dialog>
 {% endif %}{% endif %}
 {% if 'volumes' in r.services and volumes_workflow %}
-<section class="card" id="volumesWorkflow" data-status-url="{{url_for('volumes.volumes_workflow_status',rid=r.id)}}" data-rendered-status="{{volumes_workflow.status}}" style="margin:14px 0">
+<section class="card" data-for="volumes" id="volumesWorkflow" data-status-url="{{url_for('volumes.volumes_workflow_status',rid=r.id)}}" data-rendered-status="{{volumes_workflow.status}}" style="margin:14px 0">
 <div class="svc-h"><h3>Traffic volumes · MATLAB workflow</h3><span id="volumesWorkflowBadge" class="b {{volumes_workflow.status}}">{{volumes_workflow.status|replace('_',' ')|title}}</span></div>
 <p id="volumesWorkflowMessage" class="hint" aria-live="polite">{% if volumes_workflow.error %}{{volumes_workflow.error}}{% elif volumes_workflow.status=='ready_for_review' %}MATLAB finished. Review the hourly volumes and RMSE tolerance before sending them to the client.{% if 'speed' in r.services or 'travel' in r.services %} Speed / Travel results are sent in the same step.{% endif %}{% elif volumes_workflow.status=='sent' %}Approved volume results have been sent to the client.{% else %}Provide lane count, confirm actual speeds, and accept a valid free-flow speed. MATLAB starts only after all required inputs are ready.{% endif %}</p>
 <div class="grid2">
@@ -619,4 +620,19 @@ if(directionsDialog){
   cancelButton.addEventListener('click',async()=>{await invalidatePreview();freeflowDialog.close()});
   freeflowDialog.addEventListener('close',()=>{invalidatePreview()});
  }
+
+// ---- one button per requested service: only that service's sections are shown
+(function(){
+ const tabs=[...document.querySelectorAll('#svcTabs button')];if(!tabs.length)return;
+ const wanted=(location.hash.match(/^#svc-(.+)$/)||[])[1];
+ let active=tabs.some(t=>t.dataset.svc===wanted)?wanted:tabs[0].dataset.svc;
+ function apply(){
+  tabs.forEach(t=>{const on=t.dataset.svc===active;t.classList.toggle('on',on);t.setAttribute('aria-selected',on)});
+  document.querySelectorAll('[data-for]').forEach(el=>el.classList.toggle('svc-hidden',!el.dataset.for.split(' ').includes(active)));
+  document.querySelectorAll('#svcs [data-service]').forEach(el=>el.classList.toggle('svc-hidden',el.dataset.service!==active));
+ }
+ tabs.forEach(t=>t.onclick=()=>{active=t.dataset.svc;history.replaceState(null,'','#svc-'+active);apply()});
+ new MutationObserver(apply).observe(document.getElementById('svcs'),{childList:true});
+ apply();
+})();
 </script>{% endblock %}

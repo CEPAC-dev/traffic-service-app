@@ -120,6 +120,12 @@ CREATE TABLE IF NOT EXISTS request_groups(
   created TEXT NOT NULL, study_date TEXT NOT NULL, services TEXT NOT NULL,
   mode TEXT NOT NULL, sent_at TEXT
 );
+CREATE TABLE IF NOT EXISTS group_turning_movement(
+  group_id INTEGER PRIMARY KEY REFERENCES request_groups(id),
+  roles_json TEXT NOT NULL, classes_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'Pending', result_json TEXT,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, approved_at TEXT
+);
 CREATE TABLE IF NOT EXISTS periods(
   id INTEGER PRIMARY KEY, label TEXT NOT NULL UNIQUE,
   is_active INTEGER NOT NULL DEFAULT 1, sort_order INTEGER NOT NULL DEFAULT 0

@@ -1,57 +1,55 @@
 {% extends "base.html" %}
 {% block body %}
-{% from "turning_movement_diagram.html" import intersection_map %}
-<div class="page-heading">
-  <div>
-    <h1>Turning movements</h1>
-    <p>Estimate how many vehicles turn left, go through or turn right at a four-leg intersection.</p>
-  </div>
-  <a class="btn" href="{{ url_for('turning.new') }}">New study</a>
-</div>
+<link rel="stylesheet" href="{{ url_for('static', filename='turning-movement.css') }}">
+<div class="tm">
+  <header class="tm-head">
+    <div>
+      <h1 class="tm-title">Turning movements</h1>
+      <p class="tm-sub">
+        {% if is_admin %}{% if counts.get('Pending') %}{{ counts['Pending'] }} {{ 'study is' if counts['Pending']==1 else 'studies are' }} waiting for review.{% else %}Nothing is waiting for review.{% endif %}
+        {% else %}Enter the vehicles counted entering and leaving an intersection and get how many turn left, go straight or turn right.{% endif %}
+      </p>
+    </div>
+    <a class="tm-btn" href="{{ url_for('turning.new') }}">New study</a>
+  </header>
 
-<nav class="tm-seg" aria-label="Filter studies by status">
-  <a href="{{ url_for('turning.index') }}" {% if not status %}aria-current="page"{% endif %}>All</a>
-  {% for s in statuses %}<a href="{{ url_for('turning.index', status=s) }}" {% if status == s %}aria-current="page"{% endif %}>{{ s }}</a>{% endfor %}
-</nav>
+  <nav class="tm-seg" aria-label="Filter by status">
+    <a class="tm-seg-item" href="{{ url_for('turning.index') }}" {% if not status %}aria-current="page"{% endif %}>All <span class="tm-count">{{ total }}</span></a>
+    {% for s in statuses %}<a class="tm-seg-item" href="{{ url_for('turning.index', status=s) }}" {% if status==s %}aria-current="page"{% endif %}>{{ s }} <span class="tm-count">{{ counts.get(s, 0) }}</span></a>{% endfor %}
+  </nav>
 
-{% if rows %}
-<div class="tw">
-  <table class="tm-list">
-    <thead><tr>
-      <th scope="col">#</th><th scope="col">Title</th>{% if is_admin %}<th scope="col">Client</th>{% endif %}
-      <th scope="col">Study date</th><th scope="col">Periods</th><th scope="col">Status</th><th scope="col">Last change</th>
-    </tr></thead>
-    <tbody>
+  {% if rows %}
+  <div class="tm-ledger" role="table" aria-label="Turning-movement studies">
+    <div class="tm-row tm-row-head" role="row">
+      <span class="tm-row-id" role="columnheader">Study</span><span role="columnheader">Intersection</span>
+      <span class="tm-row-periods" role="columnheader">Periods</span><span role="columnheader">Status</span><span class="tm-row-when" role="columnheader">Last change</span>
+    </div>
     {% for r in rows %}
-      <tr>
-        <td><a class="tm-id" href="{{ url_for('turning.view', study_id=r.id) }}">TM-{{ r.id }}</a></td>
-        <td><a class="tm-title-link" href="{{ url_for('turning.view', study_id=r.id) }}">{{ r.title }}</a></td>
-        {% if is_admin %}<td>{{ r.owner_name }}</td>{% endif %}
-        <td>{{ r.study_date or '—' }}</td>
-        <td>{{ r.period_count }}</td>
-        <td><span class="b {{ r.status }}">{{ r.status }}</span></td>
-        <td>{{ r.updated_at[:16]|replace('T', ' ') }}</td>
-      </tr>
+    <div class="tm-row tm-row-item" role="row">
+      <a class="tm-row-id tm-link" role="cell" href="{{ url_for('turning.view', study_id=r.id) }}">TM-{{ r.id }}</a>
+      <div role="cell"><a class="tm-row-title" href="{{ url_for('turning.view', study_id=r.id) }}">{{ r.title }}</a>
+        {% if is_admin %}<span class="tm-row-by">{{ r.owner_name }}</span>{% endif %}</div>
+      <span class="tm-row-periods" role="cell">{{ r.period_count }}</span>
+      <span role="cell"><span class="tm-status" data-s="{{ r.status }}">{{ r.status }}</span></span>
+      <span class="tm-row-when tm-muted" role="cell">{{ r.updated_at[:16]|replace('T',' ') }}</span>
+    </div>
     {% endfor %}
-    </tbody>
-  </table>
-</div>
-{% else %}
-<div class="card tm-empty">
-  {{ intersection_map() }}
-  {% if status %}
-    <h2>No {{ status|lower }} studies</h2>
-    <p>Studies with another status are still in the list.</p>
-    <a class="btn alt" href="{{ url_for('turning.index') }}">Show all studies</a>
+  </div>
   {% else %}
-    <h2>No studies yet</h2>
-    {% if is_admin %}
-    <p>Studies that clients submit appear here for review.</p>
+  <div class="tm-empty">
+    {% if status %}
+      <p><b>No {{ status|lower }} studies.</b></p>
+      <p class="tm-muted">Studies move to {{ status|lower }} as they are reviewed.</p>
+      <a class="tm-btn tm-btn-quiet" href="{{ url_for('turning.index') }}">Show all studies</a>
+    {% elif is_admin %}
+      <p><b>No studies have been sent yet.</b></p>
+      <p class="tm-muted">They appear here, and in your notifications, when a client sends one for review.</p>
     {% else %}
-    <p>Enter the vehicles entering and leaving each leg of an intersection. The estimate appears here once an administrator approves it.</p>
+      <p><b>You have no studies yet.</b></p>
+      <p class="tm-muted">Start with one intersection and one period, for example the morning peak. You can add more periods later.</p>
+      <a class="tm-btn" href="{{ url_for('turning.new') }}">Create your first study</a>
     {% endif %}
-    <a class="btn" href="{{ url_for('turning.new') }}">{{ 'New study' if is_admin else 'Create your first study' }}</a>
+  </div>
   {% endif %}
 </div>
-{% endif %}
 {% endblock %}

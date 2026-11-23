@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Turning movements, TM-{{ study.id }} {{ study.title }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='turning-movement.css') }}">
+</head>
+<body class="tm-report-page">
+{% from "_turning_movement_tables.html" import period_tables %}
+<div class="tm tm-report" id="tmReport">
+  <div class="tm-report-bar">
+    <a class="tm-link" href="{{ url_for('turning.view', study_id=study.id) }}">Back to the study</a>
+    <button type="button" class="tm-btn" onclick="window.print()">Print or save as PDF</button>
+  </div>
+  <header class="tm-report-head">
+    <h1 class="tm-title">{{ study.title }}</h1>
+    <p class="tm-sub">Turning-movement study</p>
+    <dl class="tm-meta">
+      <div><dt>Study</dt><dd>TM-{{ study.id }}</dd></div>
+      {% if study.study_date %}<div><dt>Count date</dt><dd>{{ study.study_date }}</dd></div>{% endif %}
+      {% if is_admin %}<div><dt>Client</dt><dd>{{ study.owner_name }}</dd></div>{% endif %}
+      <div><dt>Report date</dt><dd>{{ report_date }}</dd></div>
+    </dl>
+    <p class="tm-help">Legs run counter-clockwise: {% for i in range(4) %}leg {{ i + 1 }} is {{ study.legs[i] }}{{ ', ' if not loop.last }}{% endfor %}. Rates are the share of the vehicles entering each leg.</p>
+  </header>
+  {% for p in study.periods %}{% if p.result %}
+  <section class="tm-report-period">
+    <h2 class="tm-h2">{{ p.label }}</h2>
+    <div class="tm-report-grid">
+      <div>
+        <div class="tm-stage-box"><svg class="tm-svg" data-period-svg="{{ loop.index0 }}" viewBox="0 0 400 400" role="img" aria-label="Turning movements, {{ p.label }}"></svg></div>
+        <ul class="tm-legend">{% for kind in turn_types %}<li class="tm-k tm-k-{{ kind }}">{{ turn_labels[kind] }}</li>{% endfor %}</ul>
+      </div>
+      <div>{{ period_tables(p, study.legs, turn_types, turn_labels) }}</div>
+    </div>
+  </section>
+  {% endif %}{% endfor %}
+</div>
+<script type="application/json" id="tm-data">{{ diagram|tojson }}</script>
+<script src="{{ url_for('static', filename='turning-movement.js') }}"></script>
+</body>
+</html>

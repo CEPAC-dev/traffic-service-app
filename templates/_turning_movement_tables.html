@@ -1,0 +1,23 @@
+{# The three tables of one period: counts, turning movements, turning rates. Shared by the result page and the report. #}
+{% macro period_tables(p, legs, turn_types, turn_labels, show_checks=False) %}
+  {% if show_checks and p.result and p.result.warnings %}{% for w in p.result.warnings %}<div class="tm-warn"><b>Check:</b> {{ w }}</div>{% endfor %}{% endif %}
+  <div class="tm-scroll"><table class="tm-data">
+    <thead><tr><th scope="col">Leg</th><th scope="col"><span class="tm-k tm-k-in">Entering</span></th><th scope="col"><span class="tm-k tm-k-out">Leaving</span></th></tr></thead>
+    <tbody>{% for i in range(4) %}<tr><th scope="row">{{ legs[i] }}</th><td>{{ "{:,}".format(p.inflows[i]) }}</td><td>{{ "{:,}".format(p.outflows[i]) }}</td></tr>{% endfor %}</tbody>
+  </table></div>
+  {% if p.result %}
+  <h3 class="tm-h3">Turning movements, in vehicles</h3>
+  <div class="tm-scroll"><table class="tm-data">
+    <thead><tr><th scope="col">From leg</th>{% for kind in turn_types %}<th scope="col"><span class="tm-k tm-k-{{ kind }}">{{ turn_labels[kind] }}</span></th>{% endfor %}<th scope="col">Total</th></tr></thead>
+    <tbody>{% for i in range(4) %}{% set m = p.result.movements[i] %}<tr><th scope="row">{{ legs[i] }}</th>{% for kind in turn_types %}<td>{{ "{:,}".format(m[kind]) }}</td>{% endfor %}<td class="tm-total">{{ "{:,}".format(m.values()|sum) }}</td></tr>{% endfor %}</tbody>
+  </table></div>
+  <h3 class="tm-h3">Turning rates, as a share of each leg&rsquo;s entering vehicles</h3>
+  <div class="tm-scroll"><table class="tm-data">
+    <thead><tr><th scope="col">From leg</th>{% for kind in turn_types %}<th scope="col"><span class="tm-k tm-k-{{ kind }}">{{ turn_labels[kind] }}</span></th>{% endfor %}<th scope="col">Split</th></tr></thead>
+    <tbody>{% for i in range(4) %}{% set m = p.result.movements[i] %}{% set tot = m.values()|sum %}<tr><th scope="row">{{ legs[i] }}</th>
+      {% for kind in turn_types %}<td>{% if tot %}{{ '%.1f'|format(m[kind] * 100 / tot) }}%{% else %}&ndash;{% endif %}</td>{% endfor %}
+      <td class="tm-rate-cell">{% if tot %}<span class="tm-rate" role="img" aria-label="{% for kind in turn_types %}{{ turn_labels[kind] }} {{ '%.0f'|format(m[kind] * 100 / tot) }}%{{ ', ' if not loop.last }}{% endfor %}">{% for kind in turn_types %}{% if m[kind] %}<i class="tm-r-{{ kind }}" style="flex-grow:{{ m[kind] }}"></i>{% endif %}{% endfor %}</span>{% endif %}</td></tr>{% endfor %}</tbody>
+  </table></div>
+  {% if p.result.balanced_by_scaling %}<p class="tm-help" style="margin-top:.5rem">Entering and leaving totals differed, so the leaving counts were scaled to match before estimating.</p>{% endif %}
+  {% endif %}
+{% endmacro %}

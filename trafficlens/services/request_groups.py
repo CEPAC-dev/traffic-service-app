@@ -223,6 +223,7 @@ def _delete_requests(request_ids=None):
     d.execute(f"DELETE FROM volumes_workflows WHERE request_id IN ({placeholders})", ids)
     d.execute(f"DELETE FROM request_directions_workflows WHERE request_id IN ({placeholders})", ids)
     d.execute(f"DELETE FROM requests WHERE id IN ({placeholders})", ids)
+    d.execute("DELETE FROM group_turning_movement WHERE group_id NOT IN (SELECT DISTINCT group_id FROM requests WHERE group_id IS NOT NULL)")
     d.execute("DELETE FROM request_groups WHERE id NOT IN (SELECT DISTINCT group_id FROM requests WHERE group_id IS NOT NULL)")
     d.commit()
     return len(ids)

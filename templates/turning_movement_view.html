@@ -1,104 +1,82 @@
 {% extends "base.html" %}
+{% from "_turning_movement_tables.html" import period_tables %}
 {% block body %}
-{% from "turning_movement_diagram.html" import intersection %}
 {% macro csrf() %}{% if csrf_token is defined %}<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{% endif %}{% endmacro %}
 {% set legs = study.legs %}
-
-<a class="detail-back-link" href="{{ url_for('turning.index') }}">← All studies</a>
-<div class="page-heading">
-  <div>
-    <h1>{{ study.title }} <span class="b {{ study.status }}">{{ study.status }}</span></h1>
-    <p class="tm-meta">
-      <span>TM-{{ study.id }}</span>
-      {% if study.study_date %}<span>Study date {{ study.study_date }}</span>{% endif %}
-      {% if is_admin %}<span>Client: {{ study.owner_name }} ({{ study.owner_email }})</span>{% endif %}
-    </p>
+{% set has_results = study.periods|selectattr('result')|list|length > 0 %}
+<link rel="stylesheet" href="{{ url_for('static', filename='turning-movement.css') }}">
+<div class="tm">
+  <a class="tm-back tm-link" href="{{ url_for('turning.index') }}">All studies</a>
+  <header class="tm-head"><div>
+    <h1 class="tm-title">{{ study.title }}</h1>
+    <dl class="tm-meta">
+      <div><dt>Study</dt><dd>TM-{{ study.id }}</dd></div>
+      <div><dt>Status</dt><dd><span class="tm-status" data-s="{{ study.status }}">{{ study.status }}</span></dd></div>
+      {% if study.study_date %}<div><dt>Count date</dt><dd>{{ study.study_date }}</dd></div>{% endif %}
+      {% if is_admin %}<div><dt>Client</dt><dd>{{ study.owner_name }}, {{ study.owner_email }}</dd></div>{% endif %}
+    </dl>
   </div>
-  {% if can_edit %}<a class="btn" href="{{ url_for('turning.edit', study_id=study.id) }}">{{ 'Edit and resubmit' if (not is_admin and study.status == 'Rejected') else 'Edit' }}</a>{% endif %}
-</div>
+  <div class="tm-head-actions">
+    {% if has_results %}<a class="tm-btn tm-btn-quiet" href="{{ url_for('turning.export_xlsx', study_id=study.id) }}">Download Excel</a>
+    <a class="tm-btn tm-btn-quiet" href="{{ url_for('turning.report', study_id=study.id) }}" target="_blank" rel="noopener">Open report</a>{% endif %}
+    {% if can_edit %}<a class="tm-btn tm-btn-quiet" href="{{ url_for('turning.edit', study_id=study.id) }}">Edit counts</a>{% endif %}
+  </div></header>
 
-{% if is_admin %}
-  {% if study.reply %}<div class="verdict tm-verdict" data-state="busy"><b>Reply sent to the client</b><span class="tm-reply">{{ study.reply }}</span></div>{% endif %}
-{% elif study.status == 'Pending' %}
-  <div class="verdict tm-verdict" data-state="busy"><b>Waiting for review</b><span>An administrator reviews every study before releasing the results. You can edit it until they start working on it.</span></div>
-{% elif study.status == 'Processing' %}
-  <div class="verdict tm-verdict" data-state="busy"><b>Being reviewed</b><span>An administrator is working on this study. The results appear here once they approve it.</span></div>
-{% elif study.status == 'Rejected' %}
-  <div class="verdict tm-verdict" data-state="warn"><b>Changes needed</b>{% if study.reply %}<span class="tm-reply">{{ study.reply }}</span>{% endif %}</div>
-{% elif study.status == 'Completed' %}
-  <div class="verdict tm-verdict" data-state="ok"><b>Results approved</b>{% if study.reply %}<span class="tm-reply">{{ study.reply }}</span>{% endif %}</div>
-{% endif %}
-
-{% for p in study.periods %}
-<section class="card tm-card" aria-labelledby="tm-period-{{ loop.index }}">
-  <div class="tm-card-head">
-    <h2 id="tm-period-{{ loop.index }}">{{ p.label }}</h2>
-    <span class="tm-totals">Entering {{ "{:,.0f}".format(p.inflows|sum) }}, leaving {{ "{:,.0f}".format(p.outflows|sum) }}</span>
-  </div>
-  {{ intersection(legs, p.inflows, p.outflows) }}
-
-  {% if p.result %}
-    {% if is_admin and p.result.warnings %}
-      <div class="tm-warnings">
-      {% for w in p.result.warnings %}<div class="verdict tm-verdict" data-state="warn"><span>{{ w }}</span></div>{% endfor %}
-      </div>
-    {% endif %}
-    <h3>Turning movements (vehicles)</h3>
-    {% if p.result.balanced_by_scaling %}<p class="hint">The entering and leaving totals differed, so both were adjusted to their average before estimating.</p>{% endif %}
-    <div class="tm-scroll"><table class="tm-grid">
-      <thead><tr><th scope="col">From leg</th>{% for kind in turn_types %}<th scope="col">{{ turn_labels[kind] }}</th>{% endfor %}<th scope="col">Total</th></tr></thead>
-      <tbody>
-      {% for i in range(4) %}
-        {% set m = p.result.movements[i] %}{% set tot = m.values()|sum %}
-        <tr>
-          <th scope="row">{{ legs[i] }}</th>
-          {% for kind in turn_types %}
-            {% set v = m[kind] %}
-            <td class="tm-cell{{ ' is-zero' if not v }}" style="--p:{{ (v / tot * 100)|round(1) if tot else 0 }}%" title="{{ (v / tot * 100)|round|int if tot else 0 }}% of vehicles from {{ legs[i] }}"><span>{{ "{:,}".format(v) }}</span></td>
-          {% endfor %}
-          <td class="tm-sum">{{ "{:,}".format(tot) }}</td>
-        </tr>
-      {% endfor %}
-      </tbody>
-    </table></div>
-    {% if is_admin %}<p class="hint">Method: {{ p.result.method }}</p>{% endif %}
+  {% if study.reply %}<div class="tm-note"><p class="tm-note-title">{{ 'Message from the administrator' if not is_admin else 'Message sent to the client' }}</p><p>{{ study.reply }}</p></div>{% endif %}
+  {% if not is_admin %}
+    {% if study.status == 'Pending' %}<p class="tm-note">Waiting for review. You can still edit the counts until an administrator starts work.</p>
+    {% elif study.status == 'Processing' %}<p class="tm-note">An administrator is reviewing this study. The turning movements appear here once approved.</p>
+    {% elif study.status == 'Rejected' %}<p class="tm-note">Fix the counts, then send the study again.</p>{% endif %}
   {% endif %}
-</section>
-{% endfor %}
 
-{% if is_admin %}
-<section class="card tm-review" aria-labelledby="tm-review-title">
-  <h2 id="tm-review-title">Review</h2>
-  {% if study.warning_count %}
-  <div class="verdict tm-verdict" data-state="warn"><b>{{ study.warning_count }} warning{{ '' if study.warning_count == 1 else 's' }}</b><span>They are listed under each period above. The client cannot see them.</span></div>
-  {% endif %}
-  <div class="tm-review-grid">
+  <div class="tm-split tm-split-view">
+      <div class="tm-sticky">
+        <div class="tm-stage-box">
+          <svg id="tmStage" class="tm-svg" viewBox="0 0 400 400" role="img" aria-label="Intersection"></svg>
+          <div class="tm-stage-cap"><span id="tmStageLabel"></span></div>
+        </div>
+        <ul class="tm-legend">
+          {% if has_results %}{% for kind in turn_types %}<li class="tm-k tm-k-{{ kind }}">{{ turn_labels[kind] }}</li>{% endfor %}
+          {% else %}<li class="tm-k tm-k-in">Entering</li><li class="tm-k tm-k-out">Leaving</li>{% endif %}
+        </ul>
+        <p class="tm-help" style="margin-top:.5rem">Line width shows how many vehicles. Point at a line for the number.</p>
+  {% if is_admin %}
+  <aside class="tm-review" aria-label="Review">
+    <h2 class="tm-h2">Review</h2>
+    {% if study.warning_count %}<div class="tm-warn">{{ study.warning_count }} check{{ '' if study.warning_count==1 else 's' }} to look at. The client does not see them.</div>{% endif %}
     {% if study.status != 'Completed' %}
     <form method="post" action="{{ url_for('turning.approve', study_id=study.id) }}">{{ csrf() }}
-      <label for="tmApproveReply">Message to the client <span class="opt">optional</span></label>
-      <textarea id="tmApproveReply" name="reply" maxlength="2000" rows="3"></textarea>
-      {% if study.warning_count %}<label class="cf"><input type="checkbox" name="acknowledge" value="1"> I reviewed the warnings</label>{% endif %}
-      <button type="submit" class="btn">Approve and release results</button>
+      <label class="tm-field"><span>Message to the client <small class="tm-muted">(optional)</small></span><textarea class="tm-textarea" name="reply" maxlength="2000"></textarea></label>
+      {% if study.warning_count %}<label class="tm-check"><input type="checkbox" name="acknowledge" value="1"> <span>I looked at every check above</span></label>{% endif %}
+      <button type="submit" class="tm-btn">Approve and release results</button>
     </form>
-    {% if study.status in ('Pending', 'Processing') %}
+    {% if study.status in ('Pending','Processing') %}
     <form method="post" action="{{ url_for('turning.reject', study_id=study.id) }}">{{ csrf() }}
-      <label for="tmRejectReply">Reason <span class="opt">required</span></label>
-      <textarea id="tmRejectReply" name="reply" maxlength="2000" rows="3" required></textarea>
-      <button type="submit" class="btn alt tm-danger">Reject study</button>
-    </form>
-    {% endif %}
+      <label class="tm-field"><span>Why it needs changes</span><textarea class="tm-textarea" name="reply" maxlength="2000" required></textarea></label>
+      <button type="submit" class="tm-btn tm-btn-quiet">Reject with this reason</button>
+    </form>{% endif %}
     {% else %}
     <form method="post" action="{{ url_for('turning.reopen', study_id=study.id) }}">{{ csrf() }}
-      <p class="hint">Reopening hides the results from the client again so you can correct the study.</p>
-      <button type="submit" class="btn alt">Reopen for corrections</button>
-    </form>
+      <p class="tm-help">The client sees these results now. Reopening hides them until you approve again.</p>
+      <button type="submit" class="tm-btn tm-btn-quiet">Reopen for corrections</button></form>
     {% endif %}
-  </div>
-  <div class="tm-review-foot">
-    <form method="post" action="{{ url_for('turning.delete', study_id=study.id) }}" onsubmit="return confirm('Delete TM-{{ study.id }} permanently?')">{{ csrf() }}
-      <button type="submit" class="btn alt tm-danger">Delete study</button>
-    </form>
-  </div>
-</section>
-{% endif %}
+    <form method="post" action="{{ url_for('turning.delete', study_id=study.id) }}" onsubmit="return confirm('Delete TM-{{ study.id }} for good?')">{{ csrf() }}
+      <button type="submit" class="tm-btn tm-btn-danger">Delete study</button></form>
+  </aside>
+  {% endif %}
+      </div>
+
+      <div>
+        <div class="tm-seg" id="tmTabs" role="tablist" aria-label="Period"></div>
+        {% for p in study.periods %}
+        <section data-period="{{ loop.index0 }}" aria-label="{{ p.label }}">
+          <h2 class="tm-h2" style="margin-top:1rem">{{ p.label }}</h2>
+          {{ period_tables(p, legs, turn_types, turn_labels, show_checks=is_admin) }}
+        </section>
+        {% endfor %}
+      </div>
+    </div>
+</div>
+<script type="application/json" id="tm-data">{{ diagram|tojson }}</script>
 {% endblock %}
+{% block js %}<script src="{{ url_for('static', filename='turning-movement.js') }}"></script>{% endblock %}

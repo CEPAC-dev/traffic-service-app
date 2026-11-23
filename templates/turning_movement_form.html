@@ -1,174 +1,89 @@
 {% extends "base.html" %}
 {% block body %}
-{% from "turning_movement_diagram.html" import intersection %}
-{% set is_admin_user = me.get('role') == 'admin' %}
-{% set preset_names = {'typical': 'Typical', 'no_u_turns': 'No U-turns'} %}
-{% set preset_help = {
-  'typical': 'Through traffic is most likely. Left and right turns are medium. U-turns are rare.',
-  'no_u_turns': 'Same as Typical, but U-turns are not allowed.'} %}
-{% set class_names = ['Not allowed', 'Low', 'Medium', 'High'] %}
-{% set current_preset = values.preset or (presets|first) %}
-{% macro period_block(k, p, legs) %}
-<fieldset class="tm-period" data-k="{{ k }}">
-  <legend class="tm-sr">Counts for one period</legend>
+{% macro period_block(k, p) %}
+<section class="tm-period" data-k="{{ k }}">
   <input type="hidden" name="period_ids" value="{{ k }}">
-  <div class="tm-period-head">
-    <label class="tm-period-name">Period name
-      <input name="period_label_{{ k }}" value="{{ p.label }}" maxlength="40" required placeholder="AM" list="tmPeriodNames"></label>
-    <button type="button" class="btn-text tm-remove">Remove period</button>
+  <div class="tm-period-bar">
+    <label class="tm-sr-only" for="period_label_{{ k }}">Period name</label>
+    <input class="tm-input" id="period_label_{{ k }}" name="period_label_{{ k }}" value="{{ p.label }}" maxlength="40" required placeholder="Period name, for example AM" autocomplete="off">
+    <button type="button" class="tm-btn tm-btn-quiet" data-remove>Remove period</button>
   </div>
-  <div class="tm-scroll"><table class="tm-grid tm-counts">
-    <thead><tr><th scope="col">Leg</th><th scope="col">Vehicles entering</th><th scope="col">Vehicles leaving</th></tr></thead>
+  <table class="tm-counts">
+    <thead><tr><th scope="col">Leg</th><th scope="col"><span class="tm-k tm-k-in">Entering</span></th><th scope="col"><span class="tm-k tm-k-out">Leaving</span></th></tr></thead>
     <tbody>
-    {% for i in range(4) %}
-      <tr>
-        <th scope="row" class="tm-leg-h" data-i="{{ i }}"><i class="tm-idx">{{ i + 1 }}</i><span>{{ legs[i] }}</span></th>
-        <td><input name="in_{{ k }}_{{ i }}" value="{{ p.inflows[i] }}" inputmode="decimal" required aria-label="Vehicles entering through leg {{ i + 1 }}"></td>
-        <td><input name="out_{{ k }}_{{ i }}" value="{{ p.outflows[i] }}" inputmode="decimal" required aria-label="Vehicles leaving through leg {{ i + 1 }}"></td>
-      </tr>
-    {% endfor %}
+      {% for i in range(4) %}<tr>
+        <th scope="row" class="tm-legname" data-i="{{ i }}">{{ legs[i] }}</th>
+        <td><input class="tm-input tm-num" name="in_{{ k }}_{{ i }}" value="{{ p.inflows[i] }}" inputmode="decimal" autocomplete="off" required aria-label="Vehicles entering from leg {{ i + 1 }}"></td>
+        <td><input class="tm-input tm-num" name="out_{{ k }}_{{ i }}" value="{{ p.outflows[i] }}" inputmode="decimal" autocomplete="off" required aria-label="Vehicles leaving by leg {{ i + 1 }}"></td>
+      </tr>{% endfor %}
     </tbody>
-    <tfoot><tr><th scope="row">Total</th><td class="tm-total" data-sum="in">—</td><td class="tm-total" data-sum="out">—</td></tr></tfoot>
-  </table></div>
-</fieldset>
+    <tfoot><tr><th scope="row">Total</th><td data-total-in></td><td data-total-out></td></tr></tfoot>
+  </table>
+</section>
 {% endmacro %}
+{% set legs = values.legs %}
+<link rel="stylesheet" href="{{ url_for('static', filename='turning-movement.css') }}">
+<div class="tm">
+  <a class="tm-back tm-link" href="{{ url_for('turning.view', study_id=study.id) if study else url_for('turning.index') }}">{{ 'Back to TM-%d'|format(study.id) if study else 'All studies' }}</a>
+  <header class="tm-head"><div>
+    <h1 class="tm-title">{% if study %}Edit {{ study.title }}{% else %}New study{% endif %}</h1>
+    <p class="tm-sub">One four-leg intersection. Count the vehicles that enter and leave through each leg, once per period.</p>
+  </div></header>
 
-<div class="wb-head">
-  <a class="detail-back-link" href="{{ url_for('turning.view', study_id=study.id) if study else url_for('turning.index') }}">← {{ 'Back to study' if study else 'All studies' }}</a>
-  <h1>{% if study %}Edit TM-{{ study.id }}{% else %}New turning-movement study{% endif %}</h1>
-  <p>Estimate how many vehicles turn left, go through or turn right at a four-leg intersection. You only need the number of vehicles that enter and leave through each leg.</p>
-</div>
+  <div class="tm-split tm-split-form">
+    <form method="post" id="tmForm" novalidate>
+      {% if csrf_token is defined %}<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{% endif %}
 
-<form method="post" class="tm-form" id="tmForm" novalidate>
-  {% if csrf_token is defined %}<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{% endif %}
-  <div class="wb-panel">
-
-    <section class="step">
-      <div class="step-head"><span class="step-mark"><span>1</span></span><h2>Study details</h2></div>
-      <div class="field-pair">
-        <div>
-          <label for="tmTitle">Title</label>
-          <input id="tmTitle" name="title" value="{{ values.title }}" maxlength="120" required placeholder="Main St / 5th Ave">
+      <section class="tm-section">
+        <h2 class="tm-h2">Intersection</h2>
+        <label class="tm-field"><span>Name</span><input class="tm-input" name="title" value="{{ values.title }}" maxlength="120" required placeholder="Main St and 5th Ave" autocomplete="off"></label>
+        <label class="tm-field"><span>Count date <small class="tm-muted">(optional)</small></span><input class="tm-input" type="date" name="study_date" value="{{ values.study_date }}" style="max-width:12rem"></label>
+        <h3 class="tm-h3">Name the four legs</h3>
+        <p class="tm-help">Legs go counter-clockwise. The drawing puts leg 1 on the right, leg 2 on top, leg 3 on the left and leg 4 at the bottom. Turns are worked out from this order, so keep it.</p>
+        <div class="tm-compass">
+          {% for i, side in ((0,'e'),(1,'n'),(2,'w'),(3,'s')) %}<label class="tm-field tm-compass-{{ side }}"><span>Leg {{ i + 1 }}</span><input class="tm-input" name="leg_name_{{ i }}" value="{{ values.legs[i] }}" maxlength="40" autocomplete="off"></label>{% endfor %}
         </div>
-        <div>
-          <label for="tmDate">Study date <span class="opt">optional</span></label>
-          <input id="tmDate" type="date" name="study_date" value="{{ values.study_date }}">
+      </section>
+
+      <section class="tm-section">
+        <h2 class="tm-h2">How likely is each turn?</h2>
+        <p class="tm-help">The estimate starts from how likely drivers are to make each turn. Use a preset, or set every turn yourself.</p>
+        <fieldset class="tm-seg" style="border:1px solid var(--tm-line)"><legend class="tm-sr-only">Turn likelihood</legend>
+          {% for name in presets %}<label class="tm-seg-item"><input class="tm-sr-only" type="radio" name="preset" value="{{ name }}" {{ 'checked' if values.preset==name }}><span>{{ {'typical': 'Typical', 'no_u_turns': 'No U-turns'}.get(name, name|replace('_',' ')|capitalize) }}</span></label>{% endfor %}
+          <label class="tm-seg-item"><input class="tm-sr-only" type="radio" name="preset" value="custom" {{ 'checked' if values.preset=='custom' }}><span>Custom</span></label>
+        </fieldset>
+        <div class="tm-classes {{ 'on' if values.preset=='custom' }}" id="tmClasses">
+          <p class="tm-help">0 means the turn is not allowed, 1 low, 2 medium, 3 high.</p>
+          <div class="tm-scroll"><table class="tm-data">
+            <thead><tr><th scope="col">From leg</th>{% for kind in turn_types %}<th scope="col"><span class="tm-k tm-k-{{ kind }}">{{ turn_labels[kind] }}</span></th>{% endfor %}</tr></thead>
+            <tbody>{% for i in range(4) %}<tr><th scope="row" class="tm-legname" data-i="{{ i }}">{{ values.legs[i] }}</th>
+              {% for kind in turn_types %}<td><select class="tm-select" style="width:4.5rem" name="class_{{ i }}_{{ kind }}" aria-label="{{ turn_labels[kind] }} from leg {{ i + 1 }}">{% for c in range(4) %}<option value="{{ c }}" {{ 'selected' if values.classes[i][kind]|string==c|string }}>{{ c }}</option>{% endfor %}</select></td>{% endfor %}</tr>{% endfor %}
+            </tbody></table></div>
         </div>
-      </div>
-    </section>
+      </section>
 
-    <section class="step">
-      <div class="step-head"><span class="step-mark"><span>2</span></span><h2>Name the legs</h2></div>
-      <p class="step-help">Type a name on each leg, such as the road it belongs to. Start at any leg, then go counter-clockwise: leg 2 is the next one round, and so on. Turn types are worked out from this order, and traffic is assumed to drive on the right.</p>
-      {{ intersection(values.legs, editable=true) }}
-      <p class="tm-legend"><span class="tm-flow tm-flow-in">Entering the junction</span><span class="tm-flow tm-flow-out">Leaving the junction</span></p>
-    </section>
+      <section class="tm-section">
+        <h2 class="tm-h2">Counts</h2>
+        <p class="tm-help">One block per period, such as AM, midday and PM. Press Enter to move down a column.</p>
+        <div id="tmPeriods">{% for p in values.periods %}{{ period_block(loop.index0, p) }}{% endfor %}</div>
+        <template id="tmPeriodTemplate">{{ period_block('__K__', {'label':'','inflows':['','','',''],'outflows':['','','','']}) }}</template>
+        <button type="button" class="tm-btn tm-btn-quiet" id="tmAdd">Add period</button>
+      </section>
 
-    <section class="step">
-      <div class="step-head"><span class="step-mark"><span>3</span></span><h2>How likely is each turn?</h2></div>
-      <p class="step-help">This guides the estimate when the counts alone don't say which way vehicles turn.</p>
-      <div class="mode-list" role="radiogroup" aria-label="Turn likelihood">
-        {% for name in presets %}
-        <label class="mode-opt"><input type="radio" name="preset" value="{{ name }}" {{ 'checked' if current_preset == name }}>
-          <span><b>{{ preset_names.get(name, name|replace('_', ' ')|capitalize) }}</b><small>{{ preset_help.get(name, '') }}</small></span></label>
-        {% endfor %}
-        <label class="mode-opt"><input type="radio" name="preset" value="custom" {{ 'checked' if current_preset == 'custom' }}>
-          <span><b>Custom</b><small>Rate every turn from every leg yourself.</small></span></label>
+      <div class="tm-actions">
+        <button type="submit" class="tm-btn">{% if study %}Save changes{% else %}Send for review{% endif %}</button>
+        <a class="tm-btn tm-btn-quiet" href="{{ url_for('turning.view', study_id=study.id) if study else url_for('turning.index') }}">Cancel</a>
       </div>
-      <div class="tm-classes {{ 'on' if current_preset == 'custom' }}" id="tmClasses">
-        <p class="step-help">Rate each turn from 0 to 3. A 0 means the turn is not allowed.</p>
-        <div class="tm-scroll"><table class="tm-grid">
-          <thead><tr><th scope="col">From leg</th>{% for kind in turn_types %}<th scope="col">{{ turn_labels[kind] }}</th>{% endfor %}</tr></thead>
-          <tbody>
-          {% for i in range(4) %}
-            <tr>
-              <th scope="row" class="tm-leg-h" data-i="{{ i }}"><i class="tm-idx">{{ i + 1 }}</i><span>{{ values.legs[i] }}</span></th>
-              {% for kind in turn_types %}
-              <td><select name="class_{{ i }}_{{ kind }}" aria-label="{{ turn_labels[kind] }} from leg {{ i + 1 }}">{% for c in range(4) %}<option value="{{ c }}" {{ 'selected' if values.classes[i][kind]|string == c|string }}>{{ c }} {{ class_names[c] }}</option>{% endfor %}</select></td>
-              {% endfor %}
-            </tr>
-          {% endfor %}
-          </tbody>
-        </table></div>
-      </div>
-    </section>
+    </form>
 
-    <section class="step">
-      <div class="step-head"><span class="step-mark"><span>4</span></span><h2>Vehicle counts</h2></div>
-      <p class="step-help">For each period, enter the vehicles that enter and leave through every leg. Add one period for each time of day you counted, for example AM, MD and PM.</p>
-      <div id="tmPeriods">
-        {% for p in values.periods %}{{ period_block(loop.index0, p, values.legs) }}{% endfor %}
+    <aside class="tm-sticky" aria-label="Live drawing of what you entered">
+      <div class="tm-stage-box">
+        <svg id="tmStage" class="tm-svg" viewBox="0 0 400 400" role="img" aria-label="Intersection"></svg>
+        <div class="tm-stage-cap"><span>Showing <b id="tmStageLabel"></b></span></div>
       </div>
-      <template id="tmPeriodTemplate">{{ period_block('__K__', {'label': '', 'inflows': ['', '', '', ''], 'outflows': ['', '', '', '']}, values.legs) }}</template>
-      <datalist id="tmPeriodNames"><option value="AM"><option value="MD"><option value="PM"></datalist>
-      <p class="tm-add"><button type="button" class="btn alt" id="tmAdd">Add period</button><span class="tm-hint" id="tmLimit" hidden>A study can have at most 24 periods.</span></p>
-    </section>
-
-    <div class="wb-footer">
-      <p class="summary" id="tmSummary">{% if not is_admin_user %}An administrator reviews every study before releasing the results.{% endif %}</p>
-      <div class="order-actions">
-        <button type="submit" class="btn" id="tmSubmit">{% if not study %}Submit study{% elif study.status == 'Rejected' and not is_admin_user %}Save and resubmit{% else %}Save changes{% endif %}</button>
-        <a class="btn alt" href="{{ url_for('turning.view', study_id=study.id) if study else url_for('turning.index') }}">Cancel</a>
-      </div>
-    </div>
+      <ul class="tm-legend"><li class="tm-k tm-k-in">Entering</li><li class="tm-k tm-k-out">Leaving</li></ul>
+    </aside>
   </div>
-</form>
+</div>
 {% endblock %}
-{% block js %}
-<script>
-(()=>{
- const MAX=24;
- const form=document.getElementById('tmForm'),periods=document.getElementById('tmPeriods'),tpl=document.getElementById('tmPeriodTemplate');
- const addBtn=document.getElementById('tmAdd'),limit=document.getElementById('tmLimit'),summary=document.getElementById('tmSummary'),submit=document.getElementById('tmSubmit');
- const reviewNote=summary.textContent.trim();
- const all=()=>[...periods.querySelectorAll('.tm-period')];
- let next=all().reduce((n,el)=>Math.max(n,Number(el.dataset.k)+1),0);
-
- const num=v=>{const n=parseFloat(String(v).replace(/,/g,''));return Number.isFinite(n)?n:0};
- const fmt=n=>n.toLocaleString('en-US',{maximumFractionDigits:1});
- const total=el=>['in','out'].forEach(kind=>{
-  let sum=0,filled=false;
-  el.querySelectorAll('input[name^="'+kind+'_"]').forEach(i=>{if(i.value.trim()!==''){filled=true;sum+=num(i.value)}});
-  el.querySelector('[data-sum="'+kind+'"]').textContent=filled?fmt(sum):'—';
- });
- const syncLegs=()=>{
-  const names=[...form.querySelectorAll('.tm-leg-name')].map(i=>i.value.trim());
-  form.querySelectorAll('.tm-leg-h').forEach(h=>{h.querySelector('span').textContent=names[h.dataset.i]||('Leg '+(Number(h.dataset.i)+1))});
- };
- const refresh=()=>{
-  const n=all().length;
-  periods.classList.toggle('is-single',n<=1);
-  addBtn.disabled=n>=MAX;limit.hidden=n<MAX;
-  summary.textContent=n+(n===1?' period. ':' periods. ')+reviewNote;
- };
-
- addBtn.addEventListener('click',()=>{
-  if(all().length>=MAX)return;
-  const holder=document.createElement('div');
-  holder.innerHTML=tpl.innerHTML.replaceAll('__K__',String(next++));
-  const el=holder.firstElementChild;
-  periods.append(el);syncLegs();total(el);refresh();
-  el.querySelector('input[name^="period_label_"]').focus();
- });
- periods.addEventListener('click',e=>{
-  const btn=e.target.closest('.tm-remove');
-  if(!btn||all().length<=1)return;
-  const el=btn.closest('.tm-period');
-  const hasData=[...el.querySelectorAll('.tm-counts input')].some(i=>i.value.trim()!=='');
-  if(hasData&&!confirm('Remove this period and its counts?'))return;
-  el.remove();refresh();
- });
- form.addEventListener('input',e=>{
-  if(e.target.classList.contains('tm-leg-name'))syncLegs();
-  else if(e.target.closest('.tm-counts'))total(e.target.closest('.tm-period'));
- });
- form.addEventListener('change',e=>{
-  if(e.target.name==='preset')document.getElementById('tmClasses').classList.toggle('on',e.target.value==='custom');
- });
- form.addEventListener('submit',()=>{submit.disabled=true});
- window.addEventListener('pageshow',()=>{submit.disabled=false});
-
- syncLegs();all().forEach(total);refresh();
-})();
-</script>
-{% endblock %}
+{% block js %}<script src="{{ url_for('static', filename='turning-movement.js') }}"></script>{% endblock %}

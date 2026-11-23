@@ -1,0 +1,64 @@
+{# The Turning Movement section of a grouped order (shown by the "Turning Movement" button of group.html). #}
+{% set RATING_LABELS = {0: 'Not allowed', 1: 'Low', 2: 'Medium', 3: 'High'} %}
+{% macro ratings_table(classes) %}
+<div class="tw tm-scroll"><table class="tm-grid tm-ratings"><thead><tr><th scope="col">From leg</th>{% for kind in turn_types %}<th scope="col">{{ turn_labels[kind] }}</th>{% endfor %}</tr></thead><tbody>
+{% for leg in tm_leg_names %}{% set row = classes[loop.index0] %}<tr><th scope="row">{{ leg }}</th>{% for kind in turn_types %}<td><span class="tm-rate tm-rate-{{ row[kind] }}">{{ row[kind] }} {{ RATING_LABELS[row[kind]] }}</span></td>{% endfor %}</tr>{% endfor %}
+</tbody></table></div>
+{% endmacro %}
+{% macro movements_table(result) %}
+<div class="tw tm-scroll"><table class="tm-grid"><thead><tr><th scope="col">From leg</th>{% for kind in turn_types %}<th scope="col">{{ turn_labels[kind] }}</th>{% endfor %}<th scope="col">Total</th></tr></thead><tbody>
+{% for leg in tm_leg_names %}{% set m = result.movements[loop.index0] %}{% set tot = m.values()|sum %}<tr><th scope="row">{{ leg }}</th>
+{% for kind in turn_types %}{% set v = m[kind] %}<td class="tm-cell{{ ' is-zero' if not v }}" style="--p:{{ (v / tot * 100)|round(1) if tot else 0 }}%"><span>{{ "{:,}".format(v) }}</span></td>{% endfor %}
+<td class="tm-sum">{{ "{:,}".format(tot) }}</td></tr>{% endfor %}
+</tbody></table></div>
+{% endmacro %}
+
+{% if admin_view %}
+<section class="card" id="groupTurning" style="margin:0 0 14px">
+  <div class="svc-h"><h3>Turning Movement</h3><span class="b {{ tm.status }}">{{ tm.status }}</span></div>
+  <p class="hint">Built from the Traffic volumes of the 8 links, summed over the hours of the period. Links 1 and 2 are East, 3 and 4 North, 5 and 6 West, 7 and 8 South.</p>
+  <div class="tw"><table><thead><tr><th>Leg</th><th>Entry link</th><th>Entry volume</th><th>Exit link</th><th>Exit volume</th></tr></thead><tbody>
+  {% for leg in tm_overview.legs %}<tr><th scope="row">{{ leg.name }}</th>
+    {% for part in (leg.entry, leg.exit) %}
+    <td>{% if part %}<a href="{{ url_for('admin_requests.admin_request', rid=part.request_id) }}">Link {{ part.link_no }} · REQ-{{ part.request_id }}</a><small class="request-subtext">volumes: {{ part.volume_status|replace('_',' ') }}</small>{% endif %}</td>
+    <td>{% if part and part.volume is not none %}{{ "{:,.0f}".format(part.volume) }}{% else %}-{% endif %}</td>
+    {% endfor %}</tr>{% endfor %}
+  </tbody></table></div>
+  {% if not tm_overview.ready %}<p class="hint">Waiting for the Traffic volumes of every link. Calculate them in each link's request first.</p>
+  {% elif not tm_overview.volumes_approved %}<p class="hint">Some volumes are calculated but not approved yet. You can calculate now and recalculate after approving them.</p>{% endif %}
+
+  <h4 style="margin:18px 0 6px">Ratings</h4>
+  <p class="hint">0 = not allowed, 1 = Low, 2 = Medium, 3 = High. A higher rating always carries clearly more vehicles. You can change them before calculating.</p>
+  <div class="tw tm-scroll"><table class="tm-grid tm-ratings" id="tmRatingsForm"><thead><tr><th scope="col">From leg</th>{% for kind in turn_types %}<th scope="col">{{ turn_labels[kind] }}</th>{% endfor %}</tr></thead><tbody>
+  {% for leg in tm_leg_names %}{% set row = tm.turn_classes[loop.index0] %}<tr data-leg="{{ loop.index0 }}"><th scope="row">{{ leg }}</th>
+    {% for kind in turn_types %}<td><select data-kind="{{ kind }}" aria-label="{{ leg }} {{ turn_labels[kind] }}" {{ 'disabled' if tm.status == 'Completed' }}>{% for v in (0,1,2,3) %}<option value="{{ v }}" {{ 'selected' if row[kind] == v }}>{{ v }} {{ RATING_LABELS[v] }}</option>{% endfor %}</select></td>{% endfor %}</tr>{% endfor %}
+  </tbody></table></div>
+  <div class="row-actions" style="margin-top:12px">
+    <button class="btn" id="tmCalculate" type="button" {{ '' if tm_overview.ready and tm.status != 'Completed' else 'disabled' }}>{{ 'Recalculate' if tm.result else 'Calculate turning movements' }}</button>
+    {% if tm.status == 'Completed' %}<span class="hint">Approved {{ tm.approved_at }}. Recalculating is locked.</span>{% endif %}
+  </div>
+  <div id="tmMsg" class="hint" role="status" aria-live="polite"></div>
+
+  {% if tm.result %}
+  <h4 style="margin:18px 0 6px">Turning movements (vehicles)</h4>
+  {% if tm.result.warnings %}<div class="hint" role="alert"><strong>Check before approving:</strong><ul>{% for w in tm.result.warnings %}<li>{{ w }}</li>{% endfor %}</ul></div>{% endif %}
+  {{ movements_table(tm.result) }}
+  <h4 style="margin:18px 0 6px">Ratings used</h4>
+  {{ ratings_table(tm.turn_classes) }}
+  <p class="hint">Method: {{ tm.result.method }}{% if not tm.result.volumes_approved %} · calculated from volumes that were not all approved yet{% endif %}</p>
+  {% if tm.status != 'Completed' %}<p><button class="btn" id="tmApprove" type="button">Approve and release to the client</button></p>{% endif %}
+  {% endif %}
+</section>
+{% else %}
+<section class="card" id="groupTurning" style="margin:0 0 14px">
+  <div class="svc-h"><h3>Turning Movement</h3><span class="b {{ 'Completed' if tm.released else 'Processing' }}">{{ 'Completed' if tm.released else 'Preparing' }}</span></div>
+  {% if tm.released %}
+    <h4 style="margin:6px 0">Turning movements (vehicles)</h4>
+    {{ movements_table(tm.result) }}
+  {% else %}
+    <p class="hint">Your turning movements are being prepared from the traffic volumes of your 8 links. They appear here once they are approved.</p>
+  {% endif %}
+  <h4 style="margin:18px 0 6px">Ratings</h4>
+  {{ ratings_table(tm.turn_classes) }}
+</section>
+{% endif %}

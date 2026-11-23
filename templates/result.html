@@ -38,7 +38,7 @@ R.services.forEach(s=>{const F=FORMS[s],d=D[s]||{},rows=rowsOf(s),has=rows.lengt
   main=`<p style="margin:8px 0"><span class="big-v">${t}</span> <span style="color:var(--mut)">${esc(F.unit)}${hourly?' (average of the selected hours)':''}</span></p>`;
   kps.push(`<div class="card kpi k${kps.length%6+1}"><i class="ic">${SVI[s].icon}</i><b>${t}</b><span>${esc(SV[s])} · ${esc(F.unit)}${hourly?' (avg)':''}</span></div>`)}
  else if(rows.length&&!hourly){main=`<p style="margin:8px 0"><span class="big-v">${esc(rows[0].value)}</span> <span style="color:var(--mut)">${esc(F.unit)}</span></p>`}
- const sec=document.createElement('div');sec.className='card svc';
+ const sec=document.createElement('div');sec.className='card svc';sec.dataset.service=s;
  const holiday=d.holiday_context,reference=d.reference_context||d.freeflow_context||holiday;
  const weeklyReference=reference&&(reference.reference_type==='weekly_weekend'||reference.weekend_date);
  const referenceDate=reference&&(reference.weekend_date||reference.holiday_date);
@@ -59,4 +59,15 @@ if(sp.length>1){const m=sp.reduce((a,b)=>b.value<a.value?b:a);ins.push(`Slowest 
 if(ins.length)document.getElementById('ins').innerHTML=`<div class="card result-insights"><h3>Key insights</h3><ul class="ins">${ins.map(i=>`<li>${i}</li>`).join('')}</ul></div>`;
 charts.forEach(([s,F,rows])=>new Chart(document.getElementById('ch_'+s),{type:'bar',data:{labels:rows.map(r=>pad(r.hour)+':00'),datasets:[{data:rows.map(r=>Number(r.value)),backgroundColor:'#0F766E',borderRadius:4}]},
  options:{plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,title:{display:true,text:F.unit},grid:{color:'#E4EBF2'}},x:{grid:{display:false}}}}}));
+
+// ---- one button per requested service
+(function(){
+ const cards=[...document.querySelectorAll('#secs [data-service]')];if(cards.length<2)return;
+ const bar=document.createElement('div');bar.className='tabs service-tabs';bar.setAttribute('role','tablist');
+ const wanted=(location.hash.match(/^#svc-(.+)$/)||[])[1];let active=cards.some(c=>c.dataset.service===wanted)?wanted:cards[0].dataset.service;
+ const buttons=cards.map(c=>{const b=document.createElement('button');b.type='button';b.setAttribute('role','tab');b.dataset.svc=c.dataset.service;b.textContent=`${SVI[c.dataset.service].icon} ${SV[c.dataset.service]}`;bar.appendChild(b);return b});
+ function apply(){buttons.forEach(b=>{const on=b.dataset.svc===active;b.classList.toggle('on',on);b.setAttribute('aria-selected',on)});cards.forEach(c=>c.classList.toggle('svc-hidden',c.dataset.service!==active))}
+ buttons.forEach(b=>b.onclick=()=>{active=b.dataset.svc;history.replaceState(null,'','#svc-'+active);apply()});
+ document.getElementById('secs').before(bar);apply();
+})();
 </script>{% endblock %}

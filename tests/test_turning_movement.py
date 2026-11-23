@@ -27,7 +27,7 @@ class MatchesTheOriginalScriptTests(unittest.TestCase):
         self.assertGreaterEqual(len(cases), 10)
         for case in cases:
             with self.subTest(case["name"]):
-                result = estimate_turning_movements(case["inflows"], case["outflows"], case["classes"])
+                result = estimate_turning_movements(case["inflows"], case["outflows"], case["classes"], method="legacy")
                 for got_row, want_row in zip(result.matrix, case["expected_matrix"]):
                     for got, want in zip(got_row, want_row):
                         self.assertAlmostEqual(got, want, places=6)
@@ -35,8 +35,13 @@ class MatchesTheOriginalScriptTests(unittest.TestCase):
                     self.assertAlmostEqual(got, want, places=6)
 
     def test_the_documented_example_rounds_to_known_values(self):
-        self.assertEqual(example().rounded, ((177, 269, 901, 723), (414, 314, 703, 1269),
-                                             (488, 741, 276, 665), (258, 589, 658, 264)))
+        legacy = estimate_turning_movements(EXAMPLE_INFLOWS, EXAMPLE_OUTFLOWS, EXAMPLE_CLASSES, method="legacy")
+        self.assertEqual(legacy.rounded, ((177, 269, 901, 723), (414, 314, 703, 1269),
+                                          (488, 741, 276, 665), (258, 589, 658, 264)))
+
+    def test_the_ordered_method_gives_known_values_for_the_same_example(self):
+        self.assertEqual(example().rounded, ((32, 284, 974, 780), (355, 284, 703, 1358),
+                                             (654, 719, 274, 523), (316, 585, 616, 253)))
 
 
 class ResultShapeTests(unittest.TestCase):
@@ -100,11 +105,21 @@ class BalancingTests(unittest.TestCase):
 
 
 class ColumnGapTests(unittest.TestCase):
-    def test_the_method_can_miss_an_outflow_and_says_so(self):
-        result = estimate_turning_movements([300, 100], [100, 300], [[3, 1], [1, 3]], legs=("North", "South"))
+    def test_the_legacy_method_can_miss_an_outflow_and_says_so(self):
+        result = estimate_turning_movements([300, 100], [100, 300], [[3, 1], [1, 3]], legs=("North", "South"),
+                                            method="legacy")
         self.assertAlmostEqual(result.column_gaps[0] / result.outflows[0], 0.161, places=3)
         self.assertEqual(len(result.warnings), 2)
         self.assertIn("North", result.warnings[0])
+
+    def test_the_ordered_method_keeps_the_ratings_when_an_outflow_cannot_be_met(self):
+        # North sends 300 with High on its own leg and Low to South; South sends 100 with High on itself.
+        # Meeting the outflows (100 North, 300 South) would need the Low turn to carry more than the High one.
+        result = estimate_turning_movements([300, 100], [100, 300], [[3, 1], [1, 3]], legs=("North", "South"))
+        self.assertEqual(result.rounded, ((167, 133), (0, 100)))
+        self.assertEqual(len(result.warnings), 2)
+        self.assertIn("North", result.warnings[0])
+        self.assertIn("ratings were kept", result.warnings[0])
 
 
 class InvalidInputTests(unittest.TestCase):

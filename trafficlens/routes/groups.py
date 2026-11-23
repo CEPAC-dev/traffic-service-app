@@ -10,8 +10,39 @@ from trafficlens.db import db
 from trafficlens.runtime import flask_app
 from trafficlens.security.decorators import admin_required, login_required
 from trafficlens.services import catalog as catalog_svc, common as common_svc, exports as exports_svc, network_links as network_links_svc, notifications as notifications_svc, request_groups as request_groups_svc, volumes as volumes_svc
+from trafficlens.services import group_turning_movement as group_tm_svc, turning_movement as tm_calc
 
 bp = Blueprint("groups", __name__)
+
+
+def _map_links(children, option, include_c):
+    """One entry per link (not per period) for the order's single map."""
+    seen, links = set(), []
+    for child in children:
+        number = child["link_no"]
+        if number in seen:
+            continue
+        seen.add(number)
+        label = str(number)
+        if option and number <= group_tm_svc.LINK_COUNT:
+            leg = group_tm_svc.LEG_NAMES[(number - 1) // 2]
+            label = f"{number} · {leg} {'entry' if option['roles'][number - 1] == 'in' else 'exit'}"
+        item = {"no": number, "label": label, "path": child["path"], "coords": child["coords"]}
+        if include_c and child.get("point_c"):
+            item["point_c"] = child["point_c"]
+        links.append(item)
+    return links
+
+
+def _volume_children(children):
+    """What the Traffic volumes table needs about every request of the order."""
+    suggested = {row["request_id"]: row["suggested_lanes"] for row in db().execute(
+        "SELECT request_id, suggested_lanes FROM volumes_workflows WHERE request_id IN (%s)" % ",".join("?" * len(children)),
+        [child["id"] for child in children])} if children else {}
+    return [{"id": c["id"], "link_no": c["link_no"], "period": c["period_label"], "d1": c["d1"],
+             "start_time": c["start_time"], "end_time": c["end_time"], "coords": c["coords"], "point_c": c["point_c"],
+             "road_km": c["road_km"], "suggested_lanes": suggested.get(c["id"]) or None} for c in children]
+
 
 
 @bp.post("/api/request-groups")
@@ -55,6 +86,10 @@ def create_request_group():
         link, error = request_groups_svc._clean_group_link(raw, sv, number)
         if error: return jsonify(error=error), 400
         links.append(link)
+    tm_spec = None
+    if j.get("turning_movement"):
+        try: tm_spec = group_tm_svc.clean_spec(j["turning_movement"], mode, len(links), sv)
+        except group_tm_svc.GroupTurningError as exc: return jsonify(error=str(exc)), 400
     title = common_svc._clean_request_title(j.get("title"))
     now_day, total = dt.date.today().isoformat(), len(links) * len(periods)
     d = db()
@@ -64,6 +99,8 @@ def create_request_group():
             group_id = d.execute(
                 "INSERT INTO request_groups(user_id,title,created,study_date,services,mode) VALUES(?,?,?,?,?,?)",
                 (session["uid"], title, now_day, day, json.dumps(sv), mode)).lastrowid
+            if tm_spec:
+                group_tm_svc.create(group_id, tm_spec)
         request_ids = []
         for number, link in enumerate(links, start=1):
             for period in periods:
@@ -107,8 +144,12 @@ def client_group(gid):
     if session.get("role") == "admin":
         return redirect(url_for("groups.admin_group", gid=gid))
     row, children = request_groups_svc._load_group(gid, admin_view=False)
+    option = group_tm_svc.get(gid)
     return render_template("group.html", g=row, children=children, card=request_groups_svc._group_card(row), admin_view=False,
-                           ready=request_groups_svc._group_ready_to_send(children))
+                           ready=request_groups_svc._group_ready_to_send(children),
+                           tm=group_tm_svc.client_view(option), tm_leg_names=group_tm_svc.LEG_NAMES,
+                           turn_types=tm_calc.TURN_TYPES, turn_labels=tm_calc.TURN_LABELS,
+                           map_links=_map_links(children, option, False))
 
 
 @bp.get("/admin/groups/<int:gid>")
@@ -129,8 +170,36 @@ def admin_group(gid):
             owners.setdefault(c["link_no"], c["id"])
         if len(holders) > len(owners):
             shared.append({"service": name, "api_calls": len(owners), "without": len(holders), "owners": owners})
+    option = group_tm_svc.get(gid)
     return render_template("group.html", g=row, children=children, card=request_groups_svc._group_card(row), admin_view=True,
-                           ready=request_groups_svc._group_ready_to_send(children), matrix=matrix, period_order=period_order, shared=shared)
+                           ready=request_groups_svc._group_ready_to_send(children), matrix=matrix, period_order=period_order, shared=shared,
+                           tm=option, tm_overview=group_tm_svc.legs_overview(option, children) if option else None,
+                           tm_leg_names=group_tm_svc.LEG_NAMES, turn_types=tm_calc.TURN_TYPES, turn_labels=tm_calc.TURN_LABELS,
+                           map_links=_map_links(children, option, True),
+                           volume_children=_volume_children(children) if "volumes" in request_groups_svc._group_card(row)["services"] else None)
+
+
+@bp.post("/api/groups/<int:gid>/turning/calculate")
+@admin_required
+def calculate_group_turning(gid):
+    row, children = request_groups_svc._load_group(gid, admin_view=True)
+    j = request.get_json(force=True, silent=True) or {}
+    try:
+        option = group_tm_svc.calculate(gid, children, j.get("turn_classes"))
+    except group_tm_svc.GroupTurningError as exc:
+        return jsonify(error=str(exc)), 400
+    return jsonify(ok=True, status=option["status"], warnings=option["result"]["warnings"])
+
+
+@bp.post("/api/groups/<int:gid>/turning/approve")
+@admin_required
+def approve_group_turning(gid):
+    request_groups_svc._load_group(gid, admin_view=True)
+    try:
+        option = group_tm_svc.approve(gid)
+    except group_tm_svc.GroupTurningError as exc:
+        return jsonify(error=str(exc)), 400
+    return jsonify(ok=True, status=option["status"])
 
 
 @bp.post("/api/groups/<int:gid>/delete")
@@ -278,6 +347,19 @@ def export_group_excel(gid):
         for item in route_rows:
             routes.append(item)
         exports_svc._style_excel_sheet(routes)
+    tm_option = group_tm_svc.get(gid)
+    if tm_option and tm_option["result"] and (admin_view or tm_option["status"] == group_tm_svc.COMPLETED):
+        sheet = workbook.create_sheet("Turning Movement")
+        sheet.append(["From leg"] + [tm_calc.TURN_LABELS[k] for k in tm_calc.TURN_TYPES] + ["Total"])
+        for leg, movement in zip(group_tm_svc.LEG_NAMES, tm_option["result"]["movements"]):
+            values = [movement[k] for k in tm_calc.TURN_TYPES]
+            sheet.append([leg] + values + [sum(values)])
+        sheet.append([])
+        sheet.append(["Ratings (0 not allowed, 1 Low, 2 Medium, 3 High)"])
+        sheet.append(["From leg"] + [tm_calc.TURN_LABELS[k] for k in tm_calc.TURN_TYPES])
+        for leg, ratings in zip(group_tm_svc.LEG_NAMES, tm_option["turn_classes"]):
+            sheet.append([leg] + [ratings[k] for k in tm_calc.TURN_TYPES])
+        exports_svc._style_excel_sheet(sheet)
     output = io.BytesIO()
     workbook.save(output)
     output.seek(0)
