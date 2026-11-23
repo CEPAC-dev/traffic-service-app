@@ -101,6 +101,15 @@ class RequestGroupTests(unittest.TestCase):
         self.assertEqual(self.submit(client, links=[link(with_c=False)]).status_code, 400)   # travel needs point C
         self.assertEqual(self.submit(client, mode="bogus").status_code, 400)
 
+    def test_study_automatically_calculates_point_c_for_links_when_service_is_selected_later(self):
+        client = self.login(self.client_id, "client", "Group client")
+        response = client.get("/study")
+        self.assertEqual(response.status_code, 200)
+        page = response.get_data(as_text=True)
+        self.assertIn("Calculating point C automatically for the existing links.", page)
+        self.assertIn("calculatePointC(A, B, A.distanceTo(B) / 1000)", page)
+        self.assertNotIn("use Edit on the links added before you chose it", page)
+
     def test_client_sees_one_report_only_after_admin_sends_the_group(self):
         client = self.login(self.client_id, "client", "Group client")
         admin = self.login(self.admin_id, "admin", "Group admin")

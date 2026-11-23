@@ -114,6 +114,7 @@
   const PERIOD_LABELS = {{ period_labels|tojson }}, MAX_LINKS = {{ max_links }};
   const LINK_COLORS = ['#2563eb', '#9333ea', '#ea580c', '#0891b2', '#be185d', '#65a30d', '#b45309', '#4f46e5', '#0f766e', '#dc2626'];
   let pts = [], line = null, extensionLine = null, markerC = null, route = null, seq = 0;
+  let pointCRefreshPromise = null, pointCRefreshError = null;
   let mode = 'single', links = [], periodState = {}, editingIndex = null;
   PERIOD_LABELS.forEach(label => periodState[label] = { checked: false, start: '', end: '' });
   const map = L.map('map', { zoomControl: false }).setView([30.0444, 31.2357], 11); L.control.zoom({ position: 'bottomright' }).addTo(map); tiles(map); const rg = L.featureGroup().addTo(map); const savedGroup = L.featureGroup().addTo(map);
@@ -150,6 +151,7 @@
     svcCount.textContent = `${chosen} of ${boxes.length} selected`;
   }
   svcAll.onclick = () => {
+    pointCRefreshError = null;
     const boxes = serviceBoxes(), all = boxes.every(input => input.checked);
     boxes.forEach(input => { input.checked = !all; });
     updateSvcToggle(); solve();
@@ -280,7 +282,15 @@
     setDone('stepWhen', periodsValid() && !!d1.value);
     setDone('stepServices', selectedServices().length > 0);
     const pointCMissing = needsPointCForServices() && links.some(link => !link.pointC);
-    if (pointCMissing) orderSummary.textContent += ' A selected service needs point C: use Edit on the links added before you chose it.';
+    if (pointCMissing) {
+      if (pointCRefreshError) orderSummary.textContent += ` ${pointCRefreshError}`;
+      else {
+        orderSummary.textContent += pointCRefreshPromise
+          ? ' Calculating point C automatically for the existing links. Please wait.'
+          : ' Calculating point C automatically for the existing links.';
+        refreshSavedPointCs();
+      }
+    }
     ok.disabled = !(links.length && periodsValid() && d1.value && selectedServices().length && !pointCMissing && !unconfirmed);
   }
   function draw() {
@@ -355,6 +365,33 @@
       probeDistance *= 2;
     }
     throw new Error('Could not extend the routed road far enough beyond B to place point C.');
+  }
+  function refreshSavedPointCs() {
+    if (pointCRefreshPromise || pointCRefreshError || !needsPointCForServices()) return;
+    const missing = links.filter(link => !link.pointC);
+    if (!missing.length) return;
+    pointCRefreshPromise = (async () => {
+      for (const link of missing) {
+        if (!links.includes(link)) continue;
+        const linkNumber = links.indexOf(link) + 1;
+        try {
+          const A = L.latLng(link.coords[0][0], link.coords[0][1]);
+          const B = L.latLng(link.coords[1][0], link.coords[1][1]);
+          const computed = await calculatePointC(A, B, A.distanceTo(B) / 1000);
+          if (!links.includes(link)) continue;
+          link.pointC = [+computed.pointC[0].toFixed(6), +computed.pointC[1].toFixed(6)];
+          link.point_c_distance_km = computed.routeDistanceToC / 1000;
+        } catch (error) {
+          if (!links.includes(link)) continue;
+          pointCRefreshError = `Could not calculate point C automatically for Link ${linkNumber}: ${error.message || 'road routing is unavailable'}. Adjust its A/B points and reselect the service to retry.`;
+          return;
+        }
+      }
+    })().finally(() => {
+      pointCRefreshPromise = null;
+      renderLinks();
+      check();
+    });
   }
   async function solve() {
     route = null; acceptJunctionQuality.checked = false; updateCoordinates(); check(); draw();
@@ -455,7 +492,7 @@
     renderLinks(); renderPeriods(); check();
   });
   nj.onchange = check; acceptJunctionQuality.onchange = check; d1.onchange = check;
-  svl.onchange = () => { updateSvcToggle(); solve(); };
+  svl.onchange = () => { pointCRefreshError = null; updateSvcToggle(); solve(); };
   if (repeatRequest) {
     d1.value = repeatRequest.date; setDataInterval(repeatRequest.data_interval);
     const repeatLabel = PERIOD_LABELS.includes(repeatRequest.period_label) ? repeatRequest.period_label : PERIOD_LABELS[0];
