@@ -126,6 +126,11 @@ CREATE TABLE IF NOT EXISTS group_turning_movement(
   status TEXT NOT NULL DEFAULT 'Pending', result_json TEXT,
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL, approved_at TEXT
 );
+CREATE TABLE IF NOT EXISTS outscraper_job_reuse(
+  job_id TEXT PRIMARY KEY REFERENCES outscraper_jobs(id),
+  source_job_id TEXT NOT NULL, source_request_id INTEGER, request_id INTEGER NOT NULL,
+  kind TEXT NOT NULL, reused_by INTEGER, reused_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS periods(
   id INTEGER PRIMARY KEY, label TEXT NOT NULL UNIQUE,
   is_active INTEGER NOT NULL DEFAULT 1, sort_order INTEGER NOT NULL DEFAULT 0

@@ -170,6 +170,53 @@ test('a period that ends after midnight ends on the next day', () => {
   assert.deepStrictEqual(GV.defaultWindow({ d1: '2026-10-24', start_time: '22:00:00', end_time: '01:00:00' }), { start: '2026-10-24T22:00:00', end: '2026-10-25T01:00:00' });
 });
 
+
+const candidate = (id, job) => ({ source_job_id: job, source_request_id: id, source_window: '24 Oct 07:00 - 09:00' });
+
+test('findReuse lists candidates per link and treats a failed lookup as "none"', async () => {
+  const api = fakeApi({
+    'GET /api/requests/1/reuse-candidates': () => ok({ directions: [candidate(9, 'j9')], freeflow: [] }),
+    'GET /api/requests/2/reuse-candidates': () => bad('nope', 404),
+  });
+  const found = await GV.create(api.request).findReuse([children[0], children[1]]);
+  assert.strictEqual(found[1].directions[0].source_job_id, 'j9');
+  assert.deepStrictEqual(found[2], { directions: [], freeflow: [] });
+});
+
+test('split reuses nothing unless the admin chose it', () => {
+  const gv = GV.create(async () => bad('unused'));
+  const plan = { directions: [children[0], children[1]], freeflow: [children[0]] };
+  const found = { 1: { directions: [candidate(9, 'j9')], freeflow: [candidate(9, 'f9')] }, 2: { directions: [], freeflow: [] } };
+  const off = gv.split(plan, found, { speeds: false, freeflow: false });
+  assert.strictEqual(off.directionsReuse.length + off.freeflowReuse.length, 0);
+  assert.strictEqual(off.directionsSend.length, 2);
+  const on = gv.split(plan, found, { speeds: true, freeflow: true });
+  assert.deepStrictEqual(on.directionsReuse.map(c => c.id), [1]);
+  assert.deepStrictEqual(on.directionsSend.map(c => c.id), [2]);
+  assert.deepStrictEqual(on.freeflowReuse.map(c => c.id), [1]);
+  assert.strictEqual(on.freeflowSend.length, 0);
+});
+
+test('reuse posts the best earlier result of each link to the right endpoint and reports failures', async () => {
+  const api = fakeApi({
+    'POST /api/requests/1/directions/reuse': body => ok({ ok: true, echoed: body.source_job_id }),
+    'POST /api/requests/2/directions/reuse': () => bad('That earlier result can no longer be reused for this request.', 409),
+    'POST /api/requests/1/volumes/freeflow-reuse': () => ok({ ok: true }),
+  });
+  const gv = GV.create(api.request);
+  const found = { 1: { directions: [candidate(9, 'best'), candidate(8, 'other')], freeflow: [candidate(9, 'f9')] }, 2: { directions: [candidate(7, 'x')], freeflow: [] } };
+  const speeds = await gv.reuse([children[0], children[1]], 'directions', found);
+  assert.deepStrictEqual(speeds.map(r => [r.id, r.ok]), [[1, true], [2, false]]);
+  assert.strictEqual(speeds[0].source_request_id, 9);
+  assert.strictEqual(api.calls[0].body.source_job_id, 'best');
+  assert.match(speeds[1].error, /no longer be reused/);
+  const free = await gv.reuse([children[0]], 'freeflow', found);
+  assert.strictEqual(free[0].ok, true);
+  assert.strictEqual(api.calls[api.calls.length - 1].url, '/api/requests/1/volumes/freeflow-reuse');
+  const none = await gv.reuse([children[2]], 'directions', found);
+  assert.strictEqual(none[0].ok, false);
+});
+
 (async () => {
   let failed = 0;
   for (const [name, fn] of tests) {

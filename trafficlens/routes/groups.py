@@ -11,6 +11,7 @@ from trafficlens.runtime import flask_app
 from trafficlens.security.decorators import admin_required, login_required
 from trafficlens.services import catalog as catalog_svc, common as common_svc, exports as exports_svc, network_links as network_links_svc, notifications as notifications_svc, request_groups as request_groups_svc, volumes as volumes_svc
 from trafficlens.services import group_turning_movement as group_tm_svc, turning_movement as tm_calc
+from trafficlens.services import result_reuse as reuse_svc
 
 bp = Blueprint("groups", __name__)
 
@@ -176,6 +177,7 @@ def admin_group(gid):
                            tm=option, tm_overview=group_tm_svc.legs_overview(option, children) if option else None,
                            tm_leg_names=group_tm_svc.LEG_NAMES, turn_types=tm_calc.TURN_TYPES, turn_labels=tm_calc.TURN_LABELS,
                            map_links=_map_links(children, option, True),
+                           reuse_marks=reuse_svc.reuse_marks([c["id"] for c in children]),
                            volume_children=_volume_children(children) if "volumes" in request_groups_svc._group_card(row)["services"] else None)
 
 

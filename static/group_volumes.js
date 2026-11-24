@@ -185,7 +185,45 @@
       return { ok: results.every(r => r.ok), waiting: [], results };
     }
 
-    return { loadStates, refreshRunning, plan, sendDirections, sendFreeflow, saveLanes, approveAll };
+    /** Earlier completed API results each link could reuse. Only a list: the admin decides. */
+    async function findReuse(children) {
+      const found = {};
+      await Promise.all(children.map(async child => {
+        const response = await request('GET', `/api/requests/${child.id}/reuse-candidates`);
+        const data = response.ok ? response.data : {};
+        found[child.id] = { directions: data.directions || [], freeflow: data.freeflow || [] };
+      }));
+      return found;
+    }
+
+    async function reuse(children, kind, candidates) {
+      const path = kind === 'directions' ? 'directions/reuse' : 'volumes/freeflow-reuse';
+      const results = [];
+      for (const child of children) {
+        const best = ((candidates[child.id] || {})[kind] || [])[0];
+        if (!best) { results.push(fail(child, 'No earlier result fits this link.')); continue; }
+        const response = await request('POST', `/api/requests/${child.id}/${path}`, { source_job_id: best.source_job_id });
+        results.push(response.ok ? done(child, { source_request_id: best.source_request_id, kind }) : fail(child, failure(response, 'Could not reuse the earlier result.')));
+      }
+      return results;
+    }
+
+    /**
+     * Split a plan between "reuse an earlier result" and "send a new request".
+     * Nothing is reused unless the admin chose it (`choices.speeds` / `choices.freeflow`).
+     */
+    function split(plan, candidates, choices) {
+      const has = (child, kind) => ((candidates[child.id] || {})[kind] || []).length > 0;
+      const directionsReuse = choices.speeds ? plan.directions.filter(c => has(c, 'directions')) : [];
+      const freeflowReuse = choices.freeflow ? plan.freeflow.filter(c => has(c, 'freeflow')) : [];
+      return {
+        directionsReuse, freeflowReuse,
+        directionsSend: plan.directions.filter(c => !directionsReuse.includes(c)),
+        freeflowSend: plan.freeflow.filter(c => !freeflowReuse.includes(c)),
+      };
+    }
+
+    return { loadStates, refreshRunning, plan, sendDirections, sendFreeflow, saveLanes, approveAll, findReuse, reuse, split };
   }
 
   /** One short word per link for the table. */

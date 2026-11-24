@@ -9,6 +9,7 @@ from pathlib import Path
 from trafficlens.config import MAX_VOLUME_LANES, SERVICES
 from trafficlens.db import db
 from trafficlens.security.decorators import admin_required, login_required
+from trafficlens.services import result_reuse as reuse_svc
 from trafficlens.services import audit as audit_svc, catalog as catalog_svc, common as common_svc, directions as directions_svc, maintenance as maintenance_svc, notifications as notifications_svc, volumes as volumes_svc
 
 bp = Blueprint("volumes", __name__)
@@ -432,3 +433,36 @@ def confirm_volumes_result(rid):
         request_status="Completed" if all_services_ready else "Processing",
         result_url=url_for("client.result", rid=rid),
     )
+
+
+@bp.get("/api/requests/<int:rid>/reuse-candidates")
+@admin_required
+def reuse_candidates(rid):
+    """Earlier completed API results this request could reuse. Only a list: nothing is reused until the admin asks."""
+    try:
+        return jsonify(directions=reuse_svc.directions_candidates(rid), freeflow=reuse_svc.freeflow_candidates(rid))
+    except reuse_svc.ReuseError as exc:
+        return jsonify(error=str(exc)), 404
+
+
+def _reuse(rid, action):
+    payload = request.get_json(force=True, silent=True) or {}
+    source = payload.get("source_job_id")
+    if not isinstance(source, str) or not source:
+        return jsonify(error="Choose the earlier result to reuse."), 400
+    try:
+        return jsonify(ok=True, **action(rid, source, session["uid"]))
+    except reuse_svc.ReuseError as exc:
+        return jsonify(error=str(exc)), 409
+
+
+@bp.post("/api/requests/<int:rid>/directions/reuse")
+@admin_required
+def reuse_directions_result(rid):
+    return _reuse(rid, reuse_svc.reuse_directions)
+
+
+@bp.post("/api/requests/<int:rid>/volumes/freeflow-reuse")
+@admin_required
+def reuse_freeflow_result(rid):
+    return _reuse(rid, reuse_svc.reuse_freeflow)

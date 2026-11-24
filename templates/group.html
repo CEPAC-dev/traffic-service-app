@@ -74,7 +74,8 @@ document.getElementById('tmApprove')?.addEventListener('click',e=>{if(confirm('R
   const by=Object.fromEntries(states.map(s=>[s.id,s]));
   tbody.innerHTML=children.map(c=>{const s=by[c.id]||{},st=GroupVolumes.stage(s),locked=s.volumes&&['running','ready_for_review','sent'].includes(s.volumes.status);
    const lanes=typed[c.id]!==undefined?typed[c.id]:((s.volumes&&s.volumes.lanes)||c.suggested_lanes||'');
-   const note=s.volumes&&s.volumes.error?`<small class="request-subtext">${esc(s.volumes.error)}</small>`:'';
+   const mk=Object.assign({},initialReuse[c.id]||{},reusedNow[c.id]||{}),reusedNote=Object.keys(mk).length?`<small class="request-subtext">Reused: ${[mk.directions?'speeds from REQ-'+mk.directions:'',mk.freeflow?'free-flow from REQ-'+mk.freeflow:''].filter(Boolean).join(', ')}</small>`:'';
+   const note=reusedNote+(s.volumes&&s.volumes.error?`<small class="request-subtext">${esc(s.volumes.error)}</small>`:'');
    const v=volumeOf(s);
    return `<tr><td><b>Link ${c.link_no}</b></td><td>${esc(c.period)}</td><td><input type="number" min="1" max="12" step="1" style="width:76px" data-lanes="${c.id}" value="${esc(lanes)}" ${locked?'disabled':''} aria-label="Lanes of link ${c.link_no}"></td><td><span class="b ${st.tone==='good'?'Completed':st.tone==='bad'?'Rejected':'Processing'}">${esc(st.label)}</span>${note}</td><td>${v===null?'-':v.toLocaleString()}</td><td><a class="btn btn-small" href="/admin/requests/${c.id}#svc-volumes">Details</a></td></tr>`}).join('');
   tbody.querySelectorAll('[data-lanes]').forEach(i=>i.oninput=()=>{typed[i.dataset.lanes]=i.value});
@@ -86,19 +87,43 @@ document.getElementById('tmApprove')?.addEventListener('click',e=>{if(confirm('R
  async function poll(){if(busy)return;busy=true;try{states=await gv.loadStates(children);render();if(Date.now()-lastRefresh>15000){lastRefresh=Date.now();if(await gv.refreshRunning(states))setTimeout(poll,800)}}finally{busy=false}}
  const say=t=>{$('gvMsg').textContent=t};
  const report=(label,results)=>{const bad=results.filter(r=>!r.ok);say(bad.length?`${label}: ${results.length-bad.length} done, ${bad.length} failed. `+bad.map(r=>`Link ${(children.find(c=>c.id===r.id)||{}).link_no}: ${r.error}`).join(' · '):`${label}: ${results.length} done.`)};
+ let reuseFound={},reuseChoice={speeds:false,freeflow:false};const reusedNow={};
+ const initialReuse={{ (reuse_marks or {})|tojson }};
+ const reuseText=(c,kind)=>{const best=((reuseFound[c.id]||{})[kind]||[])[0];return best?`can reuse REQ-${best.source_request_id}`+(kind==='directions'?` (${esc(best.source_window)})`:''):''};
+ function drawPlan(){
+  const plan=gv.plan(children,states),parts=gv.split(plan,reuseFound,reuseChoice);
+  $('gvPlanRows').innerHTML=children.map(c=>{
+   const d=plan.directions.includes(c)?(parts.directionsReuse.includes(c)?`<b>reuse</b> REQ-${((reuseFound[c.id].directions||[])[0]||{}).source_request_id}`:'will send'+(reuseText(c,'directions')?` <small class="request-subtext">${reuseText(c,'directions')}</small>`:'')):'already sent';
+   const f=plan.freeflow.includes(c)?(parts.freeflowReuse.includes(c)?`<b>reuse</b> REQ-${((reuseFound[c.id].freeflow||[])[0]||{}).source_request_id}`:'will send'+(reuseText(c,'freeflow')?` <small class="request-subtext">${reuseText(c,'freeflow')}</small>`:'')):'already sent / accepted';
+   return `<tr><td>Link ${c.link_no}</td><td>${esc(c.period)}</td><td>${d}</td><td>${f}</td></tr>`}).join('');
+  const send=parts.directionsSend.length+parts.freeflowSend.length,reused=parts.directionsReuse.length+parts.freeflowReuse.length;
+  $('gvPlanText').textContent=`${parts.directionsSend.length} speed request(s) and ${parts.freeflowSend.length} free-flow request(s) will be sent to the Directions API`+(reused?`; ${reused} earlier result(s) will be reused without calling it.`:'.');
+  $('gvCostRow').hidden=send===0;$('gvConfirmSend').disabled=send>0&&!$('gvCostAck').checked;
+ }
  $('gvSendApi').onclick=async()=>{
   const plan=gv.plan(children,states);
   if(!plan.directions.length&&!plan.freeflow.length){say('Nothing to send: every link already has its speed and free-flow requests.');return}
-  const rows=children.map(c=>`<tr><td>Link ${c.link_no}</td><td>${esc(c.period)}</td><td>${plan.directions.includes(c)?'will send':'already sent'}</td><td>${plan.freeflow.includes(c)?'will send':'already sent / accepted'}</td></tr>`);
-  $('gvPlanRows').innerHTML=rows.join('');
-  $('gvPlanText').textContent=`${plan.directions.length} speed request(s) and ${plan.freeflow.length} free-flow request(s) will be sent to the Directions API.`;
-  $('gvCostAck').checked=false;$('gvConfirmSend').disabled=true;$('gvDialog').showModal();
+  say('Looking for earlier results that could be reused...');reuseFound=await gv.findReuse(children);say('');
+  reuseChoice={speeds:false,freeflow:false};$('gvReuseSpeeds').checked=false;$('gvReuseFreeflow').checked=false;
+  const nSpeeds=plan.directions.filter(c=>(reuseFound[c.id].directions||[]).length).length,nFree=plan.freeflow.filter(c=>(reuseFound[c.id].freeflow||[]).length).length;
+  $('gvReuseSpeedsCount').textContent=nSpeeds;$('gvReuseFreeflowCount').textContent=nFree;
+  $('gvReuseSpeeds').parentElement.hidden=!nSpeeds;$('gvReuseFreeflow').parentElement.hidden=!nFree;$('gvReuse').hidden=!(nSpeeds||nFree);
+  $('gvCostAck').checked=false;drawPlan();$('gvDialog').showModal();
  };
- $('gvCostAck').onchange=()=>{$('gvConfirmSend').disabled=!$('gvCostAck').checked};
+ $('gvReuseSpeeds').onchange=()=>{reuseChoice.speeds=$('gvReuseSpeeds').checked;drawPlan()};
+ $('gvReuseFreeflow').onchange=()=>{reuseChoice.freeflow=$('gvReuseFreeflow').checked;drawPlan()};
+ $('gvCostAck').onchange=()=>drawPlan();
  $('gvCancelSend').onclick=()=>$('gvDialog').close();
  $('gvConfirmSend').onclick=async()=>{
-  $('gvConfirmSend').disabled=true;const plan=gv.plan(children,states);$('gvDialog').close();busy=true;say('Sending the speed requests...');
-  try{const a=await gv.sendDirections(plan.directions);say('Sending the free-flow requests...');const f=await gv.sendFreeflow(plan.freeflow);report('API requests',a.concat(f))}finally{busy=false}
+  $('gvConfirmSend').disabled=true;const parts=gv.split(gv.plan(children,states),reuseFound,reuseChoice);$('gvDialog').close();busy=true;
+  try{
+   const all=[];
+   if(parts.directionsReuse.length){say('Reusing the earlier speeds...');const r=await gv.reuse(parts.directionsReuse,'directions',reuseFound);r.filter(x=>x.ok).forEach(x=>{reusedNow[x.id]=Object.assign(reusedNow[x.id]||{},{directions:x.source_request_id})});all.push(...r)}
+   if(parts.directionsSend.length){say('Sending the speed requests...');all.push(...await gv.sendDirections(parts.directionsSend))}
+   if(parts.freeflowReuse.length){say('Reusing the earlier free-flow speeds...');const r=await gv.reuse(parts.freeflowReuse,'freeflow',reuseFound);r.filter(x=>x.ok).forEach(x=>{reusedNow[x.id]=Object.assign(reusedNow[x.id]||{},{freeflow:x.source_request_id})});all.push(...r)}
+   if(parts.freeflowSend.length){say('Sending the free-flow requests...');all.push(...await gv.sendFreeflow(parts.freeflowSend))}
+   report('API requests',all);
+  }finally{busy=false}
   poll();
  };
  $('gvSaveLanes').onclick=async()=>{

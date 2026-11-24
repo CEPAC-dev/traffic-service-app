@@ -101,6 +101,14 @@ class GroupVolumesPageTests(unittest.TestCase):
         for text in ("id=\"panelVolumes\"", "gvSendApi", "group_volumes.js"):
             self.assertNotIn(text, html)
 
+    def test_the_dialog_offers_reuse_but_never_ticks_it_for_the_admin(self):
+        gid = self.order()
+        html = self.admin.get(f"/admin/groups/{gid}").get_data(as_text=True)
+        for text in ('id="gvReuseSpeeds"', 'id="gvReuseFreeflow"', "Earlier results can be reused"):
+            self.assertIn(text, html)
+        self.assertNotIn('id="gvReuseSpeeds" checked', html)
+        self.assertNotIn('id="gvReuseFreeflow" checked', html)
+
     def test_an_order_without_volumes_has_no_volumes_tab(self):
         gid = self.order(services=("length",))
         html = self.admin.get(f"/admin/groups/{gid}").get_data(as_text=True)

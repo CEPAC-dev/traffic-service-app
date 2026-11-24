@@ -61,6 +61,9 @@ MAX_GROUP_LINKS = 10
 GROUP_MODES = ("single", "multi_period", "multi_link")
 
 AUDIT_LABELS = {
+    "api_result_reused": "Reused an earlier API result",
+    "group_turning_movement_calculated": "Turning movements calculated",
+    "group_turning_movement_approved": "Turning movements approved",
     "request_saved": "Request saved",
     "status_changed": "Status changed",
     "service_saved": "Service value saved",

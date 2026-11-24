@@ -15,6 +15,11 @@
   <p id="gvPlanText"></p>
   <div class="tw"><table><thead><tr><th>Link</th><th>Period</th><th>Speeds</th><th>Free-flow</th></tr></thead><tbody id="gvPlanRows"></tbody></table></div>
   <p class="hint">The speed request uses each link's period (A → C route, local time zone). The free-flow request uses the weekly weekend reference. Nothing was sent yet.</p>
-  <label class="cf"><input type="checkbox" id="gvCostAck"> I understand the estimated cost is unknown. Each route and time point is billed separately.</label>
+  <div id="gvReuse" hidden>
+    <p><b>Earlier results can be reused.</b> A reused result does not call the paid API. It is checked again for each link: the speeds are read from the earlier route data for this link's own period, and the free-flow speed is still compared with this link's own actual speed. This choice applies to every link that has a matching earlier result.</p>
+    <label class="cf"><input type="checkbox" id="gvReuseSpeeds"> Reuse the earlier speeds for <span id="gvReuseSpeedsCount">0</span> link(s)</label>
+    <label class="cf"><input type="checkbox" id="gvReuseFreeflow"> Reuse the earlier free-flow speed for <span id="gvReuseFreeflowCount">0</span> link(s)</label>
+  </div>
+  <label class="cf" id="gvCostRow"><input type="checkbox" id="gvCostAck"> I understand the estimated cost is unknown. Each route and time point is billed separately.</label>
   <div class="row-actions"><button class="btn" id="gvConfirmSend" type="button" disabled>Send requests</button><button class="btn alt" id="gvCancelSend" type="button">Cancel</button></div>
 </dialog>
