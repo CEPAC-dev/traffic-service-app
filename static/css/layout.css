@@ -1,0 +1,120 @@
+/* TrafficLens layout layer — loaded after style.css.
+   One 12-column grid, one page container, one rhythm (4px grid), mobile-first fixes. */
+
+/* ---------- Page container & rhythm ---------- */
+.app-content,.public-content{width:100%;max-width:var(--page-max);margin-inline:auto;padding:var(--sp-6) var(--gutter) var(--sp-12)}
+.public-content{padding-top:var(--sp-8)}
+.app-shell{--sidebar-width:var(--sidebar-w)}
+.topbar{min-height:var(--topbar-h);padding-block:var(--sp-2);padding-inline:var(--gutter)}
+.page-heading,.profile-page-heading{margin:0 0 var(--sp-6);align-items:flex-end}
+.page-heading h1,.profile-page-heading h1,.wb-head h1{font-size:var(--fs-2xl);line-height:1.2;letter-spacing:-.02em}
+.page-heading p,.profile-page-heading p,.wb-head p{max-width:72ch}
+.section-heading{margin:var(--sp-8) 0 var(--sp-4)}
+.section-heading h2{font-size:var(--fs-lg);line-height:1.3}
+.card h3,.chart-card h3{font-size:var(--fs-md);line-height:1.35}
+section+section,.dashboard-section{margin-top:var(--sp-8)}
+.flash{margin:0 0 var(--sp-4)}
+@media(max-width:768px){
+  .page-heading h1,.profile-page-heading h1,.wb-head h1{font-size:var(--fs-xl)}
+  .section-heading{margin:var(--sp-6) 0 var(--sp-3)}
+  .page-heading,.profile-page-heading{align-items:stretch}
+}
+
+/* ---------- The grid ---------- */
+.grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:var(--gap);align-items:stretch}
+.grid>*{min-width:0;grid-column:span 12}
+@media(min-width:769px){
+  .col-3{grid-column:span 3}.col-4{grid-column:span 4}.col-5{grid-column:span 5}.col-6{grid-column:span 6}
+  .col-7{grid-column:span 7}.col-8{grid-column:span 8}.col-9{grid-column:span 9}.col-12{grid-column:span 12}
+}
+@media(min-width:769px) and (max-width:1100px){.grid>.col-3,.grid>.col-4{grid-column:span 6}.grid>.col-5,.grid>.col-7,.grid>.col-8,.grid>.col-9{grid-column:span 12}}
+
+/* Every legacy multi-card container now follows the same rules: same gap, equal-height cards, no overflow. */
+.kpis,.steps,.dashboard-service-grid,.svedit{display:grid;gap:var(--gap);align-items:stretch;margin-inline:0}
+.kpis{grid-template-columns:repeat(auto-fit,minmax(min(100%,144px),1fr));margin-block:var(--sp-4) 0}
+.steps,.dashboard-service-grid{grid-template-columns:repeat(auto-fill,minmax(min(100%,264px),1fr))}
+.svedit{grid-template-columns:repeat(auto-fill,minmax(min(100%,320px),1fr))}
+.grid2,.profile-grid,.request-detail-grid,.dashboard-charts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--gap);align-items:stretch}
+.dashboard-request-list,.notification-list{display:grid;gap:var(--sp-3)}
+.kpis>*,.steps>*,.dashboard-service-grid>*,.svedit>*,.grid2>*,.profile-grid>*,.request-detail-grid>*,.dashboard-charts>*{min-width:0}
+.kpi{min-height:128px}
+@media(max-width:768px){
+  .grid2,.profile-grid,.request-detail-grid,.dashboard-charts{grid-template-columns:minmax(0,1fr)}
+  .kpi{min-height:112px}
+}
+
+/* Workbench / study page: map + panel */
+.workbench,.study{display:grid;grid-template-columns:minmax(0,1fr) minmax(344px,416px);gap:var(--sp-5);align-items:start}
+.wb-map{top:calc(var(--topbar-h) + var(--sp-4));height:calc(100vh - var(--topbar-h) - var(--sp-8) - var(--sp-12));min-height:480px}
+@media(max-width:1100px){
+  .workbench,.study{grid-template-columns:minmax(0,1fr)}
+  .wb-map{position:relative;top:0;height:56vh;min-height:360px}
+}
+
+/* Filters: 12-col on desktop, 2-up on tablet, stacked on phones */
+.request-filters{grid-template-columns:repeat(12,minmax(0,1fr));gap:var(--sp-3)}
+.request-filters>*{grid-column:span 3}.request-filters>:first-child{grid-column:span 4}.request-filters>.btn{grid-column:span 2}
+@media(max-width:1100px){.request-filters>*,.request-filters>:first-child{grid-column:span 6}.request-filters>.btn{grid-column:span 12}}
+@media(max-width:480px){.request-filters>*,.request-filters>:first-child,.request-filters>.btn{grid-column:span 12}}
+.request-toolbar .bar{display:grid;grid-template-columns:minmax(0,2fr) repeat(3,minmax(0,1fr)) auto;gap:var(--sp-3);width:100%}
+.request-toolbar .bar>*{width:100%;min-width:0}
+.request-toolbar{flex-direction:column;align-items:stretch;gap:var(--sp-2)}
+@media(max-width:1100px){.request-toolbar .bar{grid-template-columns:repeat(2,minmax(0,1fr))}.request-toolbar .bar>input[type=search]{grid-column:1/-1}}
+@media(max-width:480px){.request-toolbar .bar{grid-template-columns:minmax(0,1fr)}}
+
+/* ---------- Tables: scroll on desktop, cards on phones ---------- */
+.tw table.table-stack{min-width:880px}
+@media(max-width:768px){
+  .tw:has(>table.table-stack){border:0;background:transparent;box-shadow:none;overflow:visible}
+  .tw table.table-stack{min-width:0;border:0;background:transparent}
+  .table-stack,.table-stack tbody,.table-stack tr,.table-stack td{display:block;width:100%}
+  .table-stack thead{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+  .table-stack tr{margin:0 0 var(--sp-3);padding:var(--sp-1) var(--sp-4);border:1px solid var(--line);border-radius:var(--r-lg);background:var(--surface);box-shadow:var(--shadow)}
+  .table-stack tr[hidden]{display:none}
+  .table-stack td{display:block;padding:var(--sp-3) 0;border:0;border-bottom:1px solid var(--line-soft);text-align:left}
+  .table-stack td:last-child{border-bottom:0}
+  .table-stack td::before{content:attr(data-label);display:block;margin-bottom:var(--sp-1);color:var(--mut);font-size:var(--fs-xs);font-weight:700;line-height:1.4}
+  .table-stack td[colspan]::before,.table-stack td:not([data-label])::before{content:none}
+  .table-stack tbody tr:hover td{background:transparent}
+  .table-stack .request-data-cell{max-width:none}
+  .table-stack .row-actions{flex-direction:row;flex-wrap:wrap}
+  .table-stack .row-actions .btn{width:auto;flex:1 1 auto}
+}
+
+/* ---------- Sidebar: collapsed state without font-size hacks ---------- */
+.side-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sidebar-collapsed .side-text,.sidebar-collapsed .sidebar-label,.sidebar-collapsed .side-subnav,.sidebar-collapsed .sidebar-brand>span:last-child{display:none}
+.sidebar-collapsed .side-link{justify-content:center;gap:0;padding-inline:0;font-size:var(--fs-sm)}
+.sidebar-collapsed .side-icon{font-size:18px}
+.sidebar-collapsed .sidebar-logout{font-size:var(--fs-sm)}
+.sidebar-label{font-size:var(--fs-xs)}
+.side-link,.side-subnav a{min-height:var(--tap)}
+.side-subnav a{min-height:36px}
+
+/* ---------- Forms & touch targets ---------- */
+input,select,textarea{min-height:40px}
+textarea{min-height:96px}
+input[type=checkbox],input[type=radio]{min-height:0}
+.btn{min-height:40px}.btn-small{min-height:36px}
+@media(pointer:coarse){.btn,.btn-small,input:not([type=checkbox]):not([type=radio]),select{min-height:var(--tap)}}
+@media(max-width:768px){input,select,textarea{font-size:16px}} /* stops iOS zooming into fields */
+
+/* ---------- Spacing utilities (replace inline style="") ---------- */
+.m-0{margin:0}.mt-1{margin-top:var(--sp-1)}.mt-2{margin-top:var(--sp-2)}.mt-3{margin-top:var(--sp-3)}.mt-4{margin-top:var(--sp-4)}.mt-6{margin-top:var(--sp-6)}.mt-8{margin-top:var(--sp-8)}
+.mb-3{margin-bottom:var(--sp-3)}.mb-4{margin-bottom:var(--sp-4)}.my-3{margin-block:var(--sp-3)}
+.text-center{text-align:center}.text-left{text-align:left}.w-full{width:100%}
+.text-muted{color:var(--mut)}.fs-sm{font-size:var(--fs-sm)}.fs-base{font-size:var(--fs-base)}.fw-normal{font-weight:400}
+.row-wrap{display:flex;flex-wrap:wrap;align-items:center;gap:var(--sp-3)}
+.link-accent{color:var(--teal-strong)}
+.map-md{height:300px}
+.tip.text-left,.tip.mt-3{text-align:left}
+
+/* ---------- Motion ---------- */
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;transition-duration:.01ms!important;scroll-behavior:auto!important}}
+.field-narrow{max-width:240px}
+
+/* A table that lives inside a card: the card is the frame, not the table */
+.table-card{padding:0;overflow:hidden}
+.table-card>.tw{border:0;border-radius:0;box-shadow:none}
+.table-card>.tw table{border-radius:0}
+@media(max-width:768px){.table-card{padding:0;border:0;background:transparent;box-shadow:none;overflow:visible}}

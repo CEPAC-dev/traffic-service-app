@@ -1,0 +1,41 @@
+/* TrafficLens design tokens — the single source of truth for spacing, type, radius, color and layout.
+   Rule of thumb: every spacing value is a multiple of 4px; never write a raw hex outside this file. */
+:root{
+  /* Brand palette (unchanged identity): Deep Navy / Teal / Pale Mint / Cool Gray / Amber */
+  --navy:#102A43; --navy-2:#12495A; --navy-deep:#0B1F33;
+  --teal:#0D9488; --teal-strong:#0F766E; --teal-hover:#115E59;
+  --mint:#E8F5F2; --mint-soft:#F1F8F6; --mint-line:#A7D8CF;
+  --amber:#F59E0B; --amber-hover:#D97706; --amber-soft:#FEF3C7; --amber-tint:#FFFBEB; --amber-text:#92400E;
+
+  /* Neutrals */
+  --bg:#F4F7FB; --bg-strong:#EDF2F7; --surface:#FFFFFF; --surface-2:#F8FAFC;
+  --line:#D9E2EC; --line-soft:#E8EEF4;
+  --txt:#243B53; --mut:#486581; --faint:#9FB3C8;
+
+  /* Status (semantic) */
+  --success:#16A34A; --success-soft:#DCFCE7; --success-text:#166534;
+  --info:#2563EB;    --info-soft:#DBEAFE;    --info-text:#1E40AF;
+  --danger:#DC2626;  --danger-hover:#B91C1C; --danger-soft:#FEE2E2; --danger-text:#991B1B;
+
+  /* Spacing: 4px grid */
+  --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-5:20px; --sp-6:24px; --sp-8:32px; --sp-12:48px;
+
+  /* Radius: 4 steps + pill */
+  --r-xs:6px; --r-sm:8px; --r-md:12px; --r-lg:16px; --radius:var(--r-lg);
+
+  /* Type scale */
+  --fs-xs:12px; --fs-sm:13px; --fs-base:14px; --fs-md:16px; --fs-lg:20px; --fs-xl:24px; --fs-2xl:28px; --fs-3xl:34px;
+
+  /* Elevation */
+  --shadow:0 1px 2px rgba(16,42,67,.04),0 8px 24px rgba(16,42,67,.06);
+  --shadow-pop:0 12px 32px rgba(16,42,67,.16);
+  --focus-ring:0 0 0 3px rgba(13,148,136,.28);
+
+  /* Layout */
+  --page-max:1360px; --gutter:var(--sp-6); --gap:var(--sp-4);
+  --sidebar-w:256px; --topbar-h:64px; --tap:44px;
+
+  /* Legacy aliases kept so old templates don't break (do not use in new code) */
+  --blue:var(--teal-strong); --navy2:var(--teal-strong); --cyan:var(--amber); --gray:var(--bg); --green:var(--success);
+}
+@media(max-width:768px){:root{--gutter:var(--sp-4);--gap:var(--sp-3)}}
